@@ -1,0 +1,427 @@
+{% extends "base.html" %}
+
+{% block title %}店长业绩 - 耍牌系统{% endblock %}
+
+{% block breadcrumb %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 店长业绩
+{% endblock %}
+
+{% block content %}
+<style>
+  .performance-table {
+    font-size: 13px;
+    min-width: max-content;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+
+  .performance-table th,
+  .performance-table td {
+    text-align: center;
+    vertical-align: middle;
+    white-space: nowrap;
+    padding: 6px 8px;
+    border: 1px solid #dbe3ef;
+  }
+
+  .performance-card-wrap {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .performance-table-wrap {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: visible;
+  }
+
+  /* ===== 固定列基础样式 ===== */
+  .performance-table .sticky-col {
+    position: sticky;
+    background: #fff;
+  }
+
+  /* 第一列：姓名 */
+  .performance-table .sticky-name {
+    left: 0;
+    z-index: 30;
+    min-width: 90px;
+    font-weight: bold;
+    color: #0d6efd;
+    background: #eaf3ff;
+  }
+
+  /* 第二列：日期 */
+  .performance-table .sticky-metric {
+    left: 90px;   /* 要和姓名列宽度一致 */
+    z-index: 29;
+    min-width: 90px;
+    font-weight: bold;
+    background: #f3f7ff;
+  }
+
+  /* 第三列：星期 */
+  .performance-table .sticky-weekday {
+    left: 180px;  /* = 姓名列90 + 日期列90 */
+    z-index: 28;
+    min-width: 70px;
+    background: #ffffff;
+  }
+
+  /* 表头固定列层级更高 */
+  .performance-table thead .sticky-name {
+    z-index: 40;
+    background: #eef5ff;
+  }
+
+  .performance-table thead .sticky-metric,
+  .performance-table thead .sticky-weekday {
+    z-index: 39;
+    background: #f8f9fa;
+  }
+
+  /* 分类颜色：姓名 */
+  .performance-table .name-cell {
+   background: #eaf3ff;
+  }
+
+  /* 分类颜色：班次 */
+  .performance-table .shift-row-label,
+  .performance-table .shift-cell {
+    background: rgba(111, 66, 193, 0.08);
+  }
+
+  /* 分类颜色：销售订单 */
+  .performance-table .orders-row-label,
+  .performance-table .orders-cell {
+    background: rgba(25, 135, 84, 0.08);
+  }
+
+  /* 分类颜色：代客收款金额 */
+  .performance-table .pay-row-label,
+  .performance-table .pay-cell {
+    background: rgba(255, 193, 7, 0.12);
+  }
+
+  /* 汇总列颜色 */
+  .performance-table .total-col {
+    background: rgba(13, 110, 253, 0.10);
+    font-weight: bold;
+    color: #0d6efd;
+  }
+
+  /* 大标题行 */
+  .summary-title-row th {
+    background: #f3f7ff;
+    color: #0d6efd;
+    font-size: 18px;
+    font-weight: bold;
+  }
+
+  .day-head {
+    min-width: 64px;
+  }
+
+  /* 固定列阴影，便于和滚动区域分层 */
+  .performance-table .sticky-name,
+  .performance-table .sticky-metric,
+  .performance-table .sticky-weekday {
+    box-shadow: 1px 0 0 #dbe3ef;
+  }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div class="d-flex align-items-center gap-2 flex-wrap">
+    <!-- 当前展示 -->
+    <label class="fw-bold text-secondary">当前展示：</label>
+    <select id="displayModeSelect" class="form-select" style="width: 150px;">
+      {% for val, label in display_options %}
+      <option value="{{ val }}" {% if val == display_mode %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+
+    <!-- 当前门店：仅“月度总结”展示时显示 -->
+    {% if display_mode == "monthly_summary" %}
+      <label class="ms-3 fw-bold text-secondary">当前门店：</label>
+      <div class="dropdown">
+        <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">
+          {{ current_store }}
+        </button>
+        <ul class="dropdown-menu">
+          {% for store_name in store_list %}
+          <li>
+            <a class="dropdown-item {% if store_name == current_store %}active{% endif %}"
+               href="/manager-performance?store={{ store_name }}&year={{ year }}&month={{ month }}&display_mode={{ display_mode }}">
+              {{ store_name }}
+            </a>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+
+    <!-- 年月 -->
+    <label class="ms-3 fw-bold text-secondary">月份：</label>
+    <select id="yearSelect" class="form-select" style="width: 120px;">
+      {% for y in year_options %}
+      <option value="{{ y }}" {% if y == year %}selected{% endif %}>{{ y }}年</option>
+      {% endfor %}
+    </select>
+
+    <select id="monthSelect" class="form-select" style="width: 90px;">
+      {% for mm in range(1, 13) %}
+      <option value="{{ mm }}" {% if mm == month %}selected{% endif %}>{{ mm }}月</option>
+      {% endfor %}
+    </select>
+
+    <button id="applyBtn" class="btn btn-primary">查询</button>
+  </div>
+</div>
+
+{% if display_mode == "monthly_summary" %}
+  <!-- ================== 月度总结（保留原三张图） ================== -->
+  <div class="row g-3">
+    <!-- 1) 本月组齐桌数 -->
+    <div class="col-12">
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="fw-bold">本月组齐桌数</div>
+            <div class="text-secondary">总计：<span class="fw-bold">{{ monthly_stats.totals.tables }}</span> 桌</div>
+          </div>
+          <div style="height: 260px;">
+            <canvas id="tablesChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2) 本月代客收款金额 -->
+    <div class="col-12">
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="fw-bold">本月代客收款金额</div>
+            <div class="text-secondary">总计：<span class="fw-bold">{{ "%.2f"|format(monthly_stats.totals.pay_amounts) }}</span></div>
+          </div>
+          <div style="height: 260px;">
+            <canvas id="payChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3) 本月代客验券金额 -->
+    <div class="col-12">
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="fw-bold">本月代客验券金额</div>
+            <div class="text-secondary">总计：<span class="fw-bold">{{ "%.2f"|format(monthly_stats.totals.verify_amounts) }}</span></div>
+          </div>
+          <div style="height: 260px;">
+            <canvas id="verifyChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+{% elif display_mode == "shift_performance" %}
+  <!-- ================== 各班次业绩（新增） ================== -->
+
+  <!-- 上半部分：各店长逐日业绩 -->
+  <div class="card shadow-sm mb-4 performance-card-wrap">
+    <div class="card-body">
+      <div class="table-responsive performance-card-wrap">
+        <table class="table table-bordered performance-table">
+          <thead class="table-light">
+            <tr class="summary-title-row">
+              <th colspan="{{ 3 + shift_stats.day_list|length }}">耍牌绩效考核表</th>
+            </tr>
+            <tr>
+              <th class="sticky-col sticky-name name-cell">姓名</th>
+              <th class="sticky-col sticky-metric">日期</th>
+              {% for d in shift_stats.day_list %}
+                <th class="day-head">{{ d.day }}</th>
+              {% endfor %}
+              <th class="day-head">汇总</th>
+            </tr>
+            <tr>
+              <th class="sticky-col sticky-name name-cell"></th>
+              <th class="sticky-col sticky-metric"></th>
+              {% for d in shift_stats.day_list %}
+                <th class="day-head text-primary">
+                  {% set weekday_map = ["星期一","星期二","星期三","星期四","星期五","星期六","星期日"] %}
+                  {{ weekday_map[d.weekday()] }}
+                </th>
+              {% endfor %}
+              <th class="day-head text-primary">本月合计</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in shift_stats.operator_rows %}
+              {% set ns = namespace(total_orders=0, total_pay=0.0) %}
+
+              <tr>
+                <td class="sticky-col sticky-name name-cell" rowspan="3">{{ row.name }}</td>
+                <td class="sticky-col sticky-metric shift-row-label"  style="background: #f3f7ff">班次</td>
+                {% for item in row.daily %}
+                  <td class="shift-cell">{{ shift_label.get(item.shift_type, "休息") }}</td>
+                {% endfor %}
+                <td class="total-col">-</td>
+              </tr>
+
+              <tr>
+                <td class="sticky-col sticky-metric orders-row-label"  style="background: #f3f7ff">销售订单</td>
+                {% for item in row.daily %}
+                  {% set ns.total_orders = ns.total_orders + item.orders %}
+                  <td class="orders-cell">{{ item.orders }}</td>
+                {% endfor %}
+                <td class="total-col">{{ ns.total_orders }}</td>
+              </tr>
+
+              <tr>
+                <td class="sticky-col sticky-metric pay-row-label"  style="background: #f3f7ff">代客收款金额</td>
+                {% for item in row.daily %}
+                  {% set ns.total_pay = ns.total_pay + item.pay_amount %}
+                  <td class="pay-cell">{{ "%.2f"|format(item.pay_amount) }}</td>
+                {% endfor %}
+                <td class="total-col">{{ "%.2f"|format(ns.total_pay) }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- 下半部分：各班次业绩汇总 -->
+  <div class="card shadow-sm performance-card-wrap" >
+    <div class="card-body">
+      <div class="table-responsive performance-card-wrap">
+        <table class="table table-bordered performance-table">
+          <thead class="table-light">
+            <tr class="summary-title-row">
+              <th colspan="{{ 3 + shift_stats.day_list|length }}">各班次业绩汇总</th>
+            </tr>
+            <tr>
+              <th class="sticky-col sticky-name name-cell">班次</th>
+              <th class="sticky-col sticky-metric">日期</th>
+              {% for d in shift_stats.day_list %}
+                <th class="day-head">{{ d.day }}</th>
+              {% endfor %}
+               <th class="day-head">汇总</th>
+            </tr>
+            <tr>
+              <th class="sticky-col sticky-name name-cell"></th>
+              <th class="sticky-col sticky-metric"></th>
+              {% for d in shift_stats.day_list %}
+                <th class="day-head text-primary">
+                  {% set weekday_map = ["星期一","星期二","星期三","星期四","星期五","星期六","星期日"] %}
+                  {{ weekday_map[d.weekday()] }}
+                </th>
+              {% endfor %}
+              <th class="day-head text-primary">本月合计</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in shift_stats.summary_rows %}
+              {% set ns = namespace(total_orders=0, total_pay=0.0) %}
+
+              <tr>
+                <td class="sticky-col sticky-name name-cell" rowspan="2">{{ shift_label.get(row.shift_type, row.shift_type) }}</td>
+                <td class="sticky-col sticky-metric orders-row-label" style="background: #f3f7ff">销售订单</td>
+                {% for item in row.daily %}
+                  {% set ns.total_orders = ns.total_orders + item.orders %}
+                  <td class="orders-cell">{{ item.orders }}</td>
+                {% endfor %}
+                <td class="total-col">{{ ns.total_orders }}</td>
+              </tr>
+
+              <tr>
+                <td class="sticky-col sticky-metric pay-row-label"  style="background: #f3f7ff">代客收款金额</td>
+                {% for item in row.daily %}
+                  {% set ns.total_pay = ns.total_pay + item.pay_amount %}
+                  <td class="pay-cell">{{ "%.2f"|format(item.pay_amount) }}</td>
+                {% endfor %}
+                <td class="total-col">{{ "%.2f"|format(ns.total_pay) }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+{% endif %}
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+<script>
+  document.getElementById("applyBtn").addEventListener("click", () => {
+    const displayMode = document.getElementById("displayModeSelect").value;
+    const y = document.getElementById("yearSelect").value;
+    const m = document.getElementById("monthSelect").value;
+    const store = {{ current_store | tojson }};
+
+    if (displayMode === "monthly_summary") {
+      window.location.href = `/manager-performance?store=${encodeURIComponent(store)}&year=${y}&month=${m}&display_mode=${displayMode}`;
+    } else {
+      window.location.href = `/manager-performance?year=${y}&month=${m}&display_mode=${displayMode}`;
+    }
+  });
+
+  {% if display_mode == "monthly_summary" %}
+    const operators = {{ monthly_stats.operators | tojson }};
+    const tables = {{ monthly_stats.tables | tojson }};
+    const payAmounts = {{ monthly_stats.pay_amounts | tojson }};
+    const verifyAmounts = {{ monthly_stats.verify_amounts | tojson }};
+
+    function makeHBarChart(canvasId, labels, data, valueFormatter) {
+      const ctx = document.getElementById(canvasId);
+      return new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            data,
+            borderWidth: 1
+          }]
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: (context) => valueFormatter(context.raw)
+              }
+            }
+          },
+          scales: {
+            x: {
+              beginAtZero: true,
+              ticks: {
+                callback: (v) => valueFormatter(v)
+              }
+            },
+            y: {
+              ticks: { autoSkip: false }
+            }
+          }
+        }
+      });
+    }
+
+    const fmtTable = (v) => `${Number(v).toFixed(0)} 桌`;
+    const fmtMoney = (v) => `¥${Number(v).toFixed(2)}`;
+
+    makeHBarChart("tablesChart", operators, tables, fmtTable);
+    makeHBarChart("payChart", operators, payAmounts, fmtMoney);
+    makeHBarChart("verifyChart", operators, verifyAmounts, fmtMoney);
+  {% endif %}
+</script>
+{% endblock %}

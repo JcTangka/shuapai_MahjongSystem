@@ -1,0 +1,448 @@
+{% extends "base.html" %}
+
+{% block title %}品牌/门店数据 - 耍牌系统{% endblock %}
+
+{% block breadcrumb %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 品牌/门店数据
+{% endblock %}
+
+{% block content %}
+<style>
+  .dashboard-card {
+    border: 1px solid #e8eef7;
+    border-radius: 16px;
+    background: #fff;
+    box-shadow: 0 4px 18px rgba(31, 58, 147, 0.05);
+  }
+
+  .metric-card {
+    border: 1px solid #e9eef7;
+    border-radius: 14px;
+    background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+    padding: 16px 18px;
+    height: 100%;
+  }
+
+  .metric-title {
+    font-size: 13px;
+    color: #6b7280;
+    margin-bottom: 8px;
+  }
+
+  .metric-value {
+    font-size: 28px;
+    font-weight: 700;
+    color: #111827;
+    line-height: 1.1;
+  }
+
+  .metric-sub {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #6b7280;
+  }
+
+  .section-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #1f2937;
+  }
+
+  .section-subtitle {
+    font-size: 12px;
+    color: #6b7280;
+  }
+
+  .chart-box {
+    border: 1px solid #edf2f7;
+    border-radius: 14px;
+    background: #fff;
+    padding: 16px;
+    height: 100%;
+  }
+
+  .filter-bar {
+    border: 1px solid #e8eef7;
+    border-radius: 16px;
+    padding: 16px;
+    background: #fff;
+    box-shadow: 0 4px 18px rgba(31, 58, 147, 0.05);
+  }
+
+  .kpi-badge {
+    display: inline-block;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: #eef6ff;
+    color: #2563eb;
+  }
+
+  .big-number-unit {
+    font-size: 14px;
+    color: #6b7280;
+    margin-left: 4px;
+  }
+</style>
+
+<div class="container-fluid px-0">
+
+  <!-- 顶部筛选区 -->
+  <div class="filter-bar mb-4">
+    <form method="get" action="/brand-store-data" class="row g-3 align-items-end">
+      <div class="col-md-3">
+        <label class="form-label fw-bold text-secondary">统计维度</label>
+        <select class="form-select" name="dimension" id="dimensionSelect">
+          <option value="brand" {% if dimension == "brand" %}selected{% endif %}>品牌</option>
+          <option value="store" {% if dimension == "store" %}selected{% endif %}>门店</option>
+        </select>
+      </div>
+
+      <div class="col-md-3" id="storeSelectWrap">
+        <label class="form-label fw-bold text-secondary">门店</label>
+        <select class="form-select" name="store" id="storeSelect">
+          {% for s in store_list %}
+          <option value="{{ s }}" {% if s == current_store %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="col-md-2">
+        <label class="form-label fw-bold text-secondary">开始日期</label>
+        <input type="date" class="form-control" name="start_date" value="{{ start_date }}">
+      </div>
+
+      <div class="col-md-2">
+        <label class="form-label fw-bold text-secondary">结束日期</label>
+        <input type="date" class="form-control" name="end_date" value="{{ end_date }}">
+      </div>
+
+      <div class="col-md-2 d-grid">
+        <button class="btn btn-primary" type="submit">
+          <i class="bi bi-funnel me-1"></i>应用筛选
+        </button>
+      </div>
+    </form>
+
+    <div class="mt-3 d-flex flex-wrap gap-2 align-items-center">
+      <span class="kpi-badge">当前主体：{{ stats.entity_name }}</span>
+      <span class="kpi-badge">统计区间：{{ start_date }} 至 {{ end_date }}</span>
+      <a class="btn btn-sm btn-outline-secondary"
+         href="/brand-store-data?dimension={{ dimension }}{% if dimension == 'store' %}&store={{ current_store }}{% endif %}&start_date={{ start_date[:8] }}01&end_date={{ end_date }}">
+        本月
+      </a>
+      <a class="btn btn-sm btn-outline-secondary"
+         href="/brand-store-data?dimension={{ dimension }}{% if dimension == 'store' %}&store={{ current_store }}{% endif %}">
+        重置
+      </a>
+    </div>
+  </div>
+
+  <!-- 一、营收 -->
+  <div class="dashboard-card p-4 mb-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <div>
+        <div class="section-title">一、营收</div>
+        <div class="section-subtitle">按所选时间区间统计成功组局对应的实收金额（微信 + 支付宝）</div>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+      <div class="col-lg-4">
+        <div class="metric-card">
+          <div class="metric-title">收款金额</div>
+          <div class="metric-value">
+            {{ "%.2f"|format(stats.revenue.total) }}<span class="big-number-unit">元</span>
+          </div>
+          <div class="metric-sub">成功组局实收总额</div>
+        </div>
+      </div>
+      <div class="col-lg-4">
+        <div class="metric-card">
+          <div class="metric-title">代客收款金额</div>
+          <div class="metric-value">
+            {{ "%.2f"|format(stats.revenue.offline) }}<span class="big-number-unit">元</span>
+          </div>
+          <div class="metric-sub">下单方式 = 代客收款</div>
+        </div>
+      </div>
+      <div class="col-lg-4">
+        <div class="metric-card">
+          <div class="metric-title">代客验券金额</div>
+          <div class="metric-value">
+            {{ "%.2f"|format(stats.revenue.voucher) }}<span class="big-number-unit">元</span>
+          </div>
+          <div class="metric-sub">下单方式 = 代客验券</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-lg-4">
+        <div class="chart-box">
+          <div class="fw-bold mb-3">营收结构</div>
+          <canvas id="revenueCompositionChart" height="220"></canvas>
+        </div>
+      </div>
+      <div class="col-lg-8">
+        <div class="chart-box">
+          <div class="fw-bold mb-3">营收趋势</div>
+          <canvas id="revenueTrendChart" height="220"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 二、顾客数据 -->
+  <div class="dashboard-card p-4 mb-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <div>
+        <div class="section-title">二、顾客数据</div>
+        <div class="section-subtitle">顾客总数为历史总数；新增与复购按当前筛选时间区间统计</div>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+      <div class="col-lg-3 col-md-6">
+        <div class="metric-card">
+          <div class="metric-title">顾客总数</div>
+          <div class="metric-value">
+            {{ stats.customer.total }}<span class="big-number-unit">人</span>
+          </div>
+          <div class="metric-sub">历史累计顾客池</div>
+        </div>
+      </div>
+
+      <div class="col-lg-3 col-md-6">
+        <div class="metric-card">
+          <div class="metric-title">新增顾客数</div>
+          <div class="metric-value">
+            {{ stats.customer.new }}<span class="big-number-unit">人</span>
+          </div>
+          <div class="metric-sub">按 created_at 统计</div>
+        </div>
+      </div>
+
+      <div class="col-lg-2 col-md-6">
+        <div class="metric-card">
+          <div class="metric-title">新增顾客转化率</div>
+          <div class="metric-value">
+            {{ "%.2f"|format(stats.customer.new_conversion_rate) }}<span class="big-number-unit">%</span>
+          </div>
+          <div class="metric-sub">新增中已完成至少1次成功组局</div>
+        </div>
+      </div>
+
+      <div class="col-lg-2 col-md-6">
+        <div class="metric-card">
+          <div class="metric-title">复购顾客数</div>
+          <div class="metric-value">
+            {{ stats.customer.repurchase }}<span class="big-number-unit">人</span>
+          </div>
+          <div class="metric-sub">当前区间内成功组局次数 ≥ 2</div>
+        </div>
+      </div>
+
+      <div class="col-lg-2 col-md-6">
+        <div class="metric-card">
+          <div class="metric-title">顾客复购率</div>
+          <div class="metric-value">
+            {{ "%.2f"|format(stats.customer.repurchase_rate) }}<span class="big-number-unit">%</span>
+          </div>
+          <div class="metric-sub">复购顾客 / 顾客总数</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-lg-5">
+        <div class="chart-box">
+          <div class="fw-bold mb-3">顾客结构</div>
+          <canvas id="customerFunnelChart" height="240"></canvas>
+        </div>
+      </div>
+      <div class="col-lg-7">
+        <div class="chart-box">
+          <div class="fw-bold mb-3">顾客关键指标摘要</div>
+
+          <div class="table-responsive">
+            <table class="table align-middle mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th>指标</th>
+                  <th>数值</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>顾客总数</td>
+                  <td>{{ stats.customer.total }}</td>
+                  <td>历史累计顾客池，不按时间区间缩小</td>
+                </tr>
+                <tr>
+                  <td>新增顾客数</td>
+                  <td>{{ stats.customer.new }}</td>
+                  <td>品牌按 Customer.created_at，门店按 CustomerStoreLink.created_at</td>
+                </tr>
+                <tr>
+                  <td>新增顾客转化率</td>
+                  <td>{{ "%.2f"|format(stats.customer.new_conversion_rate) }}%</td>
+                  <td>新增顾客中，在当前所选时间内完成至少 1 次成功组局</td>
+                </tr>
+                <tr>
+                  <td>复购顾客数</td>
+                  <td>{{ stats.customer.repurchase }}</td>
+                  <td>当前所选时间内成功组局次数大于等于 2 的顾客数</td>
+                </tr>
+                <tr>
+                  <td>顾客复购率</td>
+                  <td>{{ "%.2f"|format(stats.customer.repurchase_rate) }}%</td>
+                  <td>复购顾客数 / 顾客总数</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 三、订单数据 -->
+  <div class="dashboard-card p-4 mb-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <div>
+        <div class="section-title">三、订单数据</div>
+        <div class="section-subtitle">统计当前时间区间内成功组局的桌数</div>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+      <div class="col-lg-4">
+        <div class="metric-card">
+          <div class="metric-title">订单数</div>
+          <div class="metric-value">
+            {{ stats.order.count }}<span class="big-number-unit">桌</span>
+          </div>
+          <div class="metric-sub">成功组局记录数</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="chart-box">
+      <div class="fw-bold mb-3">订单趋势</div>
+      <canvas id="orderTrendChart" height="120"></canvas>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+  const trendLabels = {{ trend_labels_json | safe }};
+  const revenueTrend = {{ revenue_trend_json | safe }};
+  const orderTrend = {{ order_trend_json | safe }};
+  const revenueComposition = {{ revenue_composition_json | safe }};
+  const customerFunnel = {{ customer_funnel_json | safe }};
+
+  // 维度切换时，品牌隐藏门店下拉
+  const dimensionSelect = document.getElementById("dimensionSelect");
+  const storeSelectWrap = document.getElementById("storeSelectWrap");
+  const storeSelect = document.getElementById("storeSelect");
+
+  function toggleStoreSelect() {
+    if (dimensionSelect.value === "brand") {
+      storeSelectWrap.style.display = "none";
+      storeSelect.disabled = true;
+    } else {
+      storeSelectWrap.style.display = "";
+      storeSelect.disabled = false;
+    }
+  }
+  toggleStoreSelect();
+  dimensionSelect.addEventListener("change", toggleStoreSelect);
+
+  // 营收结构
+  new Chart(document.getElementById("revenueCompositionChart"), {
+    type: "doughnut",
+    data: {
+      labels: ["代客收款", "代客验券", "其他"],
+      datasets: [{
+        data: revenueComposition
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { position: "bottom" }
+      }
+    }
+  });
+
+  // 营收趋势
+  new Chart(document.getElementById("revenueTrendChart"), {
+    type: "line",
+    data: {
+      labels: trendLabels,
+      datasets: [{
+        label: "营收金额",
+        data: revenueTrend,
+        tension: 0.25
+      }]
+    },
+    options: {
+      responsive: true,
+      scales: {
+        y: {
+          beginAtZero: true
+        }
+      }
+    }
+  });
+
+  // 顾客结构
+  new Chart(document.getElementById("customerFunnelChart"), {
+    type: "bar",
+    data: {
+      labels: ["顾客总数", "新增顾客", "已转化新增", "复购顾客"],
+      datasets: [{
+        label: "人数",
+        data: customerFunnel
+      }]
+    },
+    options: {
+      responsive: true,
+      indexAxis: "y",
+      scales: {
+        x: {
+          beginAtZero: true
+        }
+      }
+    }
+  });
+
+  // 订单趋势
+  new Chart(document.getElementById("orderTrendChart"), {
+    type: "bar",
+    data: {
+      labels: trendLabels,
+      datasets: [{
+        label: "订单数",
+        data: orderTrend
+      }]
+    },
+    options: {
+      responsive: true,
+      scales: {
+        y: {
+          beginAtZero: true,
+          ticks: {
+            precision: 0
+          }
+        }
+      }
+    }
+  });
+</script>
+{% endblock %}

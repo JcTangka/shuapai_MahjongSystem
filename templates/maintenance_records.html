@@ -1,0 +1,440 @@
+{% extends "base.html" %}
+
+{% block title %}人情维护支出 - 耍牌系统{% endblock %}
+
+{% block breadcrumb %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 人情维护支出
+{% endblock %}
+
+{% block content %}
+<style>
+  .modal .card-header {
+    font-size: 15px;
+  }
+
+  .modal .form-control,
+  .modal .form-select {
+    border-radius: 0.5rem;
+  }
+
+  .modal .modal-title i {
+    vertical-align: -1px;
+  }
+  .stats-card {
+    border: 1px solid #dbe3ef;
+    border-radius: 14px;
+    background: #fff;
+    box-shadow: 0 4px 12px rgba(13, 110, 253, 0.04);
+  }
+
+  .stats-number {
+    font-size: 28px;
+    font-weight: 700;
+    color: #0d6efd;
+    line-height: 1;
+  }
+
+  .stats-label {
+    color: #6c757d;
+    font-size: 13px;
+  }
+
+  .maintenance-table tbody tr.focus-row {
+    background: #fff7e6 !important;
+    animation: flashRow 1.8s ease-in-out 1;
+  }
+
+  @keyframes flashRow {
+    0% { background: #ffe8a3; }
+    100% { background: #fff7e6; }
+  }
+
+  .filter-bar,
+  .list-card {
+    border: 1px solid #dbe3ef;
+    border-radius: 14px;
+    background: #fff;
+    box-shadow: 0 4px 12px rgba(13, 110, 253, 0.04);
+  }
+
+  .mini-text {
+    font-size: 12px;
+    color: #6c757d;
+  }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div class="d-flex align-items-center gap-3 flex-wrap">
+    <div class="d-flex align-items-center">
+      <label class="me-2 fw-bold text-secondary">当前门店：</label>
+      <div class="dropdown">
+        <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">
+          {{ current_store }}
+        </button>
+        <ul class="dropdown-menu">
+          {% for store_name in store_list %}
+          <li>
+            <a class="dropdown-item {% if store_name == current_store %}active{% endif %}"
+               href="/maintenance-records?store={{ store_name }}&year={{ selected_year }}&month={{ selected_month }}">
+              {{ store_name }}
+            </a>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+
+    <form method="get" action="/maintenance-records" class="d-flex align-items-center gap-2 flex-wrap">
+      <input type="hidden" name="store" value="{{ current_store }}">
+      <label class="fw-bold text-secondary mb-0">月份：</label>
+      <select name="year" class="form-select" style="width: 110px;">
+        {% for y in range(selected_year - 2, selected_year + 3) %}
+        <option value="{{ y }}" {% if y == selected_year %}selected{% endif %}>{{ y }}年</option>
+        {% endfor %}
+      </select>
+      <select name="month" class="form-select" style="width: 90px;">
+        {% for m in range(1, 13) %}
+        <option value="{{ m }}" {% if m == selected_month %}selected{% endif %}>{{ m }}月</option>
+        {% endfor %}
+      </select>
+      <button class="btn btn-primary">切换</button>
+    </form>
+  </div>
+
+  <button class="btn btn-success" data-bs-toggle="modal" data-bs-target="#addMaintenanceModal">
+    <i class="bi bi-plus-circle me-1"></i>新增维护
+  </button>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-3">
+    <div class="stats-card p-3">
+      <div class="stats-label mb-2">当月维护条数</div>
+      <div class="stats-number">{{ total_count }}</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="stats-card p-3">
+      <div class="stats-label mb-2">当月维护金额总数</div>
+      <div class="stats-number">¥ {{ "%.2f"|format(total_amount) }}</div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="stats-card p-3 h-100 d-flex align-items-center">
+      <div class="mini-text">
+        统计口径：当前门店 + 当前月份 + 未删除记录
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+    <div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th>序号</th>
+                    <th>日期</th>
+                    <th>包间名</th>
+                    <th>维护用户</th>
+                    <th>赠送物品</th>
+                    <th>金额</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in record_list %}
+                <tr id="record-row-{{ row.id }}" {% if focus_record_id and row.id == focus_record_id %}class="table-warning"{% endif %}>
+                    <td class="text-secondary fw-bold">{{ loop.index }}</td>
+
+                    <td>
+                        <span class="fw-bold">{{ row.record_date }}</span>
+                    </td>
+
+                    <td>
+                        <span class="text-muted">{{ row.room_name }}</span>
+                    </td>
+
+                    <td>
+                        <div class="fw-bold">{{ row.customer_name }}</div>
+                    </td>
+
+                    <td>
+                        <div class="text-dark">{{ row.gift_name }}</div>
+                    </td>
+
+                    <td class="text-success fw-bold">
+                        ¥{{ "%.2f"|format(row.amount) }}
+                    </td>
+
+                    <td>
+                        <button class="btn btn-sm btn-outline-info me-1"
+                                onclick="openDetailModal({{ row.id }})">
+                            查看详情
+                        </button>
+                        <a class="btn btn-sm btn-outline-danger"
+                           href="/maintenance-record/{{ row.id }}/delete?store={{ current_store }}&year={{ selected_year }}&month={{ selected_month }}"
+                           onclick="return confirm('确定删除这条维护记录吗？删除后将不再出现在统计和列表中。')">
+                            删除
+                        </a>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="7" class="text-muted py-5">
+                        <i class="bi bi-gift fs-1 d-block mb-3"></i>
+                        当前条件下暂无维护记录。
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 新增维护弹窗 -->
+<div class="modal fade" id="addMaintenanceModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header bg-primary text-white">
+        <h5 class="modal-title">
+          <i class="bi bi-gift me-2"></i>新增维护
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+
+      <form method="post" action="/maintenance-records/add">
+        <div class="modal-body bg-light">
+          <div class="card border-0 shadow-sm">
+            <div class="card-header bg-white fw-bold">
+              <i class="bi bi-pencil-square me-1"></i> 维护信息
+            </div>
+            <div class="card-body">
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <label class="form-label text-muted small">门店</label>
+                  <select class="form-select" name="store_name" id="add_store_name" onchange="syncAddStoreOptions()" required>
+                    {% for store_name in store_list %}
+                    <option value="{{ store_name }}" {% if store_name == current_store %}selected{% endif %}>{{ store_name }}</option>
+                    {% endfor %}
+                  </select>
+                </div>
+
+                <div class="col-md-6">
+                  <label class="form-label text-muted small">包间</label>
+                  <select class="form-select" name="room_name" id="add_room_name" required></select>
+                </div>
+
+                <div class="col-md-6">
+                  <label class="form-label text-muted small">维护用户</label>
+                  <select class="form-select" name="customer_id" id="add_customer_id" required></select>
+                </div>
+
+                <div class="col-md-6">
+                  <label class="form-label text-muted small">赠送日期</label>
+                  <input type="date" class="form-control" name="record_date"
+                         value="{{ '%04d-%02d-01'|format(selected_year, selected_month) }}" required>
+                </div>
+
+                <div class="col-md-6">
+                  <label class="form-label text-muted small">赠送物品</label>
+                  <input type="text" class="form-control" name="gift_name" required>
+                </div>
+
+                <div class="col-md-6">
+                  <label class="form-label text-muted small">金额</label>
+                  <input type="number" step="0.01" min="0.01" class="form-control" name="amount" required>
+                </div>
+
+                <div class="col-md-6">
+                  <label class="form-label text-muted small">付款账号</label>
+                  <input type="text" class="form-control" name="payment_account" required>
+                </div>
+
+                <div class="col-md-6">
+                  <label class="form-label text-muted small">赠送理由</label>
+                  <input type="text" class="form-control" name="reason" required>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer bg-light">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+          <button type="submit" class="btn btn-primary px-4">确定</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- 详情/编辑弹窗 -->
+<div class="modal fade" id="detailMaintenanceModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header bg-info text-white">
+        <h5 class="modal-title">
+          <i class="bi bi-card-list me-2"></i>维护详情
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+
+      <form id="detailForm" method="post">
+        <div class="modal-body bg-light">
+          <div class="card border-0 shadow-sm mb-3">
+            <div class="card-header bg-white fw-bold">
+              <i class="bi bi-pencil-square me-1"></i> 基本信息
+            </div>
+            <div class="card-body">
+              <div class="row g-3">
+                <div class="col-md-3">
+                  <label class="form-label text-muted small">门店</label>
+                  <input type="text" class="form-control fw-bold" id="detail_store_name" readonly>
+                </div>
+
+                <div class="col-md-3">
+                  <label class="form-label text-muted small">包间</label>
+                  <select class="form-select" name="room_name" id="detail_room_name" required></select>
+                </div>
+
+                <div class="col-md-3">
+                  <label class="form-label text-muted small">维护用户</label>
+                  <input type="text" class="form-control" id="detail_customer_name" readonly>
+                </div>
+
+                <div class="col-md-3">
+                  <label class="form-label text-muted small">微信号</label>
+                  <input type="text" class="form-control" id="detail_customer_wechat" readonly>
+                </div>
+
+                <div class="col-md-3">
+                  <label class="form-label text-muted small">赠送日期</label>
+                  <input type="date" class="form-control" name="record_date" id="detail_record_date" required>
+                </div>
+
+                <div class="col-md-3">
+                  <label class="form-label text-muted small">操作员</label>
+                  <input type="text" class="form-control" id="detail_operator_name" readonly>
+                </div>
+
+                <div class="col-md-3">
+                  <label class="form-label text-muted small">赠送物品</label>
+                  <input type="text" class="form-control" name="gift_name" id="detail_gift_name" required>
+                </div>
+
+                <div class="col-md-3">
+                  <label class="form-label text-muted small">金额</label>
+                  <input type="number" step="0.01" min="0.01" class="form-control text-success fw-bold" name="amount" id="detail_amount" required>
+                </div>
+
+                <div class="col-md-6">
+                  <label class="form-label text-muted small">付款账号</label>
+                  <input type="text" class="form-control" name="payment_account" id="detail_payment_account" required>
+                </div>
+
+                <div class="col-md-6">
+                  <label class="form-label text-muted small">赠送理由</label>
+                  <input type="text" class="form-control" name="reason" id="detail_reason" required>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer bg-light">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+          <button type="submit" class="btn btn-primary px-4">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+  const ROOM_MAP = {{ room_map | tojson }};
+  const CUSTOMER_MAP = {{ customer_map | tojson }};
+
+  function fillRoomOptions(storeName, roomSelectId, selectedRoomName = null) {
+    const roomSelect = document.getElementById(roomSelectId);
+    roomSelect.innerHTML = "";
+
+    const rooms = ROOM_MAP[storeName] || [];
+    rooms.forEach(room => {
+      const option = document.createElement("option");
+      option.value = room.name;
+      option.textContent = room.name;
+      if (selectedRoomName && room.name === selectedRoomName) {
+        option.selected = true;
+      }
+      roomSelect.appendChild(option);
+    });
+  }
+
+  function fillCustomerOptions(storeName, customerSelectId) {
+    const customerSelect = document.getElementById(customerSelectId);
+    customerSelect.innerHTML = "";
+
+    const customers = CUSTOMER_MAP[storeName] || [];
+    customers.forEach(cust => {
+      const option = document.createElement("option");
+      option.value = cust.id;
+      option.textContent = `${cust.nickname}（${cust.wechat_id}）`;
+      customerSelect.appendChild(option);
+    });
+  }
+
+  function syncAddStoreOptions() {
+    const storeName = document.getElementById("add_store_name").value;
+    fillRoomOptions(storeName, "add_room_name");
+    fillCustomerOptions(storeName, "add_customer_id");
+  }
+
+  async function openDetailModal(recordId) {
+    const resp = await fetch(`/maintenance-record/${recordId}`);
+    const data = await resp.json();
+
+    if (data.error) {
+      alert(data.error);
+      return;
+    }
+
+    document.getElementById("detail_store_name").value = data.store_name;
+    document.getElementById("detail_customer_name").value = data.customer_name;
+    document.getElementById("detail_customer_wechat").value = data.customer_wechat;
+    document.getElementById("detail_record_date").value = data.record_date;
+    document.getElementById("detail_operator_name").value = data.operator_name;
+    document.getElementById("detail_gift_name").value = data.gift_name;
+    document.getElementById("detail_amount").value = data.amount;
+    document.getElementById("detail_payment_account").value = data.payment_account;
+    document.getElementById("detail_reason").value = data.reason;
+
+    const roomSelect = document.getElementById("detail_room_name");
+    roomSelect.innerHTML = "";
+    (data.room_options || []).forEach(room => {
+      const option = document.createElement("option");
+      option.value = room.name;
+      option.textContent = room.name;
+      if (room.name === data.room_name) option.selected = true;
+      roomSelect.appendChild(option);
+    });
+
+    document.getElementById("detailForm").action = `/maintenance-record/${recordId}/update`;
+
+    const modal = new bootstrap.Modal(document.getElementById("detailMaintenanceModal"));
+    modal.show();
+  }
+
+  document.addEventListener("DOMContentLoaded", function() {
+    syncAddStoreOptions();
+
+    const focusId = "{{ focus_record_id or '' }}";
+    if (focusId) {
+      const row = document.getElementById(`record-row-${focusId}`);
+      if (row) {
+        row.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
+  });
+</script>
+{% endblock %}

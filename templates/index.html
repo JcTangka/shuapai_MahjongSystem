@@ -1,0 +1,798 @@
+{% extends "base.html" %}
+
+{% block title %}未组齐牌局 - 耍牌系统{% endblock %}
+
+{% block breadcrumb %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 未组齐牌局
+{% endblock %}
+
+{% block content %}
+<style>
+.customer-autocomplete-wrapper {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.customer-suggest-list {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    right: 0;
+    z-index: 1080;
+    background: #fff;
+    border: 1px solid #dbe3ef;
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(31, 45, 61, 0.12);
+    max-height: 260px;
+    overflow-y: auto;
+    display: none;
+}
+
+.customer-suggest-item {
+    padding: 10px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid #eef2f7;
+    transition: background 0.15s ease;
+}
+
+.customer-suggest-item:last-child {
+    border-bottom: none;
+}
+
+.customer-suggest-item:hover,
+.customer-suggest-item.active {
+    background: #f5f9ff;
+}
+
+.customer-suggest-name {
+    font-weight: 700;
+    color: #1f2d3d;
+}
+
+.customer-suggest-meta {
+    font-size: 12px;
+    color: #6c7a89;
+    margin-top: 2px;
+}
+
+.customer-suggest-empty {
+    padding: 10px 12px;
+    color: #909399;
+    font-size: 13px;
+}
+
+.player-invalid-warning {
+    border-color: #dc3545 !important;
+    box-shadow: 0 0 0 0.15rem rgba(220, 53, 69, 0.15) !important;
+}
+
+.remark-summary {
+    max-width: 160px;
+    display: inline-block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+}
+
+.player-badge-wrap {
+    max-width: 260px;
+    margin: auto;
+}
+
+.modal-section-title {
+    font-weight: 700;
+    color: #495057;
+    font-size: 0.95rem;
+    margin-bottom: 8px;
+}
+
+.player-row-card {
+    border: 1px solid #e9ecef;
+    border-radius: 12px;
+    padding: 12px;
+    background: #fafbfd;
+}
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div class="d-flex align-items-center">
+        <label class="me-2 fw-bold text-secondary">当前门店：</label>
+        <div class="dropdown">
+            <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                {{ current_store }}
+            </button>
+            <ul class="dropdown-menu">
+                {% for store_name in store_list %}
+                <li>
+                    <a class="dropdown-item {% if store_name == current_store %}active{% endif %}"
+                       href="/?store={{ store_name }}">
+                        {{ store_name }}
+                    </a>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+
+    <button class="btn btn-primary text-white px-4"
+            data-bs-toggle="modal"
+            data-bs-target="#addGameModal"
+            onclick="resetModal()">
+        <i class="bi bi-plus-lg me-1"></i> 新增组局
+    </button>
+</div>
+
+<div class="card border-0 shadow-sm">
+    <div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th>序号</th>
+                    <th>预约时间</th>
+                    <th>房间</th>
+                    <th>分数/玩法</th>
+                    <th>参与人（缺）</th>
+                    <th>特殊备注</th>
+                    <th>接待店长</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for game in game_list %}
+                <tr>
+                    <td class="fw-bold text-primary">#{{ game.serial_number }}</td>
+
+                    <td>
+                        <div class="small text-muted">{{ game.record_date }}</div>
+                        <div class="fw-bold">{{ game.start_time }}</div>
+                    </td>
+
+                    <td>
+                        {% if game.room_name %}
+                            <span class="badge bg-secondary bg-opacity-10 text-dark">{{ game.room_name }}</span>
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+
+                    <td>
+                        <div class="text-danger fw-bold">{{ game.stakes }}</div>
+                        <div class="small text-muted">{{ game.game_type }}</div>
+                    </td>
+
+                    <td>
+                        {% set players = [game.player_1, game.player_2, game.player_3, game.player_4] %}
+                        {% set ns = namespace(count=0) %}
+                        {% for p in players %}
+                            {% if p %}{% set ns.count = ns.count + 1 %}{% endif %}
+                        {% endfor %}
+
+                        <div class="d-flex justify-content-center gap-1 flex-wrap player-badge-wrap">
+                            {% for p in players %}
+                                {% if p %}
+                                <span class="badge bg-light text-dark border">{{ p }}</span>
+                                {% endif %}
+                            {% endfor %}
+                        </div>
+
+                        {% if 4 - ns.count > 0 %}
+                            <div class="small text-danger mt-1">缺 {{ 4 - ns.count }} 人</div>
+                        {% else %}
+                            <div class="small text-success mt-1">已组满</div>
+                        {% endif %}
+                    </td>
+
+                    <td>
+                        {% if game.tags %}
+                            <span class="badge bg-info text-white"
+                                  data-bs-toggle="tooltip"
+                                  data-bs-placement="top"
+                                  title="{{ game.tags }}">
+                                <span class="remark-summary">{{ game.tags }}</span>
+                            </span>
+                        {% else %}
+                            <span class="text-muted small">-</span>
+                        {% endif %}
+                    </td>
+
+                    <td>
+                        <span class="badge bg-info text-dark bg-opacity-25 border border-info">
+                            <i class="bi bi-person me-1"></i>{{ game.who_did or '-' }}
+                        </span>
+                    </td>
+
+                    <td>
+                        <div class="d-flex flex-column gap-1">
+                            <a href="/game/confirm/{{ game.id }}?store={{ current_store }}"
+                               class="btn btn-sm btn-success text-white">
+                                <i class="bi bi-check-lg"></i> 组齐
+                            </a>
+
+                            <button class="btn btn-sm btn-warning text-dark"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#addGameModal"
+                                    onclick="openEditModal(this)"
+                                    data-id="{{ game.id }}"
+                                    data-date="{{ game.record_date }}"
+                                    data-time="{{ game.start_time }}"
+                                    data-room="{{ game.room_name or '' }}"
+                                    data-stakes="{{ game.stakes }}"
+                                    data-gametype="{{ game.game_type }}"
+                                    data-tags="{{ game.tags or '' }}"
+                                    data-payment="{{ game.payment_method or '' }}"
+                                    data-fee="{{ game.room_fee or 0 }}"
+
+                                    data-p1="{{ game.player_1 or '' }}"
+                                    data-p1-wx="{{ game.player_1_wechat or '' }}"
+
+                                    data-p2="{{ game.player_2 or '' }}"
+                                    data-p2-wx="{{ game.player_2_wechat or '' }}"
+
+                                    data-p3="{{ game.player_3 or '' }}"
+                                    data-p3-wx="{{ game.player_3_wechat or '' }}"
+
+                                    data-p4="{{ game.player_4 or '' }}"
+                                    data-p4-wx="{{ game.player_4_wechat or '' }}">
+                                <i class="bi bi-pencil-square"></i> 编辑
+                            </button>
+
+                            <a href="/game/delete/{{ game.id }}?store={{ current_store }}"
+                               class="btn btn-sm btn-outline-danger border-0"
+                               onclick="return confirm('确定撤销这条记录吗？');">
+                                <i class="bi bi-x-circle"></i> 撤销
+                            </a>
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="8" class="text-muted py-5">
+                        <i class="bi bi-inbox fs-1 d-block mb-3"></i>
+                        当前门店暂无未组齐的牌局，快去新增一个吧！
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="modal fade" id="addGameModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-plus-circle me-2"></i><span id="modalTitle">新增组局</span></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+
+            <form action="/add-game" method="post" id="gameForm">
+                <div class="modal-body">
+                    <input type="hidden" name="store_name" value="{{ current_store }}">
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label text-muted small">预约日期（展示）</label>
+                            <input type="text" class="form-control bg-light" value="{{ today_date }}" disabled>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label text-muted small">序号（自动）</label>
+                            <input type="text" class="form-control bg-light" placeholder="系统按门店+自然月自动生成" disabled>
+                        </div>
+                    </div>
+
+                    <div class="card border-0 bg-light mb-3">
+                        <div class="card-body">
+                            <div class="modal-section-title">
+                                <i class="bi bi-clock-history me-1 text-primary"></i>预约信息
+                            </div>
+                            <div class="row g-3">
+                                <div class="col-md-4">
+                                    <label class="form-label fw-bold">预约时间</label>
+                                    <input type="datetime-local" name="start_time_full" id="startTimeInput" class="form-control" required>
+                                </div>
+
+                                <div class="col-md-4">
+                                    <label class="form-label fw-bold">分数大小</label>
+                                    <select class="form-select" name="stakes_select" id="stakesSelect" onchange="toggleCustomStakes()">
+                                        <option value="1-16">1-16</option>
+                                        <option value="2-32">2-32</option>
+                                        <option value="5-40">5-40</option>
+                                        <option value="5-80">5-80</option>
+                                        <option value="其他">其他</option>
+                                    </select>
+                                </div>
+
+                                <div class="col-md-4" id="customStakesWrapper" style="display: none;">
+                                    <label class="form-label fw-bold">其他分数大小</label>
+                                    <input type="text" class="form-control" name="stakes_custom" id="stakesCustomInput" placeholder="请输入具体大小">
+                                </div>
+
+                                <div class="col-md-4">
+                                    <label class="form-label fw-bold">玩法</label>
+                                    <select class="form-select" name="game_type" id="gameTypeInput" required>
+                                        <option value="换三">换三</option>
+                                        <option value="定缺">定缺</option>
+                                        <option value="幺鸡47">幺鸡47</option>
+                                        <option value="素鸡">素鸡</option>
+                                        <option value="两门">两门</option>
+                                    </select>
+                                </div>
+
+                                <div class="col-md-8">
+                                    <label class="form-label fw-bold">特殊备注</label>
+                                    <input type="text" class="form-control" name="tags" id="tagsInput" placeholder="填写特殊备注,如：只要女生 无烟">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card border-0 bg-light mb-3">
+                        <div class="card-body">
+                            <div class="modal-section-title">
+                                <i class="bi bi-people me-1 text-primary"></i>参与人信息
+                            </div>
+
+                            <div class="row g-3">
+                                {% for i in range(1, 5) %}
+                                <div class="col-md-6">
+                                    <div class="player-row-card h-100">
+                                        <div class="d-flex align-items-center justify-content-between mb-2">
+                                            <label class="fw-bold mb-0">参与人 {{ i }}</label>
+                                            <span class="badge bg-light text-secondary border" id="idx_{{ i }}">#{{ i }}</span>
+                                        </div>
+
+                                        <div class="mb-2">
+                                            <label class="form-label small text-muted">昵称</label>
+                                            <div class="customer-autocomplete-wrapper">
+                                                <input type="text"
+                                                       class="form-control player-name-input"
+                                                       name="player_{{ i }}"
+                                                       id="player_{{ i }}"
+                                                       autocomplete="off"
+                                                       placeholder="输入昵称检索顾客">
+                                                <div class="customer-suggest-list" id="suggest_list_{{ i }}"></div>
+                                            </div>
+                                        </div>
+
+                                        <div>
+                                            <label class="form-label small text-muted">微信号</label>
+                                            <input type="text"
+                                                   class="form-control player-wechat-input"
+                                                   name="player_{{ i }}_wechat"
+                                                   id="player_{{ i }}_wechat"
+                                                   placeholder="必须和昵称成对填写">
+                                        </div>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+
+                            <div class="alert alert-warning mt-3 mb-0 py-2">
+                                <i class="bi bi-exclamation-triangle me-1"></i>
+                                规则：昵称和微信号必须成对填写；允许同一用户重复填写，但同一微信号不能对应不同昵称。
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card border-0 bg-light">
+                        <div class="card-body">
+                            <div class="modal-section-title">
+                                <i class="bi bi-sliders me-1 text-primary"></i>预留信息（未组齐阶段允许为空）
+                            </div>
+                            <div class="row g-3">
+                                <div class="col-md-4">
+                                    <label class="form-label fw-bold">房间</label>
+                                    <select class="form-select" name="room_name" id="roomNameInput">
+                                        <option value="">暂不指定</option>
+                                        {% for room in room_list %}
+                                        <option value="{{ room.name if room.name is defined else room }}">
+                                            {{ room.name if room.name is defined else room }}
+                                        </option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label fw-bold">费用</label>
+                                    <input type="number" class="form-control" step="0.1" min="0" name="room_fee" id="roomFeeInput" value="0">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label fw-bold">支付方式</label>
+                                    <select class="form-select" name="payment_method" id="paymentMethodInput">
+                                        <option value="">暂不指定</option>
+                                        <option value="代客收款">代客收款</option>
+                                        <option value="代客验券">代客验券</option>
+                                        <option value="用户小程序自定">用户小程序自定</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary px-4" onclick="checkAndSubmitGame()">
+                        <i class="bi bi-check-circle me-1"></i>确定保存
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="conflictModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content border-warning">
+            <div class="modal-header bg-warning-subtle">
+                <h5 class="modal-title text-dark"><i class="bi bi-exclamation-triangle me-2"></i>存在黑名单顾客</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">以下参与人命中了黑名单：</p>
+                <div id="conflictPlayerList" class="mb-3"></div>
+                <div class="text-danger small">请确认是否仍然继续提交。</div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger" onclick="submitRealForm()">仍然提交</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function initTooltips() {
+        document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => {
+            if (!bootstrap.Tooltip.getInstance(el)) {
+                new bootstrap.Tooltip(el);
+            }
+        });
+    }
+
+    function getNowISOString() {
+        const now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        return now.toISOString().slice(0, 16);
+    }
+
+    function toggleCustomStakes() {
+        const select = document.getElementById('stakesSelect');
+        const wrapper = document.getElementById('customStakesWrapper');
+        const input = document.getElementById('stakesCustomInput');
+
+        if (select.value === '其他') {
+            wrapper.style.display = 'block';
+            input.required = true;
+        } else {
+            wrapper.style.display = 'none';
+            input.required = false;
+            input.value = '';
+        }
+    }
+
+    function resetModal() {
+        const form = document.getElementById('gameForm');
+        form.reset();
+        form.action = "/add-game";
+
+        document.getElementById('modalTitle').innerText = '新增组局';
+        document.getElementById('startTimeInput').value = getNowISOString();
+        document.getElementById('roomFeeInput').value = 0;
+
+        toggleCustomStakes();
+        clearPlayerWarningStyle();
+        resetIndicesColor();
+        hideAllSuggestBoxes();
+    }
+
+    function openEditModal(btn) {
+        const form = document.getElementById('gameForm');
+        const gameId = btn.dataset.id;
+        form.action = `/update-game/${gameId}`;
+        document.getElementById('modalTitle').innerText = '编辑未组齐牌局';
+
+        const dateVal = btn.dataset.date || '';
+        const timeVal = btn.dataset.time || '';
+        let startTimeFull = getNowISOString();
+
+        try {
+            if (dateVal && timeVal) {
+                const dateStr = dateVal;
+                let hm = "00:00";
+                const match = timeVal.match(/(\d{2}:\d{2})$/);
+                if (match) hm = match[1];
+                startTimeFull = `${dateStr}T${hm}`;
+            }
+        } catch (e) {}
+
+        document.getElementById('startTimeInput').value = startTimeFull;
+        document.getElementById('gameTypeInput').value = btn.dataset.gametype || '';
+        document.getElementById('tagsInput').value = btn.dataset.tags || '';
+        document.getElementById('roomNameInput').value = btn.dataset.room || '';
+        document.getElementById('paymentMethodInput').value = btn.dataset.payment || '';
+        document.getElementById('roomFeeInput').value = btn.dataset.fee || 0;
+
+        const stakeVal = btn.dataset.stakes || '';
+        const defaultOptions = ['1-16', '2-32', '5-40', '5-80'];
+        if (defaultOptions.includes(stakeVal)) {
+            document.getElementById('stakesSelect').value = stakeVal;
+            document.getElementById('stakesCustomInput').value = '';
+        } else {
+            document.getElementById('stakesSelect').value = '其他';
+            document.getElementById('stakesCustomInput').value = stakeVal;
+        }
+        toggleCustomStakes();
+
+        for (let i = 1; i <= 4; i++) {
+            document.getElementById(`player_${i}`).value = btn.dataset[`p${i}`] || '';
+            document.getElementById(`player_${i}_wechat`).value = btn.dataset[`p${i}Wx`] || btn.getAttribute(`data-p${i}-wx`) || '';
+        }
+
+        clearPlayerWarningStyle();
+        resetIndicesColor();
+        hideAllSuggestBoxes();
+    }
+
+    function clearPlayerWarningStyle() {
+        document.querySelectorAll('.player-name-input, .player-wechat-input').forEach(el => {
+            el.classList.remove('player-invalid-warning');
+        });
+    }
+
+    function markInvalidPair(index) {
+        const nameInput = document.getElementById(`player_${index}`);
+        const wechatInput = document.getElementById(`player_${index}_wechat`);
+        if (nameInput) nameInput.classList.add('player-invalid-warning');
+        if (wechatInput) wechatInput.classList.add('player-invalid-warning');
+    }
+
+    function validateNicknameWechatPairs() {
+        clearPlayerWarningStyle();
+        resetIndicesColor();
+
+        const wechatNameMap = {};
+        const wechatFirstIndexMap = {};
+
+        for (let i = 1; i <= 4; i++) {
+            const name = (document.getElementById(`player_${i}`).value || '').trim();
+            const wechat = (document.getElementById(`player_${i}_wechat`).value || '').trim();
+
+            if ((name && !wechat) || (!name && wechat)) {
+                markInvalidPair(i);
+                highlightIndices([i]);
+                alert(`参与人 ${i} 的昵称和微信号必须同时填写`);
+                return false;
+            }
+
+            if (wechat) {
+                if (wechatNameMap[wechat] && wechatNameMap[wechat] !== name) {
+                    const conflictIndices = [wechatFirstIndexMap[wechat], i].filter(Boolean);
+                    conflictIndices.forEach(idx => markInvalidPair(idx));
+                    highlightIndices(conflictIndices);
+                    alert(`同一局中微信号【${wechat}】对应了不同昵称，无法提交`);
+                    return false;
+                }
+                wechatNameMap[wechat] = name;
+                if (!wechatFirstIndexMap[wechat]) {
+                    wechatFirstIndexMap[wechat] = i;
+                }
+            }
+        }
+        return true;
+    }
+
+    function highlightIndices(indices) {
+        (indices || []).forEach(idx => {
+            const el = document.getElementById(`idx_${idx}`);
+            if (el) {
+                el.classList.remove('bg-light', 'text-secondary');
+                el.classList.add('bg-danger', 'text-white');
+            }
+        });
+    }
+
+    function resetIndicesColor() {
+        for (let i = 1; i <= 4; i++) {
+            const el = document.getElementById(`idx_${i}`);
+            if (el) {
+                el.classList.remove('bg-danger', 'text-white');
+                el.classList.add('bg-light', 'text-secondary');
+            }
+        }
+    }
+
+    function hideAllSuggestBoxes() {
+        document.querySelectorAll('.customer-suggest-list').forEach(el => {
+            el.style.display = 'none';
+            el.innerHTML = '';
+        });
+    }
+
+    async function fetchCustomerSuggest(keyword, wrapperIdx) {
+        const suggestBox = document.getElementById(`suggest_list_${wrapperIdx}`);
+        const storeName = "{{ current_store }}";
+
+        if (!keyword || keyword.trim().length < 1) {
+            suggestBox.style.display = 'none';
+            suggestBox.innerHTML = '';
+            return;
+        }
+
+        try {
+            const resp = await fetch(`/api/customer-search?keyword=${encodeURIComponent(keyword)}&store_name=${encodeURIComponent(storeName)}&limit=8`);
+            const data = await resp.json();
+
+            if (!Array.isArray(data) || data.length === 0) {
+                suggestBox.innerHTML = `<div class="customer-suggest-empty">未找到匹配顾客</div>`;
+                suggestBox.style.display = 'block';
+                return;
+            }
+
+            suggestBox.innerHTML = data.map(item => `
+                <div class="customer-suggest-item"
+                     onclick="selectCustomer(${wrapperIdx}, ${JSON.stringify(item.nickname).replace(/"/g, '&quot;')}, ${JSON.stringify(item.wechat_id || '').replace(/"/g, '&quot;')})">
+                    <div class="customer-suggest-name">${item.nickname || '-'}</div>
+                    <div class="customer-suggest-meta">微信号：${item.wechat_id || '-'}</div>
+                </div>
+            `).join('');
+
+            suggestBox.style.display = 'block';
+        } catch (err) {
+            suggestBox.innerHTML = `<div class="customer-suggest-empty">检索失败，请稍后重试</div>`;
+            suggestBox.style.display = 'block';
+        }
+    }
+
+    function selectCustomer(index, nickname, wechat) {
+        document.getElementById(`player_${index}`).value = nickname || '';
+        document.getElementById(`player_${index}_wechat`).value = wechat || '';
+        const suggestBox = document.getElementById(`suggest_list_${index}`);
+        suggestBox.style.display = 'none';
+        suggestBox.innerHTML = '';
+        clearPlayerWarningStyle();
+        resetIndicesColor();
+    }
+
+    function bindCustomerAutocomplete(index) {
+        const nameInput = document.getElementById(`player_${index}`);
+        const wrapper = nameInput.closest('.customer-autocomplete-wrapper');
+
+        let timer = null;
+        nameInput.addEventListener('input', function () {
+            const keyword = this.value;
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => fetchCustomerSuggest(keyword, index), 250);
+        });
+
+        document.addEventListener('click', function (e) {
+            if (!wrapper.contains(e.target)) {
+                const suggestBox = document.getElementById(`suggest_list_${index}`);
+                suggestBox.style.display = 'none';
+            }
+        });
+    }
+
+    async function validatePlayersOnServer() {
+        clearPlayerWarningStyle();
+        resetIndicesColor();
+
+        const form = document.getElementById('gameForm');
+        const formData = new FormData(form);
+
+        try {
+            const resp = await fetch('/api/validate-unformed-game-players', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!resp.ok) {
+                alert('校验失败，请稍后重试');
+                return false;
+            }
+
+            const data = await resp.json();
+
+            if (data.ok) {
+                return true;
+            }
+
+            const indices = Array.isArray(data.indices) ? data.indices : [];
+            indices.forEach(idx => markInvalidPair(idx));
+            highlightIndices(indices);
+
+            alert(data.message || '提交前校验未通过');
+            return false;
+        } catch (err) {
+            console.error('未组齐新增校验失败:', err);
+            alert('校验失败，请检查网络后重试');
+            return false;
+        }
+    }
+
+    async function checkBlacklist(allowPopup = true) {
+        try {
+            const payload = [];
+            for (let i = 1; i <= 4; i++) {
+                const nickname = (document.getElementById(`player_${i}`).value || '').trim();
+                const wechat_id = (document.getElementById(`player_${i}_wechat`).value || '').trim();
+                if (nickname || wechat_id) {
+                    payload.push({ index: i, nickname, wechat_id });
+                }
+            }
+
+            if (payload.length === 0) return false;
+
+            const resp = await fetch('/api/check-blacklist-conflict', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ players: payload, store_name: "{{ current_store }}" })
+            });
+
+            const data = await resp.json();
+            if (!data || !data.conflicts || data.conflicts.length === 0) {
+                return false;
+            }
+
+            if (!allowPopup) return true;
+
+            const listHtml = data.conflicts.map(item => `
+                <div class="border rounded p-2 mb-2">
+                    <div><strong>参与人 ${item.index}</strong>：${item.nickname || '-'}（${item.wechat_id || '-'}）</div>
+                    <div class="text-danger small">原因：${item.reason || '命中黑名单'}</div>
+                </div>
+            `).join('');
+
+            document.getElementById('conflictPlayerList').innerHTML = listHtml;
+            const modal = new bootstrap.Modal(document.getElementById('conflictModal'));
+            modal.show();
+            highlightIndices(data.conflicts.map(x => x.index));
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    async function checkAndSubmitGame() {
+        const pairValid = validateNicknameWechatPairs();
+        if (!pairValid) return;
+
+        const serverValid = await validatePlayersOnServer();
+        if (!serverValid) return;
+
+        const hasConflict = await checkBlacklist(true);
+        if (!hasConflict) {
+            submitRealForm();
+        }
+    }
+
+    function submitRealForm() {
+        const conflictModalEl = document.getElementById('conflictModal');
+        const conflictModal = bootstrap.Modal.getInstance(conflictModalEl);
+        if (conflictModal) {
+            conflictModal.hide();
+        }
+        document.getElementById('gameForm').submit();
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+        [1, 2, 3, 4].forEach(bindCustomerAutocomplete);
+        document.getElementById('startTimeInput').value = getNowISOString();
+
+        const addGameModal = document.getElementById('addGameModal');
+        if (addGameModal) {
+            addGameModal.addEventListener('hidden.bs.modal', function () {
+                hideAllSuggestBoxes();
+                clearPlayerWarningStyle();
+                resetIndicesColor();
+            });
+        }
+
+        initTooltips();
+    });
+</script>
+{% endblock %}

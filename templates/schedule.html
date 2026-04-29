@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{% block title %}排班表 - 耍牌系统{% endblock %}
+
+{% block breadcrumb %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 排班表
+{% endblock %}
+
+{% block content %}
+
+<style>
+  /* ====== 方案2：保持全称，但强制列宽与下拉框宽度 ====== */
+
+  /* 姓名列：避免竖排、换行 */
+  .schedule-table th.name-col {
+    min-width: 110px;
+    white-space: nowrap;
+  }
+
+  /* 每一天列：给最小宽度，确保“中班/大中班/晚班/休息”能显示 */
+  .schedule-table th.day-col,
+  .schedule-table td.day-col {
+    min-width: 110px;   /* 你要更宽就调到 120/130 */
+  }
+
+  /* 单元格内不要折行 */
+  .schedule-table td.day-col {
+    white-space: nowrap;
+  }
+
+  /* select：强制最小宽度，并给右侧箭头留空间 */
+  .schedule-table .form-select {
+    min-width: 100px;     /* 你要更宽就调到 110/120 */
+    padding-right: 2rem;  /* 给右侧箭头区域留足空间 */
+  }
+
+  /* 表格整体：保证横向滚动体验 */
+  .schedule-wrap {
+    overflow-x: auto;
+  }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div class="d-flex align-items-center gap-2 flex-wrap">
+    <label class="fw-bold text-secondary">月份：</label>
+
+    <select id="yearSelect" class="form-select" style="width: 120px;">
+      {% for y in year_options %}
+      <option value="{{ y }}" {% if y == year %}selected{% endif %}>{{ y }}年</option>
+      {% endfor %}
+    </select>
+
+    <select id="monthSelect" class="form-select" style="width: 90px;">
+      {% for mm in range(1, 13) %}
+      <option value="{{ mm }}" {% if mm == month %}selected{% endif %}>{{ mm }}月</option>
+      {% endfor %}
+    </select>
+
+    <button id="applyBtn" class="btn btn-primary">查询</button>
+  </div>
+
+  <div class="text-secondary small">
+    班次：早班({{ shift_desc.early }}) / 中班({{ shift_desc.mid }}) / 大中班({{ shift_desc.bigmid }}) / 晚班({{ shift_desc.night }}) / 休息
+  </div>
+</div>
+
+{% if request.query_params.get("error") %}
+<div class="alert alert-danger py-2">{{ request.query_params.get("error") }}</div>
+{% endif %}
+{% if request.query_params.get("success") %}
+<div class="alert alert-success py-2">{{ request.query_params.get("success") }}</div>
+{% endif %}
+
+<form method="post" action="/schedule/save">
+  <!-- 让后端知道保存哪个年月 -->
+  <input type="hidden" name="year" value="{{ year }}">
+  <input type="hidden" name="month" value="{{ month }}">
+
+  <div class="d-flex justify-content-end mb-2">
+    {% if current_user.role == "admin" %}
+      <button type="submit" class="btn btn-success">
+        <i class="bi bi-save"></i> 保存排班
+      </button>
+    {% else %}
+      <span class="badge bg-secondary">只读</span>
+    {% endif %}
+  </div>
+
+  <div class="table-responsive schedule-wrap" style="width: 1550px">
+    <table class="table table-bordered align-middle small schedule-table" style="min-width: 1600px;">
+      <thead class="table-light">
+        <tr>
+          <th class="name-col" style="position: sticky; left: 0; z-index: 2; background: #f8f9fa;">
+            姓名
+          </th>
+          {% for d in day_list %}
+            <th class="text-center day-col">
+              {{ d.day }}<br>
+              <span class="text-secondary">{{ weekday_map[d.weekday()] }}</span>
+            </th>
+          {% endfor %}
+        </tr>
+      </thead>
+
+      <tbody>
+        {% for name in operator_names %}
+        <tr>
+          <th class="name-col" style="position: sticky; left: 0; z-index: 1; background: #fff;">
+            {{ name }}
+          </th>
+
+          {% for d in day_list %}
+            {% set key = (name, d) %}
+            {% set st = shifts_map.get(key, "off") %}
+
+            <td class="text-center day-col">
+              {% if current_user.role == "admin" %}
+                <select class="form-select form-select-sm"
+                        name="shift__{{ name }}__{{ d.isoformat() }}">
+                  {% for val, label in shift_options %}
+                    <option value="{{ val }}" {% if val == st %}selected{% endif %}>{{ label }}</option>
+                  {% endfor %}
+                </select>
+              {% else %}
+                <span class="badge bg-light text-dark border">
+                  {{ shift_label.get(st, "休息") }}
+                </span>
+              {% endif %}
+            </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</form>
+
+<script>
+  document.getElementById("applyBtn").addEventListener("click", () => {
+    const y = document.getElementById("yearSelect").value;
+    const m = document.getElementById("monthSelect").value;
+    window.location.href = `/schedule?year=${y}&month=${m}`;
+  });
+</script>
+
+{% endblock %}

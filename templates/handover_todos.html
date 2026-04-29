@@ -1,0 +1,1165 @@
+{% extends "base.html" %}
+
+{% block title %}待办及信息同步 - 耍牌系统{% endblock %}
+
+{% block breadcrumb %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 待办及信息同步
+{% endblock %}
+
+{% block content %}
+<style>
+    .page-section-title {
+        font-weight: 700;
+        color: #1d4ed8;
+        letter-spacing: 0.3px;
+    }
+
+    .highlight-primary { font-weight: 700; color: #1d4ed8; }
+    .highlight-danger { font-weight: 700; color: #dc2626; }
+    .highlight-success { font-weight: 700; color: #059669; }
+    .highlight-warning { font-weight: 700; color: #d97706; }
+
+    .stat-number {
+        font-size: 1.9rem;
+        font-weight: 800;
+        line-height: 1.2;
+        letter-spacing: 0.3px;
+    }
+
+    .todo-card-title {
+        font-weight: 800;
+        color: #0f172a;
+        font-size: 1.08rem;
+    }
+
+    .todo-key-value {
+        font-size: 0.95rem;
+        margin-bottom: 0.35rem;
+    }
+
+    .todo-key-value .key {
+        color: #64748b;
+        font-weight: 600;
+    }
+
+    .todo-key-value .value {
+        color: #111827;
+        font-weight: 700;
+    }
+
+    .todo-modal-header {
+        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+        color: #fff;
+        border-bottom: none;
+        border-top-left-radius: 1rem;
+        border-top-right-radius: 1rem;
+        padding: 14px 18px;
+    }
+
+    .todo-modal-header .modal-title {
+        color: #fff;
+        font-weight: 800;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .todo-modal-header .btn-close {
+        filter: brightness(0) invert(1);
+        opacity: 0.9;
+    }
+
+    .todo-modal-header .btn-close:hover {
+        opacity: 1;
+    }
+
+    .modal-section-title {
+        font-size: 0.96rem;
+        font-weight: 800;
+        color: #1d4ed8;
+        margin-bottom: 0.65rem;
+    }
+
+    .detail-block-title {
+        font-weight: 800;
+        color: #1d4ed8;
+        margin-bottom: 0.45rem;
+    }
+
+    /* ===== 关键修复：form 才是 body/footer 的直接父层，必须让 form 成为纵向 flex 容器 ===== */
+
+    #addTodoModal,
+    #editTodoModal {
+        overflow: hidden;
+    }
+
+    #addTodoModal .modal-dialog,
+    #editTodoModal .modal-dialog {
+        max-width: 900px;
+        width: min(900px, calc(100vw - 24px));
+        height: calc(100vh - 24px);
+        margin: 12px auto;
+    }
+
+    #addTodoModal .modal-content,
+    #editTodoModal .modal-content {
+        height: 100%;
+        max-height: 100%;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    /* 关键：form 也要占满并成为纵向布局 */
+    #addTodoModal .todo-modal-form,
+    #editTodoModal .todo-modal-form {
+        flex: 1 1 auto;
+        min-height: 0;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    #addTodoModal .modal-header,
+    #editTodoModal .modal-header {
+        flex: 0 0 auto;
+    }
+
+    #addTodoModal .modal-body,
+    #editTodoModal .modal-body {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 20px;
+    }
+
+    #addTodoModal .modal-footer,
+    #editTodoModal .modal-footer {
+        flex: 0 0 auto;
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        padding: 16px 20px;
+        background: #fff;
+        border-top: 1px solid #e5e7eb;
+    }
+
+    /* 小屏适配 */
+    @media (max-width: 768px) {
+        #addTodoModal .modal-dialog,
+        #editTodoModal .modal-dialog {
+            width: calc(100vw - 12px);
+            height: calc(100vh - 12px);
+            margin: 6px auto;
+        }
+
+        #addTodoModal .modal-body,
+        #editTodoModal .modal-body {
+            padding-bottom: 16px;
+        }
+
+        #addTodoModal .modal-footer,
+        #editTodoModal .modal-footer {
+            padding: 12px 14px;
+        }
+    }
+
+    .customer-search-wrapper {
+        position: relative;
+    }
+
+    .customer-search-result {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
+        right: 0;
+        z-index: 1080;
+        background: #fff;
+        border: 1px solid #dbe3f0;
+        border-radius: 14px;
+        box-shadow: 0 12px 28px rgba(15, 23, 42, 0.12);
+        max-height: 260px;
+        overflow-y: auto;
+        display: none;
+    }
+
+    .customer-search-item {
+        padding: 10px 12px;
+        border-bottom: 1px solid #eef2f7;
+        cursor: pointer;
+        transition: background 0.15s ease;
+    }
+
+    .customer-search-item:last-child {
+        border-bottom: none;
+    }
+
+    .customer-search-item:hover {
+        background: #f8fbff;
+    }
+
+    .customer-search-item.active-selected {
+        background: #f1f5f9;
+        cursor: not-allowed;
+        opacity: 0.75;
+    }
+
+    .customer-search-name {
+        font-weight: 700;
+        color: #0f172a;
+    }
+
+    .customer-search-meta {
+        font-size: 0.86rem;
+        color: #64748b;
+        margin-top: 2px;
+    }
+
+    .customer-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: #e8f0ff;
+        color: #1d4ed8;
+        font-weight: 700;
+        border: 1px solid #cdddfc;
+        font-size: 0.9rem;
+    }
+
+    .customer-tag-remove {
+        border: none;
+        background: transparent;
+        color: #1d4ed8;
+        font-weight: 700;
+        font-size: 0.95rem;
+        line-height: 1;
+        padding: 0;
+        cursor: pointer;
+    }
+
+    .customer-empty-tip {
+        padding: 12px;
+        color: #64748b;
+        text-align: center;
+        font-size: 0.92rem;
+    }
+
+    .customer-loading-tip {
+        padding: 12px;
+        color: #1d4ed8;
+        text-align: center;
+        font-size: 0.92rem;
+        font-weight: 700;
+    }
+
+    .customer-select-add-btn {
+        min-width: 44px;
+        flex: 0 0 44px;
+    }
+</style>
+
+
+<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+        <label class="fw-bold text-secondary mb-0">当前门店：</label>
+        <div class="dropdown">
+            <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                {{ current_store }}
+            </button>
+            <ul class="dropdown-menu">
+                {% for store_name in store_list %}
+                <li>
+                    <a class="dropdown-item {% if store_name == current_store %}active{% endif %}"
+                       href="/handover-sync?store={{ store_name }}&start_date={{ start_date }}&end_date={{ end_date }}&status_filter={{ status_filter }}&tag_filter={{ tag_filter }}&keyword={{ keyword }}{% if room_filter %}&room_filter={{ room_filter }}{% endif %}">
+                       {{ store_name }}
+                    </a>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+
+    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addTodoModal">
+        <i class="bi bi-plus-circle me-1"></i> 新增待办
+    </button>
+</div>
+
+{% if request.query_params.get('error') %}
+<div class="alert alert-danger py-2">{{ request.query_params.get('error') }}</div>
+{% endif %}
+{% if request.query_params.get('success') %}
+<div class="alert alert-success py-2">{{ request.query_params.get('success') }}</div>
+{% endif %}
+
+<div class="card border-0 shadow-sm rounded-4 mb-4">
+    <div class="card-header bg-light fw-bold">筛选条件</div>
+    <div class="card-body">
+        <form method="get" action="/handover-sync" class="row g-3 align-items-end">
+            <input type="hidden" name="store" value="{{ current_store }}">
+
+            <div class="col-md-2">
+                <label class="form-label">开始日期</label>
+                <input type="date" class="form-control" name="start_date" value="{{ start_date }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">结束日期</label>
+                <input type="date" class="form-control" name="end_date" value="{{ end_date }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">状态</label>
+                <select class="form-select" name="status_filter">
+                    <option value="all" {% if status_filter == 'all' %}selected{% endif %}>全部</option>
+                    <option value="unresolved" {% if status_filter == 'unresolved' %}selected{% endif %}>未解决</option>
+                    <option value="resolved" {% if status_filter == 'resolved' %}selected{% endif %}>已解决</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">标签</label>
+                <select class="form-select" name="tag_filter">
+                    <option value="all" {% if tag_filter == 'all' %}selected{% endif %}>全部</option>
+                    <option value="pinned" {% if tag_filter == 'pinned' %}selected{% endif %}>已置顶</option>
+                    <option value="remarked" {% if tag_filter == 'remarked' %}selected{% endif %}>已备注</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">包间</label>
+                <select class="form-select" name="room_filter">
+                    <option value="">全部包间</option>
+                    {% for room in room_list %}
+                    <option value="{{ room.id }}" {% if room_filter and room_filter|int == room.id %}selected{% endif %}>{{ room.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">关键词</label>
+                <input type="text" class="form-control" name="keyword" value="{{ keyword }}" placeholder="搜概述/备注/过程">
+            </div>
+
+            <div class="col-12 d-flex gap-2">
+                <button type="submit" class="btn btn-primary">查询</button>
+                <a href="/handover-sync?store={{ current_store }}" class="btn btn-outline-secondary">重置</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="card border-0 shadow-sm rounded-4 h-100">
+            <div class="card-body">
+                <div class="text-secondary small mb-2">未收金额总数</div>
+                <div class="stat-number highlight-danger">{{ stats.unreceived_amount }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card border-0 shadow-sm rounded-4 h-100">
+            <div class="card-body">
+                <div class="text-secondary small mb-2">存储押金总数</div>
+                <div class="stat-number highlight-primary">{{ stats.deposit_amount }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card border-0 shadow-sm rounded-4 h-100">
+            <div class="card-body">
+                <div class="text-secondary small mb-2">未解决待办数</div>
+                <div class="stat-number highlight-warning">{{ stats.unresolved_count }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card border-0 shadow-sm rounded-4 h-100">
+            <div class="card-body">
+                <div class="text-secondary small mb-2">已置顶待办数</div>
+                <div class="stat-number highlight-success">{{ stats.pinned_count }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0 page-section-title">
+        <i class="bi bi-card-checklist me-1"></i>待办列表
+    </h5>
+    <span class="text-secondary">共 {{ todo_cards|length }} 条</span>
+</div>
+
+{% if todo_cards %}
+<div class="d-flex flex-column gap-3">
+    {% for todo in todo_cards %}
+    <div class="card border-0 shadow-sm rounded-4 {% if todo.status == 'unresolved' and todo.is_pinned %}border-start border-4 border-warning{% endif %}">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
+                <div>
+                    <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+                        <h5 class="mb-0 todo-card-title">{{ todo.summary }}</h5>
+                        {% if todo.status == 'unresolved' %}
+                        <span class="badge text-bg-danger">未解决</span>
+                        {% else %}
+                        <span class="badge text-bg-success">已解决</span>
+                        {% endif %}
+                        {% if todo.is_pinned and todo.status == 'unresolved' %}
+                        <span class="badge text-bg-warning">已置顶</span>
+                        {% endif %}
+                        {% if todo.remark %}
+                        <span class="badge text-bg-info">已备注</span>
+                        {% endif %}
+                    </div>
+                    <div class="todo-key-value"><span class="key">门店：</span><span class="value">{{ todo.store_name }}</span></div>
+                    <div class="todo-key-value"><span class="key">包间：</span><span class="value">{{ todo.room_name or '未指定包间' }}</span></div>
+                    <div class="todo-key-value"><span class="key">关联顾客：</span><span class="value">{{ todo.customer_names_short }}</span></div>
+                    <div class="todo-key-value">
+                        <span class="key">登记人：</span><span class="value">{{ todo.created_by_name }}</span>
+                        <span class="mx-2 text-secondary">｜</span>
+                        <span class="key">登记时间：</span><span class="value">{{ todo.created_at_str }}</span>
+                    </div>
+                    <div class="todo-key-value">
+                        <span class="key">处理人：</span><span class="value">{{ todo.handled_by_name or '-' }}</span>
+                        <span class="mx-2 text-secondary">｜</span>
+                        <span class="key">处理时间：</span><span class="value">{{ todo.resolved_at_str or '-' }}</span>
+                        <span class="mx-2 text-secondary">｜</span>
+                        <span class="key">最后更新时间：</span><span class="value">{{ todo.updated_at_str }}</span>
+                    </div>
+                </div>
+                <div class="d-flex gap-2 flex-wrap justify-content-end">
+                    <button class="btn btn-outline-secondary btn-sm" data-bs-toggle="collapse" data-bs-target="#detail-{{ todo.id }}">
+                        查看详情
+                    </button>
+
+                    <button class="btn btn-outline-info btn-sm"
+                            onclick="location.href='/handover-sync/locate/{{ todo.id }}?store={{ current_store }}'">
+                        定位
+                    </button>
+
+                    <button class="btn btn-outline-primary btn-sm" onclick='openEditModal({{ todo|tojson|safe }})'>
+                        编辑
+                    </button>
+
+                    {% if todo.status == 'unresolved' %}
+                    <button class="btn btn-outline-dark btn-sm" onclick='openProcessModal({{ todo.id }}, {{ todo.process_note|tojson|safe }})'>
+                        保存处理过程
+                    </button>
+
+                    <button class="btn btn-success btn-sm" onclick='openResolveModal({{ todo.id }}, {{ todo.process_note|tojson|safe }})'>
+                        标记已解决
+                    </button>
+
+                    <a href="/handover-sync/pin/{{ todo.id }}?store={{ current_store }}" class="btn btn-warning btn-sm">
+                        {% if todo.is_pinned %}取消置顶{% else %}置顶{% endif %}
+                    </a>
+                    {% else %}
+                    <a href="/handover-sync/reopen/{{ todo.id }}?store={{ current_store }}" class="btn btn-outline-danger btn-sm">
+                        改回未解决
+                    </a>
+                    {% endif %}
+
+                    <button class="btn btn-outline-danger btn-sm"
+                            onclick='openDeleteTodoModal({{ todo.id }}, {{ todo.summary|tojson|safe }})'>
+                        删除
+                    </button>
+                </div>
+            </div>
+
+            <div class="collapse mt-3" id="detail-{{ todo.id }}">
+                <div class="border rounded-4 p-3 bg-light-subtle">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="detail-block-title"><i class="bi bi-file-text me-1"></i>详细说明</div>
+                            <div class="text-secondary">{{ todo.detail or '暂无详细说明' }}</div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="detail-block-title"><i class="bi bi-journal-text me-1"></i>备注</div>
+                            <div class="text-secondary">{{ todo.remark or '暂无备注' }}</div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="detail-block-title"><i class="bi bi-tools me-1"></i>解决过程</div>
+                            <div class="text-secondary">{{ todo.process_note or '暂无处理过程' }}</div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="detail-block-title"><i class="bi bi-people me-1"></i>全部关联顾客</div>
+                            <div class="text-secondary">{{ todo.customer_names_full or '未关联顾客' }}</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="card border-0 shadow-sm rounded-4">
+    <div class="card-body text-center text-secondary py-5">当前筛选条件下暂无待办记录</div>
+</div>
+{% endif %}
+
+<div class="modal fade" id="addTodoModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content rounded-4 border-0 shadow">
+            <div class="modal-header todo-modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-plus-circle-fill"></i>
+                    新增待办
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="post" action="/handover-sync/add" class="todo-modal-form">
+                <div class="modal-body">
+                    <input type="hidden" name="store_name" value="{{ current_store }}">
+                    <div class="row g-3">
+                        <div class="col-12">
+                            <div class="modal-section-title">
+                                <i class="bi bi-geo-alt me-1"></i>基础定位
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">门店</label>
+                            <input type="text" class="form-control" value="{{ current_store }}" disabled>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">包间（可选）</label>
+                            <select class="form-select" name="room_id">
+                                <option value="">不指定包间</option>
+                                {% for room in room_list %}
+                                <option value="{{ room.id }}">{{ room.name }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+
+                        <div class="col-12">
+                            <label class="form-label">关联顾客（可多个）</label>
+
+                            <div class="d-flex gap-2 mb-2">
+                                <select class="form-select" id="addCustomerSelect">
+                                    <option value="">请选择顾客</option>
+                                </select>
+                                <button type="button" class="btn btn-outline-primary customer-select-add-btn" onclick="appendSelectedCustomer('add')">+</button>
+                            </div>
+
+                            <div class="customer-search-wrapper">
+                                <input type="text"
+                                       class="form-control"
+                                       id="addCustomerKeyword"
+                                       placeholder="也可输入顾客昵称或微信号，支持快速筛选">
+                                <div id="addCustomerSearchResult" class="customer-search-result"></div>
+                            </div>
+
+                            <div class="form-text">既可以下拉直接选择，也可以输入昵称/微信号快速筛选后添加</div>
+                            <div id="addCustomerTags" class="d-flex flex-wrap gap-2 mt-2"></div>
+                            <div id="addCustomerInputs"></div>
+                        </div>
+
+                        <div class="col-12 mt-2">
+                            <div class="modal-section-title">
+                                <i class="bi bi-chat-left-text me-1"></i>事项内容
+                            </div>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">事件概述</label>
+                            <input type="text" class="form-control" name="summary" required>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">详细说明</label>
+                            <textarea class="form-control" rows="3" name="detail"></textarea>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">备注</label>
+                            <textarea class="form-control" rows="2" name="remark"></textarea>
+                        </div>
+                        <div class="col-12 mt-2">
+                            <div class="modal-section-title">
+                                <i class="bi bi-pin-angle me-1"></i>标签设置
+                            </div>
+                        </div>
+                        <div class="col-12">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="is_pinned" value="1" id="addPinned">
+                                <label class="form-check-label" for="addPinned">置顶（仅未解决状态下生效）</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="editTodoModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog ">
+        <div class="modal-content rounded-4 border-0 shadow">
+            <div class="modal-header todo-modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-pencil-square"></i>
+                    编辑待办
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="post" id="editTodoForm" class="todo-modal-form">
+                <div class="modal-body">
+                    <input type="hidden" name="store_name" value="{{ current_store }}">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">门店</label>
+                            <input type="text" class="form-control" value="{{ current_store }}" disabled>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">包间（可选）</label>
+                            <select class="form-select" name="room_id" id="editRoomId">
+                                <option value="">不指定包间</option>
+                                {% for room in room_list %}
+                                <option value="{{ room.id }}">{{ room.name }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+
+                        <div class="col-12">
+                            <label class="form-label">关联顾客（可多个）</label>
+
+                            <div class="d-flex gap-2 mb-2">
+                                <select class="form-select" id="editCustomerSelect">
+                                    <option value="">请选择顾客</option>
+                                </select>
+                                <button type="button" class="btn btn-outline-primary customer-select-add-btn" onclick="appendSelectedCustomer('edit')">+</button>
+                            </div>
+
+                            <div class="customer-search-wrapper">
+                                <input type="text"
+                                       class="form-control"
+                                       id="editCustomerKeyword"
+                                       placeholder="也可输入顾客昵称或微信号，支持快速筛选">
+                                <div id="editCustomerSearchResult" class="customer-search-result"></div>
+                            </div>
+
+                            <div class="form-text">既可以下拉直接选择，也可以输入昵称/微信号快速筛选后添加</div>
+                            <div id="editCustomerTags" class="d-flex flex-wrap gap-2 mt-2"></div>
+                            <div id="editCustomerInputs"></div>
+                        </div>
+
+                        <div class="col-12">
+                            <label class="form-label">事件概述</label>
+                            <input type="text" class="form-control" name="summary" id="editSummary" required>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">详细说明</label>
+                            <textarea class="form-control" rows="3" name="detail" id="editDetail"></textarea>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">备注</label>
+                            <textarea class="form-control" rows="2" name="remark" id="editRemark"></textarea>
+                        </div>
+                        <div class="col-12">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="is_pinned" value="1" id="editPinned">
+                                <label class="form-check-label" for="editPinned">置顶（仅未解决状态下生效）</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">保存修改</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="processModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content rounded-4 border-0 shadow">
+            <div class="modal-header todo-modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-tools"></i>
+                    保存处理过程
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="post" id="processForm">
+                <div class="modal-body">
+                    <textarea class="form-control" rows="5" name="process_note" id="processNoteInput" placeholder="请输入处理过程" required></textarea>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-dark">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="resolveModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content rounded-4 border-0 shadow">
+            <div class="modal-header todo-modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-check-circle-fill"></i>
+                    标记已解决
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="post" id="resolveForm">
+                <div class="modal-body">
+                    <label class="form-label">解决说明（至少一句）</label>
+                    <textarea class="form-control" rows="5" name="process_note" id="resolveNoteInput" placeholder="请输入解决说明" required></textarea>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-success">确认解决</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="deleteTodoModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content rounded-4 border-0 shadow">
+            <div class="modal-header todo-modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-trash3-fill"></i>
+                    删除待办
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+
+            <div class="modal-body">
+                <div class="alert alert-warning mb-3">
+                    <div class="fw-bold mb-1">请确认是否删除这条待办？</div>
+                    <div class="small text-secondary">
+                        删除后将同时清除该待办的顾客关联及牌局联动关系，且该操作不可恢复。
+                    </div>
+                </div>
+
+                <div class="border rounded-4 p-3 bg-light-subtle">
+                    <div class="detail-block-title mb-2">
+                        <i class="bi bi-card-text me-1"></i>待办概述
+                    </div>
+                    <div id="deleteTodoSummary" class="text-secondary">-</div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                <a href="#" class="btn btn-danger" id="deleteTodoConfirmBtn">
+                    <i class="bi bi-trash3 me-1"></i>确认删除
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function escapeHtml(str) {
+    return String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function getModeElements(mode) {
+    return {
+        keywordInput: document.getElementById(`${mode}CustomerKeyword`),
+        resultBox: document.getElementById(`${mode}CustomerSearchResult`),
+        tagsBox: document.getElementById(`${mode}CustomerTags`),
+        inputsBox: document.getElementById(`${mode}CustomerInputs`),
+        selectEl: document.getElementById(`${mode}CustomerSelect`)
+    };
+}
+
+function getSelectedCustomerIds(mode) {
+    const { inputsBox } = getModeElements(mode);
+    return Array.from(inputsBox.querySelectorAll('input[name="customer_ids"]'))
+        .map(x => Number(x.value))
+        .filter(x => !!x);
+}
+
+function getSelectedCustomers(mode) {
+    const { inputsBox } = getModeElements(mode);
+    return Array.from(inputsBox.querySelectorAll('input[name="customer_ids"]')).map(input => ({
+        id: Number(input.value),
+        nickname: input.dataset.nickname || '',
+        wechat_id: input.dataset.wechatId || ''
+    }));
+}
+
+function renderCustomerTags(mode) {
+    const { tagsBox } = getModeElements(mode);
+    const customers = getSelectedCustomers(mode);
+
+    tagsBox.innerHTML = '';
+    customers.forEach(cust => {
+        const tag = document.createElement('span');
+        tag.className = 'customer-tag';
+        tag.innerHTML = `
+            <span>${escapeHtml(cust.nickname)}（${escapeHtml(cust.wechat_id || '')}）</span>
+            <button type="button" class="customer-tag-remove" onclick="removeCustomer('${mode}', ${cust.id})">×</button>
+        `;
+        tagsBox.appendChild(tag);
+    });
+}
+
+const customerSearchState = {
+    add: { timer: null, requestSeq: 0 },
+    edit: { timer: null, requestSeq: 0 }
+};
+
+const customerSelectCache = {
+    add: [],
+    edit: []
+};
+
+function getCurrentStoreForSearch() {
+    return {{ current_store|tojson|safe }};
+}
+
+function renderCustomerSelect(mode, customerList) {
+    const { selectEl } = getModeElements(mode);
+    if (!selectEl) return;
+
+    customerSelectCache[mode] = Array.isArray(customerList) ? customerList : [];
+    const selectedIds = getSelectedCustomerIds(mode);
+
+    selectEl.innerHTML =
+        `<option value="">请选择顾客</option>` +
+        customerSelectCache[mode].map(c => {
+            const cid = Number(c.id);
+            const disabled = selectedIds.includes(cid) ? 'disabled' : '';
+            return `<option value="${cid}" ${disabled}>${escapeHtml(c.nickname || '未命名')}（${escapeHtml(c.wechat_id || '')}）</option>`;
+        }).join('');
+}
+
+function addCustomer(mode, customer) {
+    const { inputsBox, keywordInput, resultBox } = getModeElements(mode);
+    const value = Number(customer.id);
+    if (!value) return;
+
+    const selectedIds = getSelectedCustomerIds(mode);
+    if (selectedIds.includes(value)) {
+        if (keywordInput) keywordInput.value = '';
+        if (resultBox) {
+            resultBox.style.display = 'none';
+            resultBox.innerHTML = '';
+        }
+        return;
+    }
+
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'customer_ids';
+    input.value = value;
+    input.dataset.nickname = customer.nickname || '';
+    input.dataset.wechatId = customer.wechat_id || '';
+    inputsBox.appendChild(input);
+
+    renderCustomerTags(mode);
+    renderCustomerSelect(mode, customerSelectCache[mode]);
+
+    if (keywordInput) keywordInput.value = '';
+    if (resultBox) {
+        resultBox.style.display = 'none';
+        resultBox.innerHTML = '';
+    }
+}
+
+function removeCustomer(mode, customerId) {
+    const { inputsBox } = getModeElements(mode);
+    Array.from(inputsBox.querySelectorAll('input[name="customer_ids"]')).forEach(x => {
+        if (Number(x.value) === Number(customerId)) x.remove();
+    });
+    renderCustomerTags(mode);
+    renderCustomerSelect(mode, customerSelectCache[mode]);
+}
+
+function appendSelectedCustomer(mode) {
+    const { selectEl } = getModeElements(mode);
+    if (!selectEl) return;
+
+    const customerId = Number(selectEl.value);
+    if (!customerId) return;
+
+    const customer = customerSelectCache[mode].find(c => Number(c.id) === customerId);
+    if (!customer) return;
+
+    addCustomer(mode, customer);
+    renderCustomerSelect(mode, customerSelectCache[mode]);
+    selectEl.value = '';
+}
+
+async function searchCustomersFromServer(mode, keyword) {
+    const { resultBox } = getModeElements(mode);
+    const store = getCurrentStoreForSearch();
+
+    if (!resultBox) return;
+    if (!keyword || !keyword.trim()) {
+        resultBox.style.display = 'none';
+        resultBox.innerHTML = '';
+        return;
+    }
+
+    const requestId = ++customerSearchState[mode].requestSeq;
+
+    resultBox.innerHTML = `<div class="customer-loading-tip">正在搜索顾客...</div>`;
+    resultBox.style.display = 'block';
+
+    try {
+        const resp = await fetch(
+            `/api/handover/customer-search?store=${encodeURIComponent(store)}&keyword=${encodeURIComponent(keyword)}&limit=12`,
+            {
+                method: 'GET',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            }
+        );
+
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+
+        const data = await resp.json();
+
+        if (requestId !== customerSearchState[mode].requestSeq) return;
+
+        renderCustomerSearchResult(mode, Array.isArray(data) ? data : []);
+    } catch (err) {
+        if (requestId !== customerSearchState[mode].requestSeq) return;
+        resultBox.innerHTML = `<div class="customer-empty-tip">搜索失败，请稍后重试</div>`;
+        resultBox.style.display = 'block';
+        console.error('顾客搜索失败:', err);
+    }
+}
+
+function renderCustomerSearchResult(mode, customerList) {
+    const { resultBox } = getModeElements(mode);
+    if (!resultBox) return;
+
+    renderCustomerSelect(mode, customerList);
+    const selectedIds = getSelectedCustomerIds(mode);
+
+    if (!customerList || !customerList.length) {
+        resultBox.innerHTML = `<div class="customer-empty-tip">未找到匹配顾客</div>`;
+        resultBox.style.display = 'block';
+        return;
+    }
+
+    resultBox.innerHTML = customerList.map(c => {
+        const selected = selectedIds.includes(Number(c.id));
+        const payload = encodeURIComponent(JSON.stringify({
+            id: c.id,
+            nickname: c.nickname || '',
+            wechat_id: c.wechat_id || ''
+        }));
+
+        return `
+            <div class="customer-search-item ${selected ? 'active-selected' : ''}"
+                 ${selected ? '' : `onclick="addCustomerByPayload('${mode}', '${payload}')"`}>
+                <div class="customer-search-name">
+                    ${escapeHtml(c.nickname || '未命名')}
+                    ${selected ? '<span class="badge text-bg-secondary ms-2">已选择</span>' : '<span class="badge text-bg-success ms-2">添加</span>'}
+                </div>
+                <div class="customer-search-meta">微信号：${escapeHtml(c.wechat_id || '')}</div>
+            </div>
+        `;
+    }).join('');
+
+    resultBox.style.display = 'block';
+}
+
+function addCustomerByPayload(mode, encodedPayload) {
+    try {
+        const payload = JSON.parse(decodeURIComponent(encodedPayload));
+        addCustomer(mode, payload);
+    } catch (e) {
+        console.error('解析顾客数据失败:', e);
+    }
+}
+
+function bindCustomerSearch(mode) {
+    const { keywordInput, resultBox } = getModeElements(mode);
+    if (!keywordInput || !resultBox) return;
+
+    keywordInput.addEventListener('input', function () {
+        const keyword = (this.value || '').trim();
+        if (customerSearchState[mode].timer) clearTimeout(customerSearchState[mode].timer);
+
+        if (!keyword) {
+            resultBox.innerHTML = '';
+            resultBox.style.display = 'none';
+            return;
+        }
+
+        customerSearchState[mode].timer = setTimeout(() => {
+            searchCustomersFromServer(mode, keyword);
+        }, 220);
+    });
+
+    keywordInput.addEventListener('focus', function () {
+        const keyword = (this.value || '').trim();
+        if (keyword) searchCustomersFromServer(mode, keyword);
+    });
+}
+
+function clearCustomerPicker(mode) {
+    const { keywordInput, resultBox, inputsBox, tagsBox, selectEl } = getModeElements(mode);
+    if (keywordInput) keywordInput.value = '';
+    if (resultBox) {
+        resultBox.innerHTML = '';
+        resultBox.style.display = 'none';
+    }
+    if (inputsBox) inputsBox.innerHTML = '';
+    if (tagsBox) tagsBox.innerHTML = '';
+    if (selectEl) selectEl.innerHTML = `<option value="">请选择顾客</option>`;
+    customerSearchState[mode].requestSeq += 1;
+}
+
+async function preloadCustomerSelect(mode) {
+    const store = getCurrentStoreForSearch();
+    try {
+        const resp = await fetch(
+            `/api/handover/customer-search?store=${encodeURIComponent(store)}&keyword=&limit=12`,
+            {
+                method: 'GET',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            }
+        );
+        if (!resp.ok) return;
+        const data = await resp.json();
+        renderCustomerSelect(mode, Array.isArray(data) ? data : []);
+    } catch (e) {
+        console.error('初始化顾客下拉失败:', e);
+    }
+}
+
+function openEditModal(todo) {
+    document.getElementById('editTodoForm').action = `/handover-sync/update/${todo.id}`;
+    document.getElementById('editSummary').value = todo.summary || '';
+    document.getElementById('editDetail').value = todo.detail || '';
+    document.getElementById('editRemark').value = todo.remark || '';
+    document.getElementById('editPinned').checked = !!todo.is_pinned;
+    document.getElementById('editRoomId').value = todo.room_id || '';
+
+    clearCustomerPicker('edit');
+
+    const inputsBox = document.getElementById('editCustomerInputs');
+    const seen = new Set();
+
+    if (Array.isArray(todo.customers) && todo.customers.length > 0) {
+        todo.customers.forEach(c => {
+            const cid = Number(c.id);
+            if (!cid || seen.has(cid)) return;
+            seen.add(cid);
+
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'customer_ids';
+            input.value = cid;
+            input.dataset.nickname = c.nickname || '';
+            input.dataset.wechatId = c.wechat_id || '';
+            inputsBox.appendChild(input);
+        });
+    } else {
+        (todo.customer_ids || []).forEach(id => {
+            const cid = Number(id);
+            if (!cid || seen.has(cid)) return;
+            seen.add(cid);
+
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'customer_ids';
+            input.value = cid;
+            input.dataset.nickname = `顾客#${cid}`;
+            input.dataset.wechatId = '';
+            inputsBox.appendChild(input);
+        });
+    }
+
+    renderCustomerTags('edit');
+    renderCustomerSelect('edit', customerSelectCache['edit']);
+
+    const modal = new bootstrap.Modal(document.getElementById('editTodoModal'));
+    modal.show();
+}
+
+function openProcessModal(todoId, note) {
+    document.getElementById('processForm').action = `/handover-sync/process/${todoId}`;
+    document.getElementById('processNoteInput').value = note || '';
+    new bootstrap.Modal(document.getElementById('processModal')).show();
+}
+
+function openResolveModal(todoId, note) {
+    document.getElementById('resolveForm').action = `/handover-sync/resolve/${todoId}`;
+    document.getElementById('resolveNoteInput').value = note || '';
+    new bootstrap.Modal(document.getElementById('resolveModal')).show();
+}
+
+
+function openDeleteTodoModal(todoId, summary) {
+    const summaryEl = document.getElementById('deleteTodoSummary');
+    const confirmBtn = document.getElementById('deleteTodoConfirmBtn');
+
+    if (summaryEl) {
+        summaryEl.textContent = summary || '-';
+    }
+
+    if (confirmBtn) {
+        confirmBtn.href = `/handover-sync/delete/${todoId}?store=${encodeURIComponent(getCurrentStoreForSearch())}`;
+    }
+
+    new bootstrap.Modal(document.getElementById('deleteTodoModal')).show();
+}
+
+
+document.addEventListener('click', function (e) {
+    ['add', 'edit'].forEach(mode => {
+        const { keywordInput, resultBox } = getModeElements(mode);
+        if (!keywordInput || !resultBox) return;
+
+        const clickedInsideKeyword = keywordInput.contains(e.target);
+        const clickedInsideResult = resultBox.contains(e.target);
+
+        if (!clickedInsideKeyword && !clickedInsideResult) {
+            resultBox.style.display = 'none';
+        }
+    });
+});
+
+document.addEventListener('DOMContentLoaded', function () {
+    bindCustomerSearch('add');
+    bindCustomerSearch('edit');
+
+    preloadCustomerSelect('add');
+    preloadCustomerSelect('edit');
+
+    const addTodoModalEl = document.getElementById('addTodoModal');
+    if (addTodoModalEl) {
+        addTodoModalEl.addEventListener('show.bs.modal', function () {
+            clearCustomerPicker('add');
+            preloadCustomerSelect('add');
+        });
+    }
+
+    const editTodoModalEl = document.getElementById('editTodoModal');
+    if (editTodoModalEl) {
+        editTodoModalEl.addEventListener('hidden.bs.modal', function () {
+            const resultBox = document.getElementById('editCustomerSearchResult');
+            const keywordInput = document.getElementById('editCustomerKeyword');
+            if (resultBox) {
+                resultBox.innerHTML = '';
+                resultBox.style.display = 'none';
+            }
+            if (keywordInput) keywordInput.value = '';
+        });
+    }
+});
+</script>
+{% endblock %}

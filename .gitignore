@@ -1,0 +1,27 @@
+# Local database and backups
+*.db
+*.db.backup_*
+*.sqlite
+*.sqlite3
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+shuapai/
+.venv/
+venv/
+env/
+
+# Local IDE / OS files
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# Local env and logs
+.env
+.env.*
+*.log

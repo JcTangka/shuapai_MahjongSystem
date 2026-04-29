@@ -1,0 +1,3119 @@
+{% extends "base.html" %}
+
+{% block title %}已组齐牌局 - 耍牌系统{% endblock %}
+
+{% block breadcrumb %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 已组齐牌局
+{% endblock %}
+
+{% block content %}
+<style>
+.customer-autocomplete-wrapper {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.customer-suggest-list {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    right: 0;
+    z-index: 1080;
+    background: #fff;
+    border: 1px solid #dbe3ef;
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(31, 45, 61, 0.12);
+    max-height: 260px;
+    overflow-y: auto;
+    display: none;
+}
+
+.customer-suggest-item {
+    padding: 10px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid #eef2f7;
+    transition: background 0.15s ease;
+}
+
+.customer-suggest-item:last-child {
+    border-bottom: none;
+}
+
+.customer-suggest-item:hover,
+.customer-suggest-item.active {
+    background: #f5f9ff;
+}
+
+.customer-suggest-name {
+    font-weight: 700;
+    color: #1f2d3d;
+}
+
+.customer-suggest-meta {
+    font-size: 12px;
+    color: #6c7a89;
+    margin-top: 2px;
+}
+
+.customer-suggest-empty {
+    padding: 10px 12px;
+    color: #909399;
+    font-size: 13px;
+}
+
+.player-invalid-warning {
+    border-color: #dc3545 !important;
+    box-shadow: 0 0 0 0.15rem rgba(220, 53, 69, 0.15) !important;
+}
+
+.remark-summary {
+    max-width: 150px;
+    display: inline-block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+}
+
+.player-cell-wrap {
+    max-width: 240px;
+    margin: auto;
+}
+
+.filter-card {
+    border: 0;
+    box-shadow: 0 0.125rem 0.75rem rgba(0,0,0,0.06);
+}
+
+.detail-label {
+    color: #6c757d;
+    font-size: 0.86rem;
+    margin-bottom: 4px;
+}
+
+.detail-value {
+    font-weight: 600;
+    color: #212529;
+    word-break: break-all;
+}
+
+.detail-section-card {
+    border: 1px solid #e9ecef;
+    border-radius: 14px;
+    padding: 16px;
+    background: #fafbfd;
+}
+
+.detail-section-title {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #0d6efd;
+    margin-bottom: 14px;
+}
+
+.focus-highlight-row td {
+    background: #fff8db !important;
+    border-top: 2px solid #f59e0b !important;
+    border-bottom: 2px solid #f59e0b !important;
+    transition: background 0.35s ease;
+}
+
+.focus-highlight-row td:first-child {
+    border-left: 2px solid #f59e0b !important;
+}
+
+.focus-highlight-row td:last-child {
+    border-right: 2px solid #f59e0b !important;
+}
+
+.focus-highlight-flash td {
+    animation: focusRowFlash 2.4s ease-in-out 1;
+}
+
+@keyframes focusRowFlash {
+    0% {
+        background-color: #fff3bf;
+    }
+    35% {
+        background-color: #ffe08a;
+    }
+    100% {
+        background-color: #fff8db;
+    }
+}
+
+.self-arrival-row td {
+    background: #f4f9ff;
+}
+
+.table-hover tbody tr.self-arrival-row:hover td {
+    background: #eaf4ff;
+}
+
+.self-arrival-source-badge {
+    display: inline-block;
+    margin-top: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 3px 8px;
+    border-radius: 999px;
+    color: #0b63ce;
+    background: rgba(13, 110, 253, 0.10);
+    border: 1px solid rgba(13, 110, 253, 0.22);
+}
+
+.self-arrival-note {
+    font-size: 12px;
+    color: #6c757d;
+}
+
+.self-arrival-room-fee-wrap {
+    display: none;
+}
+
+.self-arrival-room-fee-wrap.show {
+    display: block;
+}
+
+
+.source-switch-link {
+    border-radius: 999px;
+    padding: 8px 16px;
+    font-weight: 700;
+    text-decoration: none;
+    border: 1px solid #dbe3ef;
+    color: #4b5563;
+    background: #fff;
+    transition: all 0.18s ease;
+}
+
+.source-switch-link:hover {
+    color: #0d6efd;
+    border-color: rgba(13, 110, 253, 0.35);
+    background: #f8fbff;
+}
+
+.source-switch-link.active {
+    color: #fff;
+    border-color: #0d6efd;
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    box-shadow: 0 10px 24px rgba(37, 99, 235, 0.18);
+}
+
+.overflow-row td {
+    background: #fff7ed;
+}
+
+.table-hover tbody tr.overflow-row:hover td {
+    background: #ffedd5;
+}
+
+.overflow-source-badge {
+    display: inline-block;
+    margin-top: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 3px 8px;
+    border-radius: 999px;
+    color: #c2410c;
+    background: rgba(249, 115, 22, 0.12);
+    border: 1px solid rgba(249, 115, 22, 0.28);
+}
+
+.page-view-hint {
+    color: #6b7280;
+    font-size: 13px;
+}
+
+.stat-card-title {
+    font-weight: 700;
+    font-size: 1.05rem;
+    color: #111827;
+    margin-bottom: 8px;
+}
+
+.form-section-card {
+    border: 1px solid #e9ecef;
+    border-radius: 14px;
+    background: #fafbfd;
+}
+
+.form-section-title {
+    font-weight: 700;
+    color: #334155;
+    margin-bottom: 12px;
+}
+
+.overflow-form-modal .modal-dialog {
+    max-width: min(1140px, calc(100vw - 1rem));
+    margin: .5rem auto;
+    height: calc(100vh - 1rem);
+    display: flex;
+    align-items: stretch;
+}
+
+.overflow-form-modal .modal-content {
+    height: 100%;
+    max-height: none;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.overflow-form-modal .modal-content > form {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.overflow-form-modal .modal-header {
+    flex-shrink: 0;
+}
+
+.overflow-form-modal .modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 1rem;
+}
+
+.overflow-form-modal .modal-footer {
+    background: #fff;
+    border-top: 1px solid #e5e7eb;
+    flex-shrink: 0;
+}
+
+.overflow-form-modal .participant-card {
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 14px;
+    background: #fafbfd;
+}
+
+.overflow-form-note {
+    font-size: 12px;
+    color: #6b7280;
+}
+
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <div class="d-flex align-items-center">
+        <label class="me-2 fw-bold text-secondary">当前门店：</label>
+        <div class="dropdown">
+            <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                {{ current_store }}
+            </button>
+            <ul class="dropdown-menu">
+                {% for store_name in store_list %}
+                <li>
+                    <a class="dropdown-item {% if store_name == current_store %}active{% endif %}"
+                       href="/formed-games?store={{ store_name }}&source_filter={{ source_filter or 'normal' }}&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}{% if focus_game_id %}&focus_game_id={{ focus_game_id }}{% endif %}">
+                        {{ store_name }}
+                    </a>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+
+    <div class="d-flex gap-2 flex-wrap">
+        {% if source_filter == 'self_arrival' %}
+        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#selfArrivalAddModal">
+            <i class="bi bi-plus-circle me-1"></i>自主到店登记
+        </button>
+        {% elif source_filter == 'overflow' %}
+        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#overflowAddModal" onclick="resetOverflowAddModal()">
+            <i class="bi bi-plus-circle me-1"></i>新增溢出单
+        </button>
+        {% endif %}
+
+        <button class="btn btn-success" data-bs-toggle="modal" data-bs-target="#exportExcelModal">
+            <i class="bi bi-file-earmark-excel me-1"></i>数据导出
+        </button>
+    </div>
+</div>
+
+<div class="card filter-card mb-3">
+    <div class="card-body py-3">
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+            <span class="fw-bold text-secondary me-1">已组齐视图：</span>
+            <a class="source-switch-link {% if source_filter == 'normal' %}active{% endif %}"
+               href="/formed-games?store={{ current_store }}&source_filter=normal&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}">
+                常规牌局
+            </a>
+            <a class="source-switch-link {% if source_filter == 'self_arrival' %}active{% endif %}"
+               href="/formed-games?store={{ current_store }}&source_filter=self_arrival&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}">
+                自主到店
+            </a>
+            <a class="source-switch-link {% if source_filter == 'overflow' %}active{% endif %}"
+               href="/formed-games?store={{ current_store }}&source_filter=overflow&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}">
+                门店溢出单
+            </a>
+            <span class="page-view-hint ms-auto">当前视图只展示对应来源的已组齐订单</span>
+        </div>
+    </div>
+</div>
+
+<div class="card filter-card mb-4">
+    <div class="card-body">
+        <form method="get" action="/formed-games">
+            <input type="hidden" name="store" value="{{ current_store }}">
+            <input type="hidden" name="source_filter" value="{{ source_filter or 'normal' }}">
+
+            <div class="row g-3 align-items-end">
+                <div class="col-md-4">
+                    <label class="form-label fw-bold">组局订单状态</label>
+                    <select class="form-select" name="pay_status">
+                        <option value="all" {% if pay_status == 'all' %}selected{% endif %}>全部组局订单</option>
+                        <option value="paid" {% if pay_status == 'paid' %}selected{% endif %}>已收齐组局订单</option>
+                        <option value="unpaid" {% if pay_status == 'unpaid' %}selected{% endif %}>未收齐组局订单</option>
+                    </select>
+                </div>
+
+                <div class="col-md-4">
+                    <label class="form-label fw-bold">订单时间</label>
+                    <select class="form-select" name="date_filter" id="dateFilterSelect" onchange="toggleCustomDateRange()">
+                        <option value="today" {% if date_filter == 'today' %}selected{% endif %}>当日</option>
+                        <option value="yesterday" {% if date_filter == 'yesterday' %}selected{% endif %}>昨日</option>
+                        <option value="last2days" {% if date_filter == 'last2days' %}selected{% endif %}>近两日</option>
+                        <option value="last7" {% if date_filter == 'last7' %}selected{% endif %}>近七天</option>
+                        <option value="this_month" {% if date_filter == 'this_month' %}selected{% endif %}>本月</option>
+                        <option value="last_month" {% if date_filter == 'last_month' %}selected{% endif %}>上月</option>
+                        <option value="custom" {% if date_filter == 'custom' %}selected{% endif %}>时间区间选择</option>
+                    </select>
+                </div>
+
+                <div class="col-md-4">
+                    <label class="form-label fw-bold">{% if source_filter == 'overflow' %}收款方式{% else %}下单方式{% endif %}</label>
+                    <select class="form-select" name="payment_method_filter">
+                        <option value="all" {% if payment_method_filter == 'all' %}selected{% endif %}>全部</option>
+                        {% if source_filter == 'overflow' %}
+                        <option value="溢出收款" {% if payment_method_filter == '溢出收款' %}selected{% endif %}>溢出收款</option>
+                        {% else %}
+                        <option value="代客收款" {% if payment_method_filter == '代客收款' %}selected{% endif %}>代客收款</option>
+                        <option value="代客验券" {% if payment_method_filter == '代客验券' %}selected{% endif %}>代客验券</option>
+                        <option value="用户小程序自定" {% if payment_method_filter == '用户小程序自定' %}selected{% endif %}>用户小程序自定</option>
+                        <option value="美团团购" {% if payment_method_filter == '美团团购' %}selected{% endif %}>美团团购</option>
+                        <option value="抖音团购" {% if payment_method_filter == '抖音团购' %}selected{% endif %}>抖音团购</option>
+                        <option value="美团预定" {% if payment_method_filter == '美团预定' %}selected{% endif %}>美团预定</option>
+                        {% endif %}
+                    </select>
+                </div>
+
+                <div class="col-md-3 custom-date-range" style="display: none;">
+                    <label class="form-label fw-bold">开始日期</label>
+                    <input type="date" class="form-control" name="start_date" value="{{ start_date or '' }}">
+                </div>
+
+                <div class="col-md-3 custom-date-range" style="display: none;">
+                    <label class="form-label fw-bold">结束日期</label>
+                    <input type="date" class="form-control" name="end_date" value="{{ end_date or '' }}">
+                </div>
+
+                <div class="col-md-3">
+                    <button type="submit" class="btn btn-primary w-100">
+                        <i class="bi bi-search me-1"></i>筛选
+                    </button>
+                </div>
+
+                <div class="col-md-3">
+                    <a href="/formed-games?store={{ current_store }}&source_filter={{ source_filter or 'normal' }}" class="btn btn-outline-secondary w-100">
+                        <i class="bi bi-arrow-clockwise me-1"></i>重置
+                    </a>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+
+<div id="formedGamesContentArea">
+{% if source_filter == 'normal' %}
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body">
+        <div class="d-flex align-items-center mb-3">
+            <i class="bi bi-cash-coin text-primary me-2 fs-5"></i>
+            <h6 class="mb-0 fw-bold">金额统计（代客收款）</h6>
+        </div>
+
+        <div class="row g-3">
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">代客收款总金额</div>
+                    <div class="fs-4 fw-bold text-primary">¥{{ total_collection_amount or 0 }}</div>
+                    <div class="small text-muted mt-1">当前门店 + 当前时间范围 + 当前筛选条件下，支付方式为“代客收款”的金额总和</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">已收金额</div>
+                    <div class="fs-4 fw-bold text-success">¥{{ collected_amount or 0 }}</div>
+                    <div class="small text-muted mt-1">支付方式为“代客收款”的微信收款 + 支付宝收款总和</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">未收金额</div>
+                    <div class="fs-4 fw-bold text-danger">¥{{ uncollected_amount or 0 }}</div>
+                    <div class="small text-muted mt-1">代客收款总金额 - 已收金额</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">微信支付</div>
+                    <div class="fs-4 fw-bold text-success">¥{{ wechat_collection_amount or 0 }}</div>
+                    <div class="small text-muted mt-1">支付方式为“代客收款”的微信收款总和</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">支付宝支付</div>
+                    <div class="fs-4 fw-bold text-primary">¥{{ alipay_collection_amount or 0 }}</div>
+                    <div class="small text-muted mt-1">支付方式为“代客收款”的支付宝收款总和</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% elif source_filter == 'overflow' %}
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body">
+        <div class="d-flex align-items-center mb-3">
+            <i class="bi bi-box-arrow-up-right text-warning me-2 fs-5"></i>
+            <h6 class="mb-0 fw-bold">溢出单统计</h6>
+        </div>
+
+        <div class="row g-3">
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">溢出订单数</div>
+                    <div class="fs-4 fw-bold text-dark">{{ overflow_order_count or 0 }}</div>
+                    <div class="small text-muted mt-1">当前门店、当前时间范围内的溢出单总数</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">预定金额总额</div>
+                    <div class="fs-4 fw-bold text-primary">¥{{ overflow_reserved_total or 0 }}</div>
+                    <div class="small text-muted mt-1">溢出单预定金额合计</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">实收金额总额</div>
+                    <div class="fs-4 fw-bold text-success">¥{{ overflow_received_total or 0 }}</div>
+                    <div class="small text-muted mt-1">微信 + 支付宝实收合计</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">赚取差额总额</div>
+                    <div class="fs-4 fw-bold {% if (overflow_profit_total or 0) >= 0 %}text-warning{% else %}text-danger{% endif %}">¥{{ overflow_profit_total or 0 }}</div>
+                    <div class="small text-muted mt-1">实收金额 - 预定金额</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">收款状态</div>
+                    <div class="fs-5 fw-bold text-dark">已收齐 {{ overflow_paid_count or 0 }} 单 / 未收齐 {{ overflow_unpaid_count or 0 }} 单</div>
+                    <div class="small text-muted mt-1">仅统计当前筛选结果</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% else %}
+{% set sa = namespace(total_count=game_list|length, charge_count=0, charge_amount=0.0, received=0.0, unpaid=0, non_cashier=0) %}
+{% for g in game_list %}
+    {% if g.payment_method == '代客收款' %}
+        {% set sa.charge_count = sa.charge_count + 1 %}
+        {% set sa.charge_amount = sa.charge_amount + (g.room_fee or 0) %}
+        {% set sa.received = sa.received + (g.wechat_pay or 0) + (g.Alipay or 0) %}
+        {% if not g.is_payAll %}{% set sa.unpaid = sa.unpaid + 1 %}{% endif %}
+    {% else %}
+        {% set sa.non_cashier = sa.non_cashier + 1 %}
+    {% endif %}
+{% endfor %}
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body">
+        <div class="d-flex align-items-center mb-3">
+            <i class="bi bi-journal-check text-primary me-2 fs-5"></i>
+            <h6 class="mb-0 fw-bold">自主到店统计</h6>
+        </div>
+
+        <div class="row g-3">
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">登记单总数</div>
+                    <div class="fs-4 fw-bold text-dark">{{ sa.total_count }}</div>
+                    <div class="small text-muted mt-1">当前门店、当前时间范围内的自主到店登记单总数</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">代客收款订单数</div>
+                    <div class="fs-4 fw-bold text-primary">{{ sa.charge_count }}</div>
+                    <div class="small text-muted mt-1">需进入系统内结算流程的自主到店单数量</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">代客收款总金额</div>
+                    <div class="fs-4 fw-bold text-primary">¥{{ '%.2f'|format(sa.charge_amount) }}</div>
+                    <div class="small text-muted mt-1">仅统计下单方式为“代客收款”的登记单</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">已收金额</div>
+                    <div class="fs-4 fw-bold text-success">¥{{ '%.2f'|format(sa.received) }}</div>
+                    <div class="small text-muted mt-1">代客收款登记单的微信 + 支付宝实收合计</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">未收金额</div>
+                    <div class="fs-4 fw-bold text-danger">¥{{ '%.2f'|format(sa.charge_amount - sa.received) }}</div>
+                    <div class="small text-muted mt-1">代客收款总金额 - 已收金额</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">无需结算订单数</div>
+                    <div class="fs-4 fw-bold text-secondary">{{ sa.non_cashier }}</div>
+                    <div class="small text-muted mt-1">美团/抖音/预定/用户自定等非系统结算单量</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if source_filter == 'overflow' %}
+<div class="card border-0 shadow-sm">
+    <div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th>序号</th>
+                    <th>预约时间</th>
+                    <th>订单开始时间</th>
+                    <th>外部门店 / 包间</th>
+                    <th>分数 / 玩法</th>
+                    <th>参与人</th>
+                    <th>预定金额</th>
+                    <th>实收金额</th>
+                    <th>赚取差额</th>
+                    <th>支出门店</th>
+                    <th>支付状态</th>
+                    <th>接待人</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for game in game_list %}
+                {% set actual_received = (game.wechat_pay or 0) + (game.Alipay or 0) %}
+                {% set profit_amount = actual_received - (game.room_fee or 0) %}
+                <tr id="game-row-{{ game.id }}" class="overflow-row {% if focus_game_id and focus_game_id == game.id %}focus-highlight-row{% endif %}">
+                    <td class="fw-bold text-secondary">
+                        #{{ game.serial_number }}
+                        <div><span class="overflow-source-badge">门店溢出单</span></div>
+                    </td>
+                    <td>
+                        <div class="small text-muted">{{ game.record_date }}</div>
+                        <div class="fw-bold">{{ game.start_time }}</div>
+                    </td>
+                    <td>
+                        {% if game.order_start_time %}
+                            <div class="fw-bold text-dark">{{ game.order_start_time }}</div>
+                        {% else %}
+                            <span class="text-muted small">未填写</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="fw-bold text-dark">{{ game.external_store_name or '-' }}</div>
+                        <div class="small text-muted">{{ game.room_name or '未填写外部包间' }}</div>
+                    </td>
+                    <td>
+                        <div class="text-danger fw-bold">{{ game.stakes }}</div>
+                        <div class="small text-muted">{{ game.game_type }}</div>
+                    </td>
+                    <td>
+                        <div class="player-cell-wrap">
+                            <div class="d-flex justify-content-center gap-1 flex-wrap">
+                                {% if game.player_1 %}<span class="badge bg-light text-dark border">{{ game.player_1 }}</span>{% endif %}
+                                {% if game.player_2 %}<span class="badge bg-light text-dark border">{{ game.player_2 }}</span>{% endif %}
+                                {% if game.player_3 %}<span class="badge bg-light text-dark border">{{ game.player_3 }}</span>{% endif %}
+                                {% if game.player_4 %}<span class="badge bg-light text-dark border">{{ game.player_4 }}</span>{% endif %}
+                            </div>
+
+                            {% set ns = namespace(note_count=0) %}
+                            {% if game.player_1_note %}{% set ns.note_count = ns.note_count + 1 %}{% endif %}
+                            {% if game.player_2_note %}{% set ns.note_count = ns.note_count + 1 %}{% endif %}
+                            {% if game.player_3_note %}{% set ns.note_count = ns.note_count + 1 %}{% endif %}
+                            {% if game.player_4_note %}{% set ns.note_count = ns.note_count + 1 %}{% endif %}
+
+                            {% if ns.note_count > 0 %}
+                            <div class="small mt-1">
+                                <span class="badge bg-warning text-dark"
+                                      data-bs-toggle="tooltip"
+                                      data-bs-html="true"
+                                      title="
+                                      {% if game.player_1_note and game.player_1 %}{{ game.player_1 }}：{{ game.player_1_note }}<br>{% endif %}
+                                      {% if game.player_2_note and game.player_2 %}{{ game.player_2 }}：{{ game.player_2_note }}<br>{% endif %}
+                                      {% if game.player_3_note and game.player_3 %}{{ game.player_3 }}：{{ game.player_3_note }}<br>{% endif %}
+                                      {% if game.player_4_note and game.player_4 %}{{ game.player_4 }}：{{ game.player_4_note }}{% endif %}
+                                      ">
+                                    {{ ns.note_count }}人备注
+                                </span>
+                            </div>
+                            {% endif %}
+                        </div>
+                    </td>
+                    <td>
+                        <div class="fw-bold text-primary">¥{{ game.room_fee or 0 }}</div>
+                        <div class="small text-muted">{{ game.payment_method or '溢出收款' }}</div>
+                    </td>
+                    <td>
+                        <div class="fw-bold text-success">¥{{ actual_received|round(2) }}</div>
+                        <div class="small text-muted">微信 {{ game.wechat_pay or 0 }} / 支付宝 {{ game.Alipay or 0 }}</div>
+                    </td>
+                    <td>
+                        <div class="fw-bold {% if profit_amount >= 0 %}text-warning{% else %}text-danger{% endif %}">¥{{ profit_amount|round(2) }}</div>
+                    </td>
+                    <td>
+                        {% if game.table_note %}
+                            <span class="badge bg-secondary" data-bs-toggle="tooltip" data-bs-placement="top" title="{{ game.table_note }}">
+                                <span class="remark-summary">{{ game.table_note }}</span>
+                            </span>
+                        {% else %}
+                            <span class="text-muted small">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if game.is_payAll %}
+                            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>已收齐</span>
+                        {% else %}
+                            <span class="badge bg-danger bg-opacity-75"><i class="bi bi-x-circle me-1"></i>未收齐</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <span class="badge bg-info text-dark">
+                            <i class="bi bi-person-circle me-1"></i>{{ game.who_did or '未知' }}
+                        </span>
+                    </td>
+                    <td>
+                        <div class="d-flex flex-column gap-1">
+                            <button class="btn btn-sm btn-primary"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#paymentModal"
+                                    onclick="openPaymentModal(this)"
+                                    data-id="{{ game.id }}"
+                                    data-fee="{{ game.room_fee }}"
+                                    data-wechat="{{ game.wechat_pay }}"
+                                    data-alipay="{{ game.Alipay }}"
+                                    data-payall="{{ 'true' if game.is_payAll else 'false' }}">
+                                <i class="bi bi-calculator"></i> 结算
+                            </button>
+
+                            <button class="btn btn-sm btn-warning text-dark"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#overflowEditModal"
+                                    data-edit-game-id="{{ game.id }}"
+                                    data-edit-type="overflow"
+                                    onclick="openOverflowEditModal(this)"
+                                    data-id="{{ game.id }}"
+                                    data-date="{{ game.record_date }}"
+                                    data-time="{{ game.start_time }}"
+                                    data-order-start="{{ game.order_start_time or '' }}"
+                                    data-external-store="{{ game.external_store_name or '' }}"
+                                    data-room="{{ game.room_name or '' }}"
+                                    data-stakes="{{ game.stakes }}"
+                                    data-gametype="{{ game.game_type }}"
+                                    data-tags="{{ game.tags or '' }}"
+                                    data-fee="{{ game.room_fee or 0 }}"
+                                    data-table-note="{{ game.table_note or '' }}"
+                                    data-p1="{{ game.player_1 or '' }}" data-p1-wx="{{ game.player_1_wechat or '' }}" data-p1-note="{{ game.player_1_note or '' }}"
+                                    data-p2="{{ game.player_2 or '' }}" data-p2-wx="{{ game.player_2_wechat or '' }}" data-p2-note="{{ game.player_2_note or '' }}"
+                                    data-p3="{{ game.player_3 or '' }}" data-p3-wx="{{ game.player_3_wechat or '' }}" data-p3-note="{{ game.player_3_note or '' }}"
+                                    data-p4="{{ game.player_4 or '' }}" data-p4-wx="{{ game.player_4_wechat or '' }}" data-p4-note="{{ game.player_4_note or '' }}">
+                                <i class="bi bi-pencil-square"></i> 编辑
+                            </button>
+
+                            <button class="btn btn-sm btn-outline-info"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#detailModal"
+                                    onclick="openDetailModal({{ game.id }})">
+                                <i class="bi bi-card-text"></i> 详情
+                            </button>
+
+                            <a href="/formed-games/overflow/delete/{{ game.id }}?store={{ current_store }}&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}&source_filter=overflow"
+                               class="btn btn-sm btn-outline-danger"
+                               onclick="return confirm('确定要删除这条【门店溢出单】吗？删除后不可恢复。');">
+                                <i class="bi bi-trash"></i> 删除
+                            </a>
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="13" class="text-muted py-5">
+                        <i class="bi bi-box-arrow-up-right fs-1 d-block mb-3"></i>
+                        当前门店暂无门店溢出单。
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% elif source_filter == 'self_arrival' %}
+<div class="card border-0 shadow-sm">
+    <div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th>序号</th>
+                    <th>订单开始时间</th>
+                    <th>预约包间</th>
+                    <th>下单用户</th>
+                    <th>下单方式</th>
+                    <th>费用详情</th>
+                    <th>支付状态</th>
+                    <th>收款详情</th>
+                    <th>接待店长</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for game in game_list %}
+                {% set remaining = (game.room_fee or 0) - (game.wechat_pay or 0) - (game.Alipay or 0) %}
+                <tr id="game-row-{{ game.id }}" class="self-arrival-row {% if focus_game_id and focus_game_id == game.id %}focus-highlight-row{% endif %}">
+                    <td class="fw-bold text-secondary">
+                        #{{ game.serial_number }}
+                        <div><span class="self-arrival-source-badge">自主到店</span></div>
+                    </td>
+                    <td>
+                        {% if game.order_start_time %}
+                            <div class="fw-bold text-dark">{{ game.order_start_time }}</div>
+                        {% else %}
+                            <span class="text-muted small">未填写</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if game.room_name %}
+                            <span class="badge bg-secondary bg-opacity-10 text-dark">{{ game.room_name }}</span>
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="fw-bold text-dark">{{ game.player_1 or '-' }}</div>
+                        <div class="small text-muted">{{ game.player_1_wechat or '-' }}</div>
+                    </td>
+                    <td>
+                        <div class="fw-bold text-primary">{{ game.payment_method or '-' }}</div>
+                        <div class="small text-muted">自主到店登记</div>
+                    </td>
+                    <td>
+                        {% if game.payment_method == '代客收款' %}
+                            <div class="fw-bold text-primary">¥{{ game.room_fee or 0 }}</div>
+                            <div class="small text-muted">需系统结算</div>
+                        {% else %}
+                            <div class="fw-bold text-secondary">¥0</div>
+                            <div class="small text-muted">无需系统结算</div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if game.payment_method == '代客收款' %}
+                            {% if game.is_payAll %}
+                                <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>已收齐</span>
+                            {% else %}
+                                <span class="badge bg-danger bg-opacity-75"><i class="bi bi-x-circle me-1"></i>未收齐</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="badge bg-secondary">无需结算</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if game.payment_method == '代客收款' %}
+                        <div class="small text-start" style="width: 140px; margin: auto;">
+                            <div><i class="bi bi-wechat text-success me-1"></i>微信: {{ game.wechat_pay }}</div>
+                            <div><i class="bi bi-alipay text-primary me-1"></i>支付宝: {{ game.Alipay }}</div>
+                            <div class="border-top mt-1 pt-1 fw-bold {{ 'text-danger' if remaining > 0 else 'text-success' }}">
+                                还需: ¥{{ remaining }}
+                            </div>
+                        </div>
+                        {% else %}
+                        <span class="text-muted small">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <span class="badge bg-info text-dark"><i class="bi bi-person-circle me-1"></i>{{ game.who_did or '未知' }}</span>
+                    </td>
+                    <td>
+                        <div class="d-flex flex-column gap-1">
+                            {% if game.payment_method == '代客收款' %}
+                            <button class="btn btn-sm btn-primary"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#paymentModal"
+                                    onclick="openPaymentModal(this)"
+                                    data-id="{{ game.id }}"
+                                    data-fee="{{ game.room_fee }}"
+                                    data-wechat="{{ game.wechat_pay }}"
+                                    data-alipay="{{ game.Alipay }}"
+                                    data-payall="{{ 'true' if game.is_payAll else 'false' }}">
+                                <i class="bi bi-calculator"></i> 结算
+                            </button>
+                            {% else %}
+                            <button class="btn btn-sm btn-outline-secondary" type="button" disabled>
+                                <i class="bi bi-dash-circle me-1"></i>无需结算
+                            </button>
+                            {% endif %}
+
+                            <button class="btn btn-sm btn-warning text-dark"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#selfArrivalEditModal"
+                                    data-edit-game-id="{{ game.id }}"
+                                    data-edit-type="self_arrival"
+                                    onclick="openSelfArrivalEditModal(this)"
+                                    data-id="{{ game.id }}"
+                                    data-room="{{ game.room_name or '' }}"
+                                    data-order-start="{{ game.order_start_time or '' }}"
+                                    data-payment="{{ game.payment_method or '' }}"
+                                    data-fee="{{ game.room_fee or 0 }}"
+                                    data-p1="{{ game.player_1 or '' }}"
+                                    data-p1-wx="{{ game.player_1_wechat or '' }}">
+                                <i class="bi bi-pencil-square"></i> 编辑
+                            </button>
+
+                            <button class="btn btn-sm btn-outline-info"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#detailModal"
+                                    onclick="openDetailModal({{ game.id }})">
+                                <i class="bi bi-card-text"></i> 详情
+                            </button>
+
+                            <a href="/formed-games/self-arrival/delete/{{ game.id }}?store={{ current_store }}&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}&source_filter=self_arrival"
+                               class="btn btn-sm btn-outline-danger"
+                               onclick="return confirm('确定要删除这条【自主到店登记单】吗？此操作为硬删除，删除后不可恢复。');">
+                                <i class="bi bi-trash"></i> 删除
+                            </a>
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="10" class="text-muted py-5">
+                        <i class="bi bi-journal-check fs-1 d-block mb-3"></i>
+                        当前门店暂无自主到店登记单。
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% else %}
+<div class="card border-0 shadow-sm">
+    <div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th>序号</th>
+                    <th>预约时间</th>
+                    <th>订单开始时间</th>
+                    <th>包间</th>
+                    <th>分数/玩法</th>
+                    <th>参与人</th>
+                    <th>费用详情</th>
+                    <th>支付状态</th>
+                    <th>收款详情</th>
+                    <th>接待店长</th>
+                    <th>整桌备注</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for game in game_list %}
+                <tr id="game-row-{{ game.id }}" class="{% if focus_game_id and focus_game_id == game.id %}focus-highlight-row{% endif %}">
+                    <td class="fw-bold text-secondary">#{{ game.serial_number }}</td>
+                    <td>
+                        <div class="small text-muted">{{ game.record_date }}</div>
+                        <div class="fw-bold">{{ game.start_time }}</div>
+                    </td>
+                    <td>
+                        {% if game.order_start_time %}
+                            <div class="fw-bold text-dark">{{ game.order_start_time }}</div>
+                        {% else %}
+                            <span class="text-muted small">未填写</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if game.room_name %}
+                            <span class="badge bg-secondary bg-opacity-10 text-dark">{{ game.room_name }}</span>
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="text-danger fw-bold">{{ game.stakes }}</div>
+                        <div class="small text-muted">{{ game.game_type }}</div>
+                    </td>
+                    <td>
+                        <div class="player-cell-wrap">
+                            <div class="d-flex justify-content-center gap-1 flex-wrap">
+                                {% if game.player_1 %}<span class="badge bg-light text-dark border">{{ game.player_1 }}</span>{% endif %}
+                                {% if game.player_2 %}<span class="badge bg-light text-dark border">{{ game.player_2 }}</span>{% endif %}
+                                {% if game.player_3 %}<span class="badge bg-light text-dark border">{{ game.player_3 }}</span>{% endif %}
+                                {% if game.player_4 %}<span class="badge bg-light text-dark border">{{ game.player_4 }}</span>{% endif %}
+                            </div>
+
+                            {% set ns = namespace(note_count=0) %}
+                            {% if game.player_1_note %}{% set ns.note_count = ns.note_count + 1 %}{% endif %}
+                            {% if game.player_2_note %}{% set ns.note_count = ns.note_count + 1 %}{% endif %}
+                            {% if game.player_3_note %}{% set ns.note_count = ns.note_count + 1 %}{% endif %}
+                            {% if game.player_4_note %}{% set ns.note_count = ns.note_count + 1 %}{% endif %}
+
+                            {% if ns.note_count > 0 %}
+                            <div class="small mt-1">
+                                <span class="badge bg-warning text-dark"
+                                      data-bs-toggle="tooltip"
+                                      data-bs-html="true"
+                                      title="
+                                      {% if game.player_1_note and game.player_1 %}{{ game.player_1 }}：{{ game.player_1_note }}<br>{% endif %}
+                                      {% if game.player_2_note and game.player_2 %}{{ game.player_2 }}：{{ game.player_2_note }}<br>{% endif %}
+                                      {% if game.player_3_note and game.player_3 %}{{ game.player_3 }}：{{ game.player_3_note }}<br>{% endif %}
+                                      {% if game.player_4_note and game.player_4 %}{{ game.player_4 }}：{{ game.player_4_note }}{% endif %}
+                                      ">
+                                    {{ ns.note_count }}人有备注
+                                </span>
+                            </div>
+                            {% endif %}
+                        </div>
+                    </td>
+                    <td>
+                        <div>¥{{ game.room_fee }}</div>
+                        <div class="small text-muted">{{ game.payment_method or '-' }}</div>
+                    </td>
+                    <td>
+                        {% if game.is_payAll %}
+                            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>已收齐</span>
+                        {% else %}
+                            <span class="badge bg-danger bg-opacity-75"><i class="bi bi-x-circle me-1"></i>未收齐</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="small text-start" style="width: 140px; margin: auto;">
+                            <div><i class="bi bi-wechat text-success me-1"></i>微信: {{ game.wechat_pay }}</div>
+                            <div><i class="bi bi-alipay text-primary me-1"></i>支付宝: {{ game.Alipay }}</div>
+                            {% set remaining = game.room_fee - game.wechat_pay - game.Alipay %}
+                            <div class="border-top mt-1 pt-1 fw-bold {{ 'text-danger' if remaining > 0 else 'text-success' }}">
+                                还需: ¥{{ remaining }}
+                            </div>
+                        </div>
+                    </td>
+                    <td>
+                        <span class="badge bg-info text-dark">
+                            <i class="bi bi-person-circle me-1"></i>{{ game.who_did or '未知' }}
+                        </span>
+                    </td>
+                    <td>
+                        {% if game.table_note %}
+                            <span class="badge bg-secondary" data-bs-toggle="tooltip" data-bs-placement="top" title="{{ game.table_note }}">
+                                <span class="remark-summary">{{ game.table_note }}</span>
+                            </span>
+                        {% else %}
+                            <span class="text-muted small">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="d-flex flex-column gap-1">
+                            <button class="btn btn-sm btn-primary"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#paymentModal"
+                                    onclick="openPaymentModal(this)"
+                                    data-id="{{ game.id }}"
+                                    data-fee="{{ game.room_fee }}"
+                                    data-wechat="{{ game.wechat_pay }}"
+                                    data-alipay="{{ game.Alipay }}"
+                                    data-payall="{{ 'true' if game.is_payAll else 'false' }}">
+                                <i class="bi bi-calculator"></i> 结算
+                            </button>
+
+                            <button class="btn btn-sm btn-warning text-dark"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#editFormedModal"
+                                    data-edit-game-id="{{ game.id }}"
+                                    data-edit-type="normal"
+                                    onclick="openFormedEditModal(this)"
+                                    data-id="{{ game.id }}"
+                                    data-date="{{ game.record_date }}"
+                                    data-time="{{ game.start_time }}"
+                                    data-order-start="{{ game.order_start_time or '' }}"
+                                    data-room="{{ game.room_name or '' }}"
+                                    data-stakes="{{ game.stakes }}"
+                                    data-gametype="{{ game.game_type }}"
+                                    data-tags="{{ game.tags or '' }}"
+                                    data-payment="{{ game.payment_method or '' }}"
+                                    data-fee="{{ game.room_fee or 0 }}"
+                                    data-p1="{{ game.player_1 or '' }}" data-p1-wx="{{ game.player_1_wechat or '' }}" data-p1-note="{{ game.player_1_note or '' }}"
+                                    data-p2="{{ game.player_2 or '' }}" data-p2-wx="{{ game.player_2_wechat or '' }}" data-p2-note="{{ game.player_2_note or '' }}"
+                                    data-p3="{{ game.player_3 or '' }}" data-p3-wx="{{ game.player_3_wechat or '' }}" data-p3-note="{{ game.player_3_note or '' }}"
+                                    data-p4="{{ game.player_4 or '' }}" data-p4-wx="{{ game.player_4_wechat or '' }}" data-p4-note="{{ game.player_4_note or '' }}"
+                                    data-table-note="{{ game.table_note or '' }}">
+                                <i class="bi bi-pencil-square"></i> 编辑
+                            </button>
+
+                            <button class="btn btn-sm btn-outline-info"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#detailModal"
+                                    onclick="openDetailModal({{ game.id }})">
+                                <i class="bi bi-card-text"></i> 详情
+                            </button>
+
+                            <a href="/game/revert/{{ game.id }}?store={{ current_store }}&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}&source_filter=normal"
+                               class="btn btn-sm btn-outline-warning"
+                               onclick="return confirm('确定要将这局牌退回【未组齐】列表吗？');">
+                                <i class="bi bi-arrow-counterclockwise"></i> 退回未组齐
+                            </a>
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="12" class="text-muted py-5">
+                        <i class="bi bi-check2-circle fs-1 d-block mb-3"></i>
+                        当前门店暂无常规已组齐订单。
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+</div>
+
+
+<!-- 自主到店登记新增弹窗 -->
+<div class="modal fade" id="selfArrivalAddModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content border-0 shadow-lg">
+            <div class="modal-header text-white" style="background: linear-gradient(135deg, #2563eb, #1d4ed8);">
+                <h5 class="modal-title">
+                    <i class="bi bi-plus-circle me-2"></i>自主到店登记
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+
+            <form action="/formed-games/self-arrival/add" method="post" id="selfArrivalAddForm" onsubmit="return beforeSubmitSelfArrivalAdd()">
+                <div class="modal-body">
+                    <input type="hidden" name="store_name" value="{{ current_store }}">
+                    <input type="hidden" name="source_filter" value="{{ source_filter or 'normal' }}">
+                    <input type="hidden" name="pay_status" value="{{ pay_status or 'all' }}">
+                    <input type="hidden" name="date_filter" value="{{ date_filter or 'today' }}">
+                    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
+                    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
+                    <input type="hidden" name="payment_method_filter" value="{{ payment_method_filter or 'all' }}">
+
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">预约包间 <span class="text-danger">*</span></label>
+                            <select class="form-select" name="room_name" id="self_arrival_add_room_name" required>
+                                <option value="">请选择包间</option>
+                                {% for room in room_list %}
+                                <option value="{{ room.name if room.name is defined else room }}">
+                                    {{ room.name if room.name is defined else room }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">订单开始时间 <span class="text-danger">*</span></label>
+                            <input type="datetime-local" class="form-control" name="order_start_time_full" id="self_arrival_add_order_start_time_full" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">下单用户小程序昵称 / 微信昵称 <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" name="player_1" id="self_arrival_add_player_1" placeholder="请输入昵称" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">下单用户手机号 / 微信号 <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_add_player_1_wechat" placeholder="请输入手机号或微信号" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">下单方式 <span class="text-danger">*</span></label>
+                            <select class="form-select"
+                                    name="payment_method"
+                                    id="self_arrival_add_payment_method"
+                                    onchange="toggleSelfArrivalRoomFee('add')"
+                                    required>
+                                <option value="">请选择下单方式</option>
+                                <option value="代客收款">代客收款</option>
+                                <option value="代客验券">代客验券</option>
+                                <option value="用户小程序自定">用户小程序自定</option>
+                                <option value="美团团购">美团团购</option>
+                                <option value="抖音团购">抖音团购</option>
+                                <option value="美团预定">美团预定</option>
+                            </select>
+                        </div>
+
+                        <div class="col-md-6 self-arrival-room-fee-wrap" id="self_arrival_add_room_fee_wrap">
+                            <label class="form-label fw-bold">费用 <span class="text-danger">*</span></label>
+                            <input type="number" step="0.1" min="0" class="form-control" name="room_fee" id="self_arrival_add_room_fee" value="0">
+                            <div class="self-arrival-note mt-1">仅“代客收款”需要填写费用并进入结算流程。</div>
+                        </div>
+
+                        <div class="col-12">
+                            <div class="alert alert-info mb-0">
+                                整桌备注将自动写入：<strong>该单为自主到店登记单</strong>。<br>
+                                非“代客收款”类型不会进入系统内收款结算，费用将自动记为 0。
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-light border" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-check2-circle me-1"></i>确认登记
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- 自主到店登记编辑弹窗 -->
+<div class="modal fade" id="selfArrivalEditModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content border-0 shadow-lg">
+            <div class="modal-header text-white" style="background: linear-gradient(135deg, #f59e0b, #d97706);">
+                <h5 class="modal-title">
+                    <i class="bi bi-pencil-square me-2"></i>编辑自主到店登记单
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+
+            <form action="" method="post" id="selfArrivalEditForm" onsubmit="return false;">
+                <div class="modal-body">
+                    <input type="hidden" name="store_name" value="{{ current_store }}">
+                    <input type="hidden" name="source_filter" value="{{ source_filter or 'normal' }}">
+                    <input type="hidden" name="pay_status" value="{{ pay_status or 'all' }}">
+                    <input type="hidden" name="date_filter" value="{{ date_filter or 'today' }}">
+                    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
+                    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
+                    <input type="hidden" name="payment_method_filter" value="{{ payment_method_filter or 'all' }}">
+
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">预约包间 <span class="text-danger">*</span></label>
+                            <select class="form-select" name="room_name" id="self_arrival_edit_room_name" required>
+                                <option value="">请选择包间</option>
+                                {% for room in room_list %}
+                                <option value="{{ room.name if room.name is defined else room }}">
+                                    {{ room.name if room.name is defined else room }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">订单开始时间 <span class="text-danger">*</span></label>
+                            <input type="datetime-local" class="form-control" name="order_start_time_full" id="self_arrival_edit_order_start_time_full" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">下单用户小程序昵称 / 微信昵称 <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" name="player_1" id="self_arrival_edit_player_1" placeholder="请输入昵称" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">下单用户手机号 / 微信号 <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_edit_player_1_wechat" placeholder="请输入手机号或微信号" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">下单方式 <span class="text-danger">*</span></label>
+                            <select class="form-select"
+                                    name="payment_method"
+                                    id="self_arrival_edit_payment_method"
+                                    onchange="toggleSelfArrivalRoomFee('edit')"
+                                    required>
+                                <option value="">请选择下单方式</option>
+                                <option value="代客收款">代客收款</option>
+                                <option value="代客验券">代客验券</option>
+                                <option value="用户小程序自定">用户小程序自定</option>
+                                <option value="美团团购">美团团购</option>
+                                <option value="抖音团购">抖音团购</option>
+                                <option value="美团预定">美团预定</option>
+                            </select>
+                        </div>
+
+                        <div class="col-md-6 self-arrival-room-fee-wrap" id="self_arrival_edit_room_fee_wrap">
+                            <label class="form-label fw-bold">费用 <span class="text-danger">*</span></label>
+                            <input type="number" step="0.1" min="0" class="form-control" name="room_fee" id="self_arrival_edit_room_fee" value="0">
+                            <div class="self-arrival-note mt-1">若该单已有微信/支付宝收款记录，则后端将限制改成非“代客收款”。</div>
+                        </div>
+
+                        <div class="col-12">
+                            <div class="alert alert-warning mb-0">
+                                该订单始终保留为：<strong>自主到店登记单</strong>，整桌备注自动保持不变。<br>
+                                非“代客收款”类型不会参与系统内收款结算。
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-light border" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-warning text-dark" onclick="beforeSubmitSelfArrivalEdit()">
+                    <i class="bi bi-check2-circle me-1"></i>保存修改
+                </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+
+
+<!-- 门店溢出单新增弹窗 -->
+<div class="modal fade overflow-form-modal" id="overflowAddModal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-fullscreen-lg-down">
+        <div class="modal-content border-0 shadow-lg">
+            <div class="modal-header text-white" style="background: linear-gradient(135deg, #f97316, #ea580c);">
+                <h5 class="modal-title">
+                    <i class="bi bi-box-arrow-up-right me-2"></i>新增门店溢出单
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+
+            <form action="/formed-games/overflow/add" method="post" id="overflowAddForm" onsubmit="return false;">
+                <div class="modal-body">
+                    <input type="hidden" name="store_name" value="{{ current_store }}">
+                    <input type="hidden" name="source_filter" value="overflow">
+                    <input type="hidden" name="pay_status" value="{{ pay_status or 'all' }}">
+                    <input type="hidden" name="date_filter" value="{{ date_filter or 'today' }}">
+                    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
+                    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
+                    <input type="hidden" name="payment_method_filter" value="{{ payment_method_filter or 'all' }}">
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <div class="form-section-card p-3 h-100">
+                                <div class="form-section-title">
+                                    <i class="bi bi-shop me-1 text-warning"></i>归属信息
+                                </div>
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">归属门店</label>
+                                        <input type="text" class="form-control bg-light" value="{{ current_store }}" disabled>
+                                    </div>
+
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">外部安排门店 <span class="text-danger">*</span></label>
+                                        <input type="text"
+                                               class="form-control"
+                                               name="external_store_name"
+                                               id="overflow_add_external_store_name"
+                                               placeholder="手动填写外部门店"
+                                               required>
+                                    </div>
+
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">预约时间</label>
+                                        <input type="datetime-local"
+                                               class="form-control"
+                                               name="start_time_full"
+                                               id="overflow_add_start_time_full">
+                                    </div>
+
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">订单开始时间</label>
+                                        <input type="datetime-local"
+                                               class="form-control"
+                                               name="order_start_time_full"
+                                               id="overflow_add_order_start_time_full">
+                                    </div>
+
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">外部包间</label>
+                                        <input type="text"
+                                               class="form-control"
+                                               name="room_name"
+                                               id="overflow_add_room_name"
+                                               placeholder="手动填写外部包间">
+                                    </div>
+
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">预定支出门店</label>
+                                        <input type="text"
+                                               class="form-control"
+                                               name="table_note"
+                                               id="overflow_add_table_note"
+                                               placeholder="手动填写支出门店">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-md-6">
+                            <div class="form-section-card p-3 h-100">
+                                <div class="form-section-title">
+                                    <i class="bi bi-sliders me-1 text-warning"></i>牌局与金额
+                                </div>
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">分数大小</label>
+                                        <select class="form-select"
+                                                name="stakes_select"
+                                                id="overflow_add_stakes_select"
+                                                onchange="toggleOverflowCustomStakes('add')">
+                                            <option value="" selected>暂不填写</option>
+                                            <option value="1-16">1-16</option>
+                                            <option value="2-32">2-32</option>
+                                            <option value="5-40">5-40</option>
+                                            <option value="5-80">5-80</option>
+                                            <option value="其他">其他</option>
+                                        </select>
+                                    </div>
+
+                                    <div class="col-md-6" id="overflow_add_custom_stakes_wrapper" style="display:none;">
+                                        <label class="form-label fw-bold">其他分数大小</label>
+                                        <input type="text"
+                                               class="form-control"
+                                               name="stakes_custom"
+                                               id="overflow_add_stakes_custom"
+                                               placeholder="请输入具体大小">
+                                    </div>
+
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">玩法</label>
+                                        <select class="form-select"
+                                                name="game_type"
+                                                id="overflow_add_game_type">
+                                            <option value="" selected>暂不填写</option>
+                                            <option value="换三">换三</option>
+                                            <option value="定缺">定缺</option>
+                                            <option value="幺鸡47">幺鸡47</option>
+                                            <option value="素鸡">素鸡</option>
+                                            <option value="两门">两门</option>
+                                        </select>
+                                    </div>
+
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">预定金额</label>
+                                        <input type="number"
+                                               step="0.1"
+                                               min="0"
+                                               class="form-control"
+                                               name="room_fee"
+                                               id="overflow_add_room_fee"
+                                               value="0">
+                                    </div>
+
+                                    <div class="col-12">
+                                        <label class="form-label fw-bold">特殊备注</label>
+                                        <input type="text"
+                                               class="form-control"
+                                               name="tags"
+                                               id="overflow_add_tags"
+                                               placeholder="填写特殊备注">
+                                    </div>
+
+                                    <div class="col-12">
+                                        <div class="alert alert-warning mb-0">
+                                            该单下单方式固定为：<strong>溢出收款</strong>。<br>
+                                            新增时仅要求填写<strong>外部安排门店</strong>，其余信息可后续编辑补充。<br>
+                                            实收金额与赚取差额在后续“结算”中自动形成。
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section-card p-3">
+                        <div class="form-section-title">
+                            <i class="bi bi-people me-1 text-warning"></i>参与人信息
+                        </div>
+
+                        <div class="row g-3">
+                            {% for i in range(1, 5) %}
+                            <div class="col-md-6">
+                                <div class="overflow-form-note participant-card p-3 h-100 border rounded-3 bg-light">
+                                    <div class="d-flex align-items-center justify-content-between mb-2">
+                                        <div class="fw-bold">参与人 {{ i }}</div>
+                                        <span class="badge bg-light text-secondary border" id="overflow_add_idx_{{ i }}">#{{ i }}</span>
+                                    </div>
+
+                                    <div class="mb-2">
+                                        <label class="form-label small text-muted">昵称</label>
+                                        <div class="customer-autocomplete-wrapper">
+                                            <input type="text"
+                                                   class="form-control overflow-add-player-name"
+                                                   name="player_{{ i }}"
+                                                   id="overflow_add_player_{{ i }}"
+                                                   autocomplete="off"
+                                                   placeholder="输入昵称检索顾客">
+                                            <div class="customer-suggest-list" id="overflow_add_suggest_list_{{ i }}"></div>
+                                        </div>
+                                    </div>
+
+                                    <div class="mb-2">
+                                        <label class="form-label small text-muted">微信号</label>
+                                        <input type="text"
+                                               class="form-control overflow-add-player-wechat"
+                                               name="player_{{ i }}_wechat"
+                                               id="overflow_add_player_{{ i }}_wechat"
+                                               placeholder="选择顾客后自动回填，也可手动填写">
+                                    </div>
+
+                                    <div>
+                                        <label class="form-label small text-muted">参与人备注</label>
+                                        <input type="text"
+                                               class="form-control"
+                                               name="player_{{ i }}_note"
+                                               id="overflow_add_player_{{ i }}_note"
+                                               placeholder="选填">
+                                    </div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+
+                        <div class="overflow-form-note mt-3">
+                            参与人规则与常规单保持一致：昵称和微信号必须成对填写；同一局内相同微信号不能对应不同昵称。<br>
+                            若参与人备注有内容，后端保存后会同步联动到“待办及信息同步区”。
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-light border" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-warning text-dark" onclick="submitOverflowAddForm()">
+                        <i class="bi bi-check2-circle me-1"></i>确认新增
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- 门店溢出单编辑弹窗 -->
+<div class="modal fade overflow-form-modal" id="overflowEditModal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-fullscreen-lg-down">
+        <div class="modal-content border-0 shadow-lg">
+            <div class="modal-header text-white" style="background: linear-gradient(135deg, #fb923c, #ea580c);">
+                <h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>编辑门店溢出单</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form action="" method="post" id="overflowEditForm" onsubmit="return false;">
+                <div class="modal-body">
+                    <input type="hidden" name="store_name" value="{{ current_store }}">
+                    <input type="hidden" name="source_filter" value="overflow">
+                    <input type="hidden" name="pay_status" value="{{ pay_status or 'all' }}">
+                    <input type="hidden" name="date_filter" value="{{ date_filter or 'today' }}">
+                    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
+                    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
+                    <input type="hidden" name="payment_method_filter" value="{{ payment_method_filter or 'all' }}">
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <div class="form-section-card p-3 h-100">
+                                <div class="form-section-title"><i class="bi bi-shop me-1 text-warning"></i>归属信息</div>
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">归属门店</label>
+                                        <input type="text" class="form-control bg-light" value="{{ current_store }}" disabled>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">外部安排门店 <span class="text-danger">*</span></label>
+                                        <input type="text" class="form-control" name="external_store_name" id="overflow_edit_external_store_name" required>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">预约时间 </label>
+                                        <input type="datetime-local" class="form-control" name="start_time_full" id="overflow_edit_start_time_full" >
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">订单开始时间 </label>
+                                        <input type="datetime-local" class="form-control" name="order_start_time_full" id="overflow_edit_order_start_time_full" >
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">外部包间 </label>
+                                        <input type="text" class="form-control" name="room_name" id="overflow_edit_room_name" >
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">预定支出门店 </label>
+                                        <input type="text" class="form-control" name="table_note" id="overflow_edit_table_note" >
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-md-6">
+                            <div class="form-section-card p-3 h-100">
+                                <div class="form-section-title"><i class="bi bi-sliders me-1 text-warning"></i>牌局与金额</div>
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">分数大小 </label>
+                                        <select class="form-select" name="stakes_select" id="overflow_edit_stakes_select" onchange="toggleOverflowCustomStakes('edit')" >
+                                            <option value="1-16">1-16</option>
+                                            <option value="2-32">2-32</option>
+                                            <option value="5-40">5-40</option>
+                                            <option value="5-80">5-80</option>
+                                            <option value="其他">其他</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-6" id="overflow_edit_custom_stakes_wrapper" style="display:none;">
+                                        <label class="form-label fw-bold">其他分数大小</label>
+                                        <input type="text" class="form-control" name="stakes_custom" id="overflow_edit_stakes_custom" placeholder="请输入具体大小">
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">玩法 </label>
+                                        <select class="form-select" name="game_type" id="overflow_edit_game_type" >
+                                            <option value="换三">换三</option>
+                                            <option value="定缺">定缺</option>
+                                            <option value="幺鸡47">幺鸡47</option>
+                                            <option value="素鸡">素鸡</option>
+                                            <option value="两门">两门</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">预定金额 </label>
+                                        <input type="number" step="0.1" min="0" class="form-control" name="room_fee" id="overflow_edit_room_fee" value="0" >
+                                    </div>
+                                    <div class="col-12">
+                                        <label class="form-label fw-bold">特殊备注</label>
+                                        <input type="text" class="form-control" name="tags" id="overflow_edit_tags" placeholder="填写特殊备注">
+                                    </div>
+                                    <div class="col-12">
+                                        <div class="alert alert-warning mb-0">
+                                            该单下单方式固定为：<strong>溢出收款</strong>。<br>
+                                            若已进行部分结算，编辑后仍保留现有微信/支付宝收款记录。
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section-card p-3">
+                        <div class="form-section-title"><i class="bi bi-people me-1 text-warning"></i>参与人信息</div>
+                        <div class="row g-3">
+                            {% for i in range(1, 5) %}
+                            <div class="col-md-6">
+                                <div class="participant-card h-100">
+                                    <div class="d-flex align-items-center justify-content-between mb-2">
+                                        <div class="fw-bold">参与人 {{ i }}</div>
+                                        <span class="badge bg-light text-secondary border" id="overflow_edit_idx_{{ i }}">#{{ i }}</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <label class="form-label small text-muted">昵称</label>
+                                        <div class="customer-autocomplete-wrapper">
+                                            <input type="text"
+                                                   class="form-control overflow-edit-player-name"
+                                                   name="player_{{ i }}"
+                                                   id="overflow_edit_player_{{ i }}"
+                                                   autocomplete="off"
+                                                   placeholder="输入昵称检索顾客">
+                                            <div class="customer-suggest-list" id="overflow_edit_suggest_list_{{ i }}"></div>
+                                        </div>
+                                    </div>
+
+                                    <div class="mb-2">
+                                        <label class="form-label small text-muted">微信号</label>
+                                        <input type="text"
+                                               class="form-control overflow-edit-player-wechat"
+                                               name="player_{{ i }}_wechat"
+                                               id="overflow_edit_player_{{ i }}_wechat"
+                                               placeholder="选择顾客后自动回填，也可手动填写">
+                                    </div>
+
+                                    <div>
+                                        <label class="form-label small text-muted">参与人备注</label>
+                                        <input type="text"
+                                               class="form-control"
+                                               name="player_{{ i }}_note"
+                                               id="overflow_edit_player_{{ i }}_note"
+                                               placeholder="若参与人变更，该备注会自动清空">
+                                    </div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <div class="overflow-form-note mt-3">
+                            编辑保存时会继续按常规单规则校验参与人信息。
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-light border" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-warning text-dark" onclick="submitOverflowEditForm()"><i class="bi bi-check2-circle me-1"></i>保存修改</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- 数据导出弹窗 -->
+<div class="modal fade" id="exportExcelModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content border-0 shadow-lg">
+            <form method="get" action="/formed-games/export">
+                <input type="hidden" name="source_filter" value="{{ source_filter or 'normal' }}">
+                <div class="modal-header text-white" style="background: linear-gradient(135deg, #16a34a, #15803d);">
+                    <h5 class="modal-title">
+                        <i class="bi bi-file-earmark-excel me-2"></i>{% if source_filter == 'overflow' %}导出门店溢出单{% elif source_filter == 'self_arrival' %}导出自主到店登记单{% else %}导出已组齐订单{% endif %}
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">选择导出门店</label>
+                        <select class="form-select" name="store" required>
+                            {% for s in store_list %}
+                            <option value="{{ s }}" {% if s == current_store %}selected{% endif %}>{{ s }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">选择导出时间周期</label>
+                        <select class="form-select" name="export_date_filter" id="exportDateFilter" onchange="toggleExportCustomDateRange()" required>
+                            <option value="today">今日</option>
+                            <option value="yesterday">昨日</option>
+                            <option value="last2days">近2天</option>
+                            <option value="last7">近7天</option>
+                            <option value="this_month" selected>本月</option>
+                            <option value="last_month">上月</option>
+                            <option value="custom">自定义区间</option>
+                        </select>
+                    </div>
+
+                    <div class="row g-3 d-none" id="exportCustomDateRange">
+                        <div class="col-6">
+                            <label class="form-label fw-bold">开始日期</label>
+                            <input type="date" class="form-control" name="export_start_date">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label fw-bold">结束日期</label>
+                            <input type="date" class="form-control" name="export_end_date">
+                        </div>
+                    </div>
+
+                    <div class="alert alert-info mt-3 mb-0">
+                        {% if source_filter == 'overflow' %}将导出所选<strong>门店</strong>、所选<strong>时间范围</strong>内的全部<strong>门店溢出单</strong>，格式为 Excel。{% elif source_filter == 'self_arrival' %}将导出所选<strong>门店</strong>、所选<strong>时间范围</strong>内的全部<strong>自主到店登记单</strong>，格式为 Excel。{% else %}将导出所选<strong>门店</strong>、所选<strong>时间范围</strong>内的全部<strong>常规已组齐订单</strong>，格式为 Excel。{% endif %}
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-light border" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-success">
+                        <i class="bi bi-download me-1"></i>开始导出
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- 常规已组齐编辑弹窗 -->
+<div class="modal fade" id="editFormedModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>编辑已组齐订单</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+
+            <form action="" method="post" id="formedEditForm" onsubmit="return false;">
+                <div class="modal-body">
+                    <input type="hidden" name="store_name" value="{{ current_store }}">
+                    <input type="hidden" name="source_filter" value="{{ source_filter or 'normal' }}">
+                    <input type="hidden" name="pay_status" value="{{ pay_status or 'all' }}">
+                    <input type="hidden" name="date_filter" value="{{ date_filter or 'today' }}">
+                    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
+                    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
+                    <input type="hidden" name="payment_method_filter" value="{{ payment_method_filter or 'all' }}">
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">预约时间</label>
+                            <input type="datetime-local" class="form-control" name="start_time_full" id="edit_start_time_full" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">订单开始时间</label>
+                            <input type="datetime-local" class="form-control" name="order_start_time_full" id="edit_order_start_time_full">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold">包间 <span class="text-danger">*</span></label>
+                            <select class="form-select" name="room_name" id="edit_room_name" required>
+                                <option value="">请选择包间</option>
+                                {% for room in room_list %}
+                                <option value="{{ room.name if room.name is defined else room }}">
+                                    {{ room.name if room.name is defined else room }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold">分数大小</label>
+                            <select class="form-select" name="stakes_select" id="edit_stakes_select" onchange="toggleEditCustomStakes()">
+                                <option value="1-16">1-16</option>
+                                <option value="2-32">2-32</option>
+                                <option value="5-40">5-40</option>
+                                <option value="5-80">5-80</option>
+                                <option value="其他">其他</option>
+                            </select>
+                        </div>
+
+                        <div class="col-md-4" id="edit_custom_stakes_wrapper" style="display: none;">
+                            <label class="form-label fw-bold">其他分数大小</label>
+                            <input type="text" class="form-control" name="stakes_custom" id="edit_stakes_custom" placeholder="请输入具体大小">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold">玩法</label>
+                            <select class="form-select" name="game_type" id="edit_game_type" required>
+                                <option value="换三">换三</option>
+                                <option value="定缺">定缺</option>
+                                <option value="幺鸡47">幺鸡47</option>
+                                <option value="素鸡">素鸡</option>
+                                <option value="两门">两门</option>
+                            </select>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold">费用</label>
+                            <input type="number" step="0.1" min="0" class="form-control" name="room_fee" id="edit_room_fee" value="0">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold">支付方式</label>
+                            <select class="form-select" name="payment_method" id="edit_payment_method">
+                                <option value="">未填写</option>
+                                <option value="代客收款">代客收款</option>
+                                <option value="代客验券">代客验券</option>
+                                <option value="用户小程序自定">用户小程序自定</option>
+                            </select>
+                        </div>
+
+                        <div class="col-md-12">
+                            <label class="form-label fw-bold">特殊备注</label>
+                            <input type="text" class="form-control" name="tags" id="edit_tags">
+                        </div>
+                    </div>
+
+                    <div class="row g-3">
+                        {% for i in range(1, 5) %}
+                        <div class="col-md-6">
+                            <div class="border rounded-3 p-3 bg-light h-100">
+                                <div class="fw-bold mb-2">参与人 {{ i }}</div>
+
+                                <div class="mb-2">
+                                    <label class="form-label small text-muted">昵称</label>
+                                    <div class="customer-autocomplete-wrapper">
+                                        <input type="text"
+                                               class="form-control formed-player-name-input"
+                                               name="player_{{ i }}"
+                                               id="edit_player_{{ i }}"
+                                               autocomplete="off"
+                                               placeholder="输入昵称检索顾客">
+                                        <div class="customer-suggest-list" id="edit_suggest_list_{{ i }}"></div>
+                                    </div>
+                                </div>
+
+                                <div class="mb-2">
+                                    <label class="form-label small text-muted">微信号</label>
+                                    <input type="text"
+                                           class="form-control formed-player-wechat-input"
+                                           name="player_{{ i }}_wechat"
+                                           id="edit_player_{{ i }}_wechat"
+                                           placeholder="选择顾客后自动回填，也可手动填写">
+                                </div>
+
+                                <div>
+                                    <label class="form-label small text-muted">参与人备注</label>
+                                    <input type="text"
+                                           class="form-control"
+                                           name="player_{{ i }}_note"
+                                           id="edit_player_{{ i }}_note"
+                                           placeholder="若参与人变更，该备注会自动清空">
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+
+                    <div class="mt-3">
+                        <label class="form-label fw-bold">整桌备注</label>
+                        <textarea class="form-control" rows="3" name="table_note" id="edit_table_note" placeholder="填写整桌备注"></textarea>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-warning text-dark" onclick="beforeSubmitFormedEdit()">
+                        <i class="bi bi-check2-circle me-1"></i>保存修改
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- 详情弹窗 -->
+<div class="modal fade" id="detailModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-card-text me-2"></i>订单详情</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="detailModalBody">
+                <div class="text-center text-muted py-4">
+                    <div class="spinner-border spinner-border-sm me-2"></div>正在加载详情...
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 结算弹窗 -->
+<div class="modal fade" id="paymentModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-wallet2 me-2"></i>收银结算</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form action="" method="post" id="paymentForm" onsubmit="return false">
+                <div class="modal-body">
+                    <input type="hidden" id="payment_focus_game_id" value="">
+                    <input type="hidden" name="store_name" value="{{ current_store }}">
+                    <input type="hidden" name="source_filter" value="{{ source_filter or 'normal' }}">
+                    <input type="hidden" name="pay_status" value="{{ pay_status or 'all' }}">
+                    <input type="hidden" name="date_filter" value="{{ date_filter or 'today' }}">
+                    <input type="hidden" name="start_date" value="{{ start_date or '' }}">
+                    <input type="hidden" name="end_date" value="{{ end_date or '' }}">
+                    <input type="hidden" name="payment_method_filter" value="{{ payment_method_filter or 'all' }}">
+
+                    <div class="alert alert-light border text-center mb-3">
+                        <span class="text-muted">本单金额：</span>
+                        <span class="fs-4 fw-bold text-dark" id="displayRoomFee">¥0</span>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">是否已收齐？</label>
+                        <select name="is_payAll" class="form-select">
+                            <option value="false">否 - 未收齐</option>
+                            <option value="true">是 - 已收齐</option>
+                        </select>
+                    </div>
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-6">
+                            <label class="form-label"><i class="bi bi-wechat text-success me-1"></i>微信收款</label>
+                            <input type="number" step="0.1" name="wechat_pay" id="inputWechat" class="form-control" placeholder="0">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label"><i class="bi bi-alipay text-primary me-1"></i>支付宝收款</label>
+                            <input type="number" step="0.1" name="Alipay" id="inputAlipay" class="form-control" placeholder="0">
+                        </div>
+                    </div>
+
+                    <div class="card bg-light border-0">
+                        <div class="card-body d-flex justify-content-between align-items-center">
+                            <span class="fw-bold">还需收取：</span>
+                            <span class="fs-4 fw-bold text-danger" id="displayRemaining">¥0</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary px-4" onclick="beforeSubmitPaymentForm()">保存结算</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let currentRoomFee = 0;
+    const CURRENT_SOURCE_FILTER = {{ (source_filter or 'normal')|tojson|safe }};
+
+    function getCurrentFormedGamesUrl(focusGameId = null) {
+        const url = new URL(window.location.href);
+
+        if (focusGameId) {
+            url.searchParams.set('focus_game_id', String(focusGameId));
+        } else {
+            url.searchParams.delete('focus_game_id');
+        }
+
+        return url.toString();
+    }
+
+    async function fetchUpdatedFormedGamesHtml(focusGameId = null) {
+        const resp = await fetch(getCurrentFormedGamesUrl(focusGameId), {
+            method: 'GET',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        });
+
+        if (!resp.ok) {
+            throw new Error('刷新列表失败');
+        }
+
+        return await resp.text();
+    }
+
+    function replaceFormedGamesContentArea(htmlText) {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(htmlText, 'text/html');
+
+        const newContent = doc.getElementById('formedGamesContentArea');
+        const currentContent = document.getElementById('formedGamesContentArea');
+
+        if (!newContent || !currentContent) {
+            throw new Error('未找到列表内容区域 formedGamesContentArea');
+        }
+
+        currentContent.innerHTML = newContent.innerHTML;
+        initTooltips();
+    }
+
+    async function refreshFormedGamesContentAndKeepViewport(gameId = null) {
+        const viewportTop = window.scrollY || window.pageYOffset || 0;
+
+        const htmlText = await fetchUpdatedFormedGamesHtml(gameId);
+        replaceFormedGamesContentArea(htmlText);
+
+        window.scrollTo(0, viewportTop);
+
+        if (gameId) {
+            const row = document.getElementById(`game-row-${gameId}`);
+            if (row) {
+                row.classList.add('focus-highlight-flash');
+                setTimeout(() => {
+                    row.classList.remove('focus-highlight-flash');
+                }, 2400);
+            }
+        }
+    }
+
+    async function submitFormAjaxExpectJson(form) {
+        const resp = await fetch(form.action, {
+            method: 'POST',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: new FormData(form)
+        });
+
+        let data = {};
+        try {
+            data = await resp.json();
+        } catch (e) {
+            throw new Error('后端没有返回有效 JSON');
+        }
+
+        if (!resp.ok || !data.ok) {
+            throw new Error(data.message || '保存失败');
+        }
+
+        return data;
+    }
+
+    function initTooltips() {
+        document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => {
+            if (!bootstrap.Tooltip.getInstance(el)) {
+                new bootstrap.Tooltip(el);
+            }
+        });
+    }
+
+    function toggleCustomDateRange() {
+        const val = document.getElementById('dateFilterSelect').value;
+        document.querySelectorAll('.custom-date-range').forEach(el => {
+            el.style.display = (val === 'custom') ? 'block' : 'none';
+        });
+    }
+
+    function toggleExportCustomDateRange() {
+        const select = document.getElementById('exportDateFilter');
+        const wrapper = document.getElementById('exportCustomDateRange');
+        if (!select || !wrapper) return;
+
+        if (select.value === 'custom') {
+            wrapper.classList.remove('d-none');
+        } else {
+            wrapper.classList.add('d-none');
+        }
+    }
+
+    function toggleEditCustomStakes() {
+        const select = document.getElementById('edit_stakes_select');
+        const wrapper = document.getElementById('edit_custom_stakes_wrapper');
+        const input = document.getElementById('edit_stakes_custom');
+
+        if (select.value === '其他') {
+            wrapper.style.display = 'block';
+            input.required = true;
+        } else {
+            wrapper.style.display = 'none';
+            input.required = false;
+            input.value = '';
+        }
+    }
+
+    function toggleOverflowCustomStakes(mode) {
+        const select = document.getElementById(`overflow_${mode}_stakes_select`);
+        const wrapper = document.getElementById(`overflow_${mode}_custom_stakes_wrapper`);
+        const input = document.getElementById(`overflow_${mode}_stakes_custom`);
+
+        if (!select || !wrapper || !input) return;
+
+        if (select.value === '其他') {
+            wrapper.style.display = 'block';
+            input.required = true;
+        } else {
+            wrapper.style.display = 'none';
+            input.required = false;
+            input.value = '';
+        }
+    }
+
+    function toggleSelfArrivalRoomFee(mode) {
+        const paymentSelect = document.getElementById(`self_arrival_${mode}_payment_method`);
+        const feeWrap = document.getElementById(`self_arrival_${mode}_room_fee_wrap`);
+        const feeInput = document.getElementById(`self_arrival_${mode}_room_fee`);
+
+        if (!paymentSelect || !feeWrap || !feeInput) return;
+
+        if (paymentSelect.value === '代客收款') {
+            feeWrap.classList.add('show');
+            feeInput.required = true;
+        } else {
+            feeWrap.classList.remove('show');
+            feeInput.required = false;
+            feeInput.value = 0;
+        }
+    }
+
+    function normalizeToDatetimeLocal(dateStr, timeStr) {
+        if (!dateStr || !timeStr) return '';
+        const match = String(timeStr).match(/(\d{2}:\d{2})$/);
+        const hm = match ? match[1] : '00:00';
+        return `${dateStr}T${hm}`;
+    }
+
+    function normalizeOrderStartToDatetimeLocal(raw) {
+        if (!raw) return '';
+        return String(raw).replace(' ', 'T').slice(0, 16);
+    }
+
+    function validateSelfArrivalFields(mode) {
+        const nicknameInput = document.getElementById(`self_arrival_${mode}_player_1`);
+        const wechatInput = document.getElementById(`self_arrival_${mode}_player_1_wechat`);
+        const paymentSelect = document.getElementById(`self_arrival_${mode}_payment_method`);
+        const feeInput = document.getElementById(`self_arrival_${mode}_room_fee`);
+
+        const nickname = (nicknameInput?.value || '').trim();
+        const wechat = (wechatInput?.value || '').trim();
+        const paymentMethod = (paymentSelect?.value || '').trim();
+        const fee = parseFloat(feeInput?.value || 0) || 0;
+
+        if (!nickname || !wechat) {
+            alert('下单用户昵称和手机号/微信号必须同时填写');
+            return false;
+        }
+
+        if (paymentMethod === '代客收款' && fee <= 0) {
+            alert('下单方式为“代客收款”时，费用必须大于 0');
+            return false;
+        }
+
+        return true;
+    }
+
+    function clearOverflowPlayerWarningStyle(mode) {
+        document.querySelectorAll(`.overflow-${mode}-player-name, .overflow-${mode}-player-wechat`).forEach(el => {
+            el.classList.remove('player-invalid-warning');
+        });
+        for (let i = 1; i <= 4; i++) {
+            const idxBadge = document.getElementById(`overflow_${mode}_idx_${i}`);
+            if (idxBadge) {
+                idxBadge.classList.remove('bg-danger', 'text-white');
+                idxBadge.classList.add('bg-light', 'text-secondary');
+            }
+        }
+    }
+
+    function highlightOverflowIndices(mode, indices) {
+        (indices || []).forEach(idx => {
+            const idxBadge = document.getElementById(`overflow_${mode}_idx_${idx}`);
+            if (idxBadge) {
+                idxBadge.classList.remove('bg-light', 'text-secondary');
+                idxBadge.classList.add('bg-danger', 'text-white');
+            }
+            const nameInput = document.getElementById(`overflow_${mode}_player_${idx}`);
+            const wechatInput = document.getElementById(`overflow_${mode}_player_${idx}_wechat`);
+            if (nameInput) nameInput.classList.add('player-invalid-warning');
+            if (wechatInput) wechatInput.classList.add('player-invalid-warning');
+        });
+    }
+
+    function validateOverflowFields(mode) {
+        clearOverflowPlayerWarningStyle(mode);
+
+        const externalStoreInput = document.getElementById(`overflow_${mode}_external_store_name`);
+        const roomInput = document.getElementById(`overflow_${mode}_room_name`);
+        const reservationInput = document.getElementById(`overflow_${mode}_start_time_full`);
+        const orderStartInput = document.getElementById(`overflow_${mode}_order_start_time_full`);
+        const tableNoteInput = document.getElementById(`overflow_${mode}_table_note`);
+        const feeInput = document.getElementById(`overflow_${mode}_room_fee`);
+        const stakesSelect = document.getElementById(`overflow_${mode}_stakes_select`);
+        const customStakesInput = document.getElementById(`overflow_${mode}_stakes_custom`);
+        const gameTypeSelect = document.getElementById(`overflow_${mode}_game_type`);
+
+        if (!(externalStoreInput?.value || '').trim()) {
+            alert('外部安排门店不能为空');
+            return false;
+        }
+
+        if (mode === 'edit') {
+            if (!(roomInput?.value || '').trim()) {
+                alert('外部包间不能为空');
+                return false;
+            }
+            if (!(reservationInput?.value || '').trim()) {
+                alert('预约时间不能为空');
+                return false;
+            }
+            if (!(orderStartInput?.value || '').trim()) {
+                alert('订单开始时间不能为空');
+                return false;
+            }
+            if (!(tableNoteInput?.value || '').trim()) {
+                alert('预定支出门店不能为空');
+                return false;
+            }
+            const selectedStake = (stakesSelect?.value || '').trim();
+            if (!selectedStake) {
+                alert('分数大小不能为空');
+                return false;
+            }
+            if (selectedStake === '其他' && !((customStakesInput?.value || '').trim())) {
+                alert('请选择“其他”时，必须填写具体分数大小');
+                return false;
+            }
+            if (!((gameTypeSelect?.value || '').trim())) {
+                alert('玩法不能为空');
+                return false;
+            }
+        } else {
+            const selectedStake = (stakesSelect?.value || '').trim();
+            if (selectedStake === '其他' && !((customStakesInput?.value || '').trim())) {
+                alert('如果分数大小选择“其他”，请填写具体大小');
+                return false;
+            }
+        }
+
+        const fee = parseFloat(feeInput?.value || 0) || 0;
+        if (fee < 0) {
+            alert('预定金额不能小于 0');
+            return false;
+        }
+
+        const wechatNameMap = {};
+        for (let i = 1; i <= 4; i++) {
+            const nameInput = document.getElementById(`overflow_${mode}_player_${i}`);
+            const wechatInput = document.getElementById(`overflow_${mode}_player_${i}_wechat`);
+            const name = (nameInput?.value || '').trim();
+            const wechat = (wechatInput?.value || '').trim();
+
+            if ((name && !wechat) || (!name && wechat)) {
+                if (nameInput) nameInput.classList.add('player-invalid-warning');
+                if (wechatInput) wechatInput.classList.add('player-invalid-warning');
+                highlightOverflowIndices(mode, [i]);
+                alert(`参与人 ${i} 的昵称和微信号必须同时填写`);
+                return false;
+            }
+
+            if (wechat) {
+                if (wechatNameMap[wechat] && wechatNameMap[wechat] !== name) {
+                    const conflictIndices = [];
+                    for (let j = 1; j <= 4; j++) {
+                        const otherWechat = (document.getElementById(`overflow_${mode}_player_${j}_wechat`)?.value || '').trim();
+                        const otherName = (document.getElementById(`overflow_${mode}_player_${j}`)?.value || '').trim();
+                        if (otherWechat === wechat && otherName !== name) conflictIndices.push(j);
+                    }
+                    highlightOverflowIndices(mode, Array.from(new Set(conflictIndices)));
+                    alert(`同一局中微信号【${wechat}】对应了不同昵称，无法提交`);
+                    return false;
+                }
+                wechatNameMap[wechat] = name;
+            }
+        }
+
+        return true;
+    }
+
+    async function validateOverflowPlayersViaServer(mode) {
+        const formData = new FormData();
+        for (let i = 1; i <= 4; i++) {
+            formData.append(`player_${i}`, document.getElementById(`overflow_${mode}_player_${i}`)?.value || '');
+            formData.append(`player_${i}_wechat`, document.getElementById(`overflow_${mode}_player_${i}_wechat`)?.value || '');
+        }
+
+        try {
+            const resp = await fetch('/api/validate-unformed-game-players', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+                alert(data?.detail || '参与人校验失败，请稍后重试');
+                return false;
+            }
+            if (!data.ok) {
+                highlightOverflowIndices(mode, data.indices || []);
+                alert(data.message || '参与人校验未通过');
+                return false;
+            }
+            return true;
+        } catch (err) {
+            console.error(err);
+            alert('参与人校验失败，请检查网络后重试');
+            return false;
+        }
+    }
+
+    async function submitOverflowAddForm() {
+        const ok = validateOverflowFields('add');
+        if (!ok) return false;
+
+        const serverOk = await validateOverflowPlayersViaServer('add');
+        if (!serverOk) return false;
+
+        document.getElementById('overflowAddForm').submit();
+        return false;
+    }
+
+    async function submitOverflowEditForm() {
+        const ok = validateOverflowFields('edit');
+        if (!ok) return false;
+
+        const serverOk = await validateOverflowPlayersViaServer('edit');
+        if (!serverOk) return false;
+
+        const form = document.getElementById('overflowEditForm');
+        const gameId = (form.action.split('/').pop() || '').trim();
+
+        try {
+            const data = await submitFormAjaxExpectJson(form);
+
+            const modalEl = document.getElementById('overflowEditModal');
+            bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+
+            await refreshFormedGamesContentAndKeepViewport(data.game_id || gameId);
+
+            if (data.duplicate_warning_message) {
+                alert(data.duplicate_warning_message);
+            }
+
+            return false;
+        } catch (err) {
+            alert(err.message || '溢出单编辑保存失败');
+            return false;
+        }
+    }
+
+    function beforeSubmitSelfArrivalAdd() {
+        const ok = validateSelfArrivalFields('add');
+        if (!ok) return false;
+        return true;
+    }
+
+    async function beforeSubmitSelfArrivalEdit() {
+        const ok = validateSelfArrivalFields('edit');
+        if (!ok) return false;
+
+        const form = document.getElementById('selfArrivalEditForm');
+        const gameId = (form.action.split('/').pop() || '').trim();
+
+        try {
+            const data = await submitFormAjaxExpectJson(form);
+
+            const modalEl = document.getElementById('selfArrivalEditModal');
+            bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+
+            await refreshFormedGamesContentAndKeepViewport(data.game_id || gameId);
+
+            if (data.duplicate_warning_message) {
+                alert(data.duplicate_warning_message);
+            }
+
+            return false;
+        } catch (err) {
+            alert(err.message || '自主到店编辑保存失败');
+            return false;
+        }
+    }
+
+    async function beforeSubmitFormedEdit() {
+        const ok = validateFormedNicknameWechatPairs();
+        if (!ok) return false;
+
+        const form = document.getElementById('formedEditForm');
+        const gameId = (form.action.split('/').pop() || '').trim();
+
+        try {
+            const data = await submitFormAjaxExpectJson(form);
+
+            const modalEl = document.getElementById('editFormedModal');
+            bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+
+            await refreshFormedGamesContentAndKeepViewport(data.game_id || gameId);
+
+            if (data.duplicate_warning_message) {
+                alert(data.duplicate_warning_message);
+            }
+
+            return false;
+        } catch (err) {
+            alert(err.message || '编辑保存失败');
+            return false;
+        }
+    }
+
+    async function beforeSubmitPaymentForm() {
+        const form = document.getElementById('paymentForm');
+        const focusGameId = document.getElementById('payment_focus_game_id')?.value || '';
+
+        try {
+            const data = await submitFormAjaxExpectJson(form);
+
+            const modalEl = document.getElementById('paymentModal');
+            bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+
+            await refreshFormedGamesContentAndKeepViewport(data.game_id || focusGameId);
+
+            if (data.message) {
+                console.log(data.message);
+            }
+
+            return false;
+        } catch (err) {
+            alert(err.message || '结算保存失败');
+            return false;
+        }
+    }
+
+    function openFormedEditModal(btn) {
+        const gameId = btn.dataset.id;
+        document.getElementById('formedEditForm').action = `/update-formed-game/${gameId}`;
+
+        document.getElementById('edit_start_time_full').value =
+            normalizeToDatetimeLocal(btn.dataset.date || '', btn.dataset.time || '');
+
+        document.getElementById('edit_order_start_time_full').value =
+            normalizeOrderStartToDatetimeLocal(btn.dataset.orderStart || '');
+
+        document.getElementById('edit_room_name').value = btn.dataset.room || '';
+        document.getElementById('edit_game_type').value = btn.dataset.gametype || '';
+        document.getElementById('edit_tags').value = btn.dataset.tags || '';
+        document.getElementById('edit_payment_method').value = btn.dataset.payment || '';
+        document.getElementById('edit_room_fee').value = btn.dataset.fee || 0;
+        document.getElementById('edit_table_note').value = btn.dataset.tableNote || '';
+
+        const stakeVal = btn.dataset.stakes || '';
+        const defaultOptions = ['1-16', '2-32', '5-40', '5-80'];
+        if (defaultOptions.includes(stakeVal)) {
+            document.getElementById('edit_stakes_select').value = stakeVal;
+            document.getElementById('edit_stakes_custom').value = '';
+        } else {
+            document.getElementById('edit_stakes_select').value = '其他';
+            document.getElementById('edit_stakes_custom').value = stakeVal;
+        }
+        toggleEditCustomStakes();
+
+        for (let i = 1; i <= 4; i++) {
+            document.getElementById(`edit_player_${i}`).value = btn.getAttribute(`data-p${i}`) || '';
+            document.getElementById(`edit_player_${i}_wechat`).value = btn.getAttribute(`data-p${i}-wx`) || '';
+            document.getElementById(`edit_player_${i}_note`).value = btn.getAttribute(`data-p${i}-note`) || '';
+        }
+    }
+
+    function openSelfArrivalEditModal(btn) {
+        const gameId = btn.dataset.id;
+        document.getElementById('selfArrivalEditForm').action = `/formed-games/self-arrival/update/${gameId}`;
+        document.getElementById('self_arrival_edit_room_name').value = btn.dataset.room || '';
+        document.getElementById('self_arrival_edit_order_start_time_full').value = normalizeOrderStartToDatetimeLocal(btn.dataset.orderStart || '');
+        document.getElementById('self_arrival_edit_player_1').value = btn.dataset.p1 || '';
+        document.getElementById('self_arrival_edit_player_1_wechat').value = btn.dataset.p1Wx || '';
+        document.getElementById('self_arrival_edit_payment_method').value = btn.dataset.payment || '';
+        document.getElementById('self_arrival_edit_room_fee').value = btn.dataset.fee || 0;
+        toggleSelfArrivalRoomFee('edit');
+    }
+
+    function resetOverflowAddModal() {
+        const form = document.getElementById('overflowAddForm');
+        if (form) form.reset();
+
+        const reservationEl = document.getElementById('overflow_add_start_time_full');
+        const orderStartEl = document.getElementById('overflow_add_order_start_time_full');
+        if (reservationEl) reservationEl.value = '';
+        if (orderStartEl) orderStartEl.value = '';
+
+        const feeEl = document.getElementById('overflow_add_room_fee');
+        if (feeEl) feeEl.value = 0;
+
+        const stakesEl = document.getElementById('overflow_add_stakes_select');
+        const gameTypeEl = document.getElementById('overflow_add_game_type');
+        if (stakesEl) stakesEl.value = '';
+        if (gameTypeEl) gameTypeEl.value = '';
+
+        toggleOverflowCustomStakes('add');
+        clearOverflowPlayerWarningStyle('add');
+        const modalBody = document.querySelector('#overflowAddModal .modal-body');
+        if (modalBody) modalBody.scrollTop = 0;
+    }
+
+    function openOverflowEditModal(btn) {
+        const gameId = btn.dataset.id;
+        document.getElementById('overflowEditForm').action = `/formed-games/overflow/update/${gameId}`;
+
+        document.getElementById('overflow_edit_start_time_full').value =
+            normalizeToDatetimeLocal(btn.dataset.date || '', btn.dataset.time || '');
+        document.getElementById('overflow_edit_order_start_time_full').value =
+            normalizeOrderStartToDatetimeLocal(btn.dataset.orderStart || '');
+
+        document.getElementById('overflow_edit_external_store_name').value = btn.dataset.externalStore || '';
+        document.getElementById('overflow_edit_room_name').value = btn.dataset.room || '';
+        document.getElementById('overflow_edit_game_type').value = btn.dataset.gametype || '';
+        document.getElementById('overflow_edit_tags').value = btn.dataset.tags || '';
+        document.getElementById('overflow_edit_room_fee').value = btn.dataset.fee || 0;
+        document.getElementById('overflow_edit_table_note').value = btn.dataset.tableNote || '';
+
+        const stakeVal = btn.dataset.stakes || '';
+        const defaultOptions = ['1-16', '2-32', '5-40', '5-80'];
+        if (defaultOptions.includes(stakeVal)) {
+            document.getElementById('overflow_edit_stakes_select').value = stakeVal;
+            document.getElementById('overflow_edit_stakes_custom').value = '';
+        } else {
+            document.getElementById('overflow_edit_stakes_select').value = '其他';
+            document.getElementById('overflow_edit_stakes_custom').value = stakeVal;
+        }
+        toggleOverflowCustomStakes('edit');
+
+        for (let i = 1; i <= 4; i++) {
+            document.getElementById(`overflow_edit_player_${i}`).value = btn.getAttribute(`data-p${i}`) || '';
+            document.getElementById(`overflow_edit_player_${i}_wechat`).value = btn.getAttribute(`data-p${i}-wx`) || '';
+            document.getElementById(`overflow_edit_player_${i}_note`).value = btn.getAttribute(`data-p${i}-note`) || '';
+        }
+
+        clearOverflowPlayerWarningStyle('edit');
+        const modalBody = document.querySelector('#overflowEditModal .modal-body');
+        if (modalBody) modalBody.scrollTop = 0;
+    }
+
+    function reopenEditModalByGameId(gameId) {
+        if (!gameId) return;
+
+        const trigger = document.querySelector(`button[data-edit-game-id="${gameId}"]`);
+        if (!trigger) return;
+
+        const editType = trigger.dataset.editType || 'normal';
+
+        if (editType === 'self_arrival') {
+            openSelfArrivalEditModal(trigger);
+            const modalEl = document.getElementById('selfArrivalEditModal');
+            if (!modalEl) return;
+            bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        } else if (editType === 'overflow') {
+            openOverflowEditModal(trigger);
+            const modalEl = document.getElementById('overflowEditModal');
+            if (!modalEl) return;
+            bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        } else {
+            openFormedEditModal(trigger);
+            const modalEl = document.getElementById('editFormedModal');
+            if (!modalEl) return;
+            bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        }
+    }
+
+    function clearFormedPlayerWarningStyle() {
+        document.querySelectorAll('.formed-player-name-input, .formed-player-wechat-input').forEach(el => {
+            el.classList.remove('player-invalid-warning');
+        });
+    }
+
+    function hideAllFormedSuggestBoxes() {
+        document.querySelectorAll('[id^="edit_suggest_list_"]').forEach(el => {
+            el.style.display = 'none';
+            el.innerHTML = '';
+        });
+    }
+
+    async function fetchFormedCustomerSuggest(keyword, wrapperIdx) {
+        const suggestBox = document.getElementById(`edit_suggest_list_${wrapperIdx}`);
+        const storeName = "{{ current_store }}";
+
+        if (!keyword || keyword.trim().length < 1) {
+            suggestBox.style.display = 'none';
+            suggestBox.innerHTML = '';
+            return;
+        }
+
+        try {
+            const resp = await fetch(`/api/customer-search?keyword=${encodeURIComponent(keyword)}&store_name=${encodeURIComponent(storeName)}&limit=8`);
+            const data = await resp.json();
+
+            if (!Array.isArray(data) || data.length === 0) {
+                suggestBox.innerHTML = `<div class="customer-suggest-empty">未找到匹配顾客</div>`;
+                suggestBox.style.display = 'block';
+                return;
+            }
+
+            suggestBox.innerHTML = data.map(item => `
+                <div class="customer-suggest-item"
+                     onclick="selectFormedCustomer(${wrapperIdx}, ${JSON.stringify(item.nickname).replace(/"/g, '&quot;')}, ${JSON.stringify(item.wechat_id || '').replace(/"/g, '&quot;')})">
+                    <div class="customer-suggest-name">${item.nickname || '-'}</div>
+                    <div class="customer-suggest-meta">微信号：${item.wechat_id || '-'}</div>
+                </div>
+            `).join('');
+
+            suggestBox.style.display = 'block';
+        } catch (err) {
+            suggestBox.innerHTML = `<div class="customer-suggest-empty">检索失败，请稍后重试</div>`;
+            suggestBox.style.display = 'block';
+        }
+    }
+
+    function selectFormedCustomer(index, nickname, wechat) {
+        document.getElementById(`edit_player_${index}`).value = nickname || '';
+        document.getElementById(`edit_player_${index}_wechat`).value = wechat || '';
+
+        const suggestBox = document.getElementById(`edit_suggest_list_${index}`);
+        suggestBox.style.display = 'none';
+        suggestBox.innerHTML = '';
+
+        clearFormedPlayerWarningStyle();
+    }
+
+    function bindFormedCustomerAutocomplete(index) {
+        const nameInput = document.getElementById(`edit_player_${index}`);
+        if (!nameInput) return;
+
+        const wrapper = nameInput.closest('.customer-autocomplete-wrapper');
+        let timer = null;
+
+        nameInput.addEventListener('input', function () {
+            const keyword = this.value;
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => fetchFormedCustomerSuggest(keyword, index), 250);
+        });
+
+        document.addEventListener('click', function (e) {
+            if (wrapper && !wrapper.contains(e.target)) {
+                const suggestBox = document.getElementById(`edit_suggest_list_${index}`);
+                if (suggestBox) suggestBox.style.display = 'none';
+            }
+        });
+    }
+
+    function hideAllOverflowSuggestBoxes(mode) {
+        document.querySelectorAll(`[id^="overflow_${mode}_suggest_list_"]`).forEach(el => {
+            el.style.display = 'none';
+            el.innerHTML = '';
+        });
+    }
+
+    async function fetchOverflowCustomerSuggest(keyword, wrapperIdx, mode) {
+        const suggestBox = document.getElementById(`overflow_${mode}_suggest_list_${wrapperIdx}`);
+        const storeName = "{{ current_store }}";
+
+        if (!suggestBox) return;
+
+        if (!keyword || keyword.trim().length < 1) {
+            suggestBox.style.display = 'none';
+            suggestBox.innerHTML = '';
+            return;
+        }
+
+        try {
+            const resp = await fetch(`/api/customer-search?keyword=${encodeURIComponent(keyword)}&store_name=${encodeURIComponent(storeName)}&limit=8`);
+            const data = await resp.json();
+
+            if (!Array.isArray(data) || data.length === 0) {
+                suggestBox.innerHTML = `<div class="customer-suggest-empty">未找到匹配顾客</div>`;
+                suggestBox.style.display = 'block';
+                return;
+            }
+
+            suggestBox.innerHTML = data.map(item => `
+                <div class="customer-suggest-item"
+                     onclick="selectOverflowCustomer('${mode}', ${wrapperIdx}, ${JSON.stringify(item.nickname).replace(/"/g, '&quot;')}, ${JSON.stringify(item.wechat_id || '').replace(/"/g, '&quot;')})">
+                    <div class="customer-suggest-name">${item.nickname || '-'}</div>
+                    <div class="customer-suggest-meta">微信号：${item.wechat_id || '-'}</div>
+                </div>
+            `).join('');
+
+            suggestBox.style.display = 'block';
+        } catch (err) {
+            suggestBox.innerHTML = `<div class="customer-suggest-empty">检索失败，请稍后重试</div>`;
+            suggestBox.style.display = 'block';
+        }
+    }
+
+    function selectOverflowCustomer(mode, index, nickname, wechat) {
+        const nameInput = document.getElementById(`overflow_${mode}_player_${index}`);
+        const wechatInput = document.getElementById(`overflow_${mode}_player_${index}_wechat`);
+        const suggestBox = document.getElementById(`overflow_${mode}_suggest_list_${index}`);
+
+        if (nameInput) nameInput.value = nickname || '';
+        if (wechatInput) wechatInput.value = wechat || '';
+        if (suggestBox) {
+            suggestBox.style.display = 'none';
+            suggestBox.innerHTML = '';
+        }
+
+        clearOverflowPlayerWarningStyle(mode);
+    }
+
+    function bindOverflowCustomerAutocomplete(mode, index) {
+        const nameInput = document.getElementById(`overflow_${mode}_player_${index}`);
+        if (!nameInput) return;
+
+        const wrapper = nameInput.closest('.customer-autocomplete-wrapper');
+        let timer = null;
+
+        nameInput.addEventListener('input', function () {
+            const keyword = this.value;
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => fetchOverflowCustomerSuggest(keyword, index, mode), 250);
+        });
+
+        document.addEventListener('click', function (e) {
+            if (wrapper && !wrapper.contains(e.target)) {
+                const suggestBox = document.getElementById(`overflow_${mode}_suggest_list_${index}`);
+                if (suggestBox) suggestBox.style.display = 'none';
+            }
+        });
+    }
+
+    function validateFormedNicknameWechatPairs() {
+        clearFormedPlayerWarningStyle();
+
+        const wechatNameMap = {};
+        for (let i = 1; i <= 4; i++) {
+            const nameInput = document.getElementById(`edit_player_${i}`);
+            const wechatInput = document.getElementById(`edit_player_${i}_wechat`);
+
+            const name = (nameInput?.value || '').trim();
+            const wechat = (wechatInput?.value || '').trim();
+
+            if ((name && !wechat) || (!name && wechat)) {
+                if (nameInput) nameInput.classList.add('player-invalid-warning');
+                if (wechatInput) wechatInput.classList.add('player-invalid-warning');
+                alert(`参与人 ${i} 的昵称和微信号必须同时填写`);
+                return false;
+            }
+
+            if (wechat) {
+                if (wechatNameMap[wechat] && wechatNameMap[wechat] !== name) {
+                    if (nameInput) nameInput.classList.add('player-invalid-warning');
+                    if (wechatInput) wechatInput.classList.add('player-invalid-warning');
+                    alert(`同一局中微信号【${wechat}】对应了不同昵称，无法提交`);
+                    return false;
+                }
+                wechatNameMap[wechat] = name;
+            }
+        }
+
+        return true;
+    }
+
+    function openPaymentModal(btn) {
+        const gameId = btn.dataset.id;
+        currentRoomFee = parseFloat(btn.dataset.fee) || 0;
+        const wechat = btn.dataset.wechat;
+        const alipay = btn.dataset.alipay;
+        const isPayAll = btn.dataset.payall;
+
+        document.getElementById('paymentForm').action = "/update-payment/" + gameId;
+        document.getElementById('displayRoomFee').innerText = '¥' + currentRoomFee;
+        document.getElementById('inputWechat').value = wechat;
+        document.getElementById('inputAlipay').value = alipay;
+        document.querySelector('select[name="is_payAll"]').value = isPayAll;
+
+        const hiddenInput = document.getElementById('payment_focus_game_id');
+        if (hiddenInput) {
+            hiddenInput.value = gameId;
+        }
+
+        calculateRemaining();
+    }
+
+    function calculateRemaining() {
+        const wechat = parseFloat(document.getElementById('inputWechat').value) || 0;
+        const alipay = parseFloat(document.getElementById('inputAlipay').value) || 0;
+
+        const remaining = currentRoomFee - wechat - alipay;
+        const displayEl = document.getElementById('displayRemaining');
+        displayEl.innerText = '¥' + remaining.toFixed(1);
+
+        if (remaining <= 0) {
+            displayEl.classList.remove('text-danger');
+            displayEl.classList.add('text-success');
+            document.querySelector('select[name="is_payAll"]').value = "true";
+        } else {
+            displayEl.classList.remove('text-success');
+            displayEl.classList.add('text-danger');
+        }
+    }
+
+    async function openDetailModal(gameId) {
+        const container = document.getElementById('detailModalBody');
+
+        container.innerHTML = `
+            <div class="text-center text-muted py-4">
+                <div class="spinner-border spinner-border-sm me-2"></div>正在加载详情...
+            </div>
+        `;
+
+        try {
+            const resp = await fetch(`/game-detail/${gameId}`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+
+            const data = await resp.json();
+            const sourceLabel = data.source_label || (
+                data.record_source === 'overflow' ? '门店溢出单' :
+                data.record_source === 'self_arrival' ? '自主到店登记单' :
+                '常规已组齐订单'
+            );
+
+            const actualReceived = (data.actual_received !== undefined && data.actual_received !== null)
+                ? Number(data.actual_received)
+                : (Number(data.wechat_pay || 0) + Number(data.Alipay || 0));
+            const profitAmount = (data.profit_amount !== undefined && data.profit_amount !== null)
+                ? Number(data.profit_amount)
+                : (actualReceived - Number(data.room_fee || 0));
+
+            const playersHtml = (data.players || []).length > 0
+                ? data.players.map(p => `
+                    <div class="border rounded-3 p-3 bg-light mb-2">
+                        <div class="fw-bold mb-1">参与人 ${p.index}</div>
+                        <div class="small text-muted">昵称</div>
+                        <div class="detail-value mb-2">${p.name || '-'}</div>
+                        <div class="small text-muted">微信号</div>
+                        <div class="detail-value mb-2">${p.wechat || '-'}</div>
+                        <div class="small text-muted">备注</div>
+                        <div class="detail-value">${p.note || '-'}</div>
+                    </div>
+                `).join('')
+                : `<div class="text-muted">暂无参与人信息</div>`;
+
+            const reservationHtml = data.record_source === 'self_arrival'
+                ? `<div class="detail-value">自主到店（无预约）</div>`
+                : `<div class="detail-value">${data.reservation_date || ''} ${data.reservation_time || ''}</div>`;
+
+            let businessInfoHtml = '';
+            let remarksHtml = '';
+
+            if (data.record_source === 'overflow') {
+                businessInfoHtml = `
+                    <div class="col-md-4">
+                        <div class="detail-label">归属门店</div>
+                        <div class="detail-value">${data.store_name || '-'}</div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="detail-label">外部安排门店</div>
+                        <div class="detail-value">${data.external_store_name || '-'}</div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="detail-label">外部包间</div>
+                        <div class="detail-value">${data.room_name || '-'}</div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="detail-label">分数</div>
+                        <div class="detail-value">${data.stakes || '-'}</div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="detail-label">玩法</div>
+                        <div class="detail-value">${data.game_type || '-'}</div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="detail-label">接待店长</div>
+                        <div class="detail-value">${data.who_did || '-'}</div>
+                    </div>
+                `;
+
+                remarksHtml = `
+                    <div class="col-md-12">
+                        <div class="detail-label">特殊备注</div>
+                        <div class="detail-value">${data.tags || '-'}</div>
+                    </div>
+                    <div class="col-md-12">
+                        <div class="detail-label">预定支出门店</div>
+                        <div class="detail-value">${data.table_note || '-'}</div>
+                    </div>
+                `;
+            } else if (data.record_source === 'self_arrival') {
+                businessInfoHtml = `
+                    <div class="col-md-4">
+                        <div class="detail-label">门店</div>
+                        <div class="detail-value">${data.store_name || '-'}</div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="detail-label">包间</div>
+                        <div class="detail-value">${data.room_name || '-'}</div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="detail-label">接待店长</div>
+                        <div class="detail-value">${data.who_did || '-'}</div>
+                    </div>
+                `;
+
+                remarksHtml = `
+                    <div class="col-md-12">
+                        <div class="detail-label">整桌备注</div>
+                        <div class="detail-value">${data.table_note || '-'}</div>
+                    </div>
+                `;
+            } else {
+                businessInfoHtml = `
+                    <div class="col-md-4">
+                        <div class="detail-label">门店</div>
+                        <div class="detail-value">${data.store_name || '-'}</div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="detail-label">包间</div>
+                        <div class="detail-value">${data.room_name || '-'}</div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="detail-label">接待店长</div>
+                        <div class="detail-value">${data.who_did || '-'}</div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="detail-label">分数</div>
+                        <div class="detail-value">${data.stakes || '-'}</div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="detail-label">玩法</div>
+                        <div class="detail-value">${data.game_type || '-'}</div>
+                    </div>
+                `;
+
+                remarksHtml = `
+                    <div class="col-md-12">
+                        <div class="detail-label">特殊备注</div>
+                        <div class="detail-value">${data.tags || '-'}</div>
+                    </div>
+                    <div class="col-md-12">
+                        <div class="detail-label">整桌备注</div>
+                        <div class="detail-value">${data.table_note || '-'}</div>
+                    </div>
+                `;
+            }
+
+            container.innerHTML = `
+                <div class="row g-3">
+                    <div class="col-12">
+                        <div class="detail-section-card">
+                            <div class="detail-section-title">基础信息</div>
+                            <div class="row g-3">
+                                <div class="col-md-3">
+                                    <div class="detail-label">序号</div>
+                                    <div class="detail-value">#${data.serial_number || '-'}</div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="detail-label">状态</div>
+                                    <div class="detail-value">${data.status === 'formed' ? '已组齐' : (data.status || '-')}</div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="detail-label">订单来源</div>
+                                    <div class="detail-value">${sourceLabel}</div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="detail-label">订单开始时间</div>
+                                    <div class="detail-value">${data.order_start_time || '未填写'}</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="detail-label">预约时间</div>
+                                    ${reservationHtml}
+                                </div>
+                                ${businessInfoHtml}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="detail-section-card">
+                            <div class="detail-section-title">金额与收款</div>
+                            <div class="row g-3">
+                                <div class="col-md-4">
+                                    <div class="detail-label">金额</div>
+                                    <div class="detail-value">¥${data.room_fee || 0}</div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="detail-label">支付方式</div>
+                                    <div class="detail-value">${data.payment_method || '-'}</div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="detail-label">支付状态</div>
+                                    <div class="detail-value">${data.is_payAll ? '已收齐' : '未收齐'}</div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="detail-label">微信收款</div>
+                                    <div class="detail-value">${data.wechat_pay || 0}</div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="detail-label">支付宝收款</div>
+                                    <div class="detail-value">${data.Alipay || 0}</div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="detail-label">实收金额</div>
+                                    <div class="detail-value">¥${actualReceived.toFixed(2)}</div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="detail-label">还需收取</div>
+                                    <div class="detail-value">¥${Number(data.remaining || 0).toFixed(2)}</div>
+                                </div>
+                                ${data.record_source === 'overflow' ? `
+                                <div class="col-md-4">
+                                    <div class="detail-label">赚取差额</div>
+                                    <div class="detail-value">¥${profitAmount.toFixed(2)}</div>
+                                </div>` : ''}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="detail-section-card">
+                            <div class="detail-section-title">备注信息</div>
+                            <div class="row g-3">${remarksHtml}</div>
+                        </div>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="detail-section-card">
+                            <div class="detail-section-title">参与人详情</div>
+                            ${playersHtml}
+                        </div>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="detail-section-card">
+                            <div class="detail-section-title">操作记录</div>
+                            <div class="row g-3">
+                                <div class="col-md-4">
+                                    <div class="detail-label">创建时间</div>
+                                    <div class="detail-value">${data.created_at || '-'}</div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="detail-label">最后更新人</div>
+                                    <div class="detail-value">${data.updated_by || '-'}</div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="detail-label">最后更新时间</div>
+                                    <div class="detail-value">${data.updated_at || '-'} ${data.updated_at_relative ? `（${data.updated_at_relative}）` : ''}</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        } catch (e) {
+            console.error('加载订单详情失败:', e);
+            container.innerHTML = `
+                <div class="alert alert-danger mb-0">
+                    详情加载失败，请稍后重试。
+                </div>
+            `;
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+        try {
+            if ('scrollRestoration' in history) {
+                history.scrollRestoration = 'manual';
+            }
+        } catch (e) {}
+
+        toggleCustomDateRange();
+        toggleExportCustomDateRange();
+        toggleSelfArrivalRoomFee('add');
+        toggleSelfArrivalRoomFee('edit');
+        toggleOverflowCustomStakes('add');
+        toggleOverflowCustomStakes('edit');
+        initTooltips();
+
+        const wechatInput = document.getElementById('inputWechat');
+        const alipayInput = document.getElementById('inputAlipay');
+
+        if (wechatInput) wechatInput.addEventListener('input', calculateRemaining);
+        if (alipayInput) alipayInput.addEventListener('input', calculateRemaining);
+
+        [1, 2, 3, 4].forEach(bindFormedCustomerAutocomplete);
+        [1, 2, 3, 4].forEach(i => bindOverflowCustomerAutocomplete('add', i));
+        [1, 2, 3, 4].forEach(i => bindOverflowCustomerAutocomplete('edit', i));
+
+        const editFormedModal = document.getElementById('editFormedModal');
+        if (editFormedModal) {
+            editFormedModal.addEventListener('hidden.bs.modal', function () {
+                hideAllFormedSuggestBoxes();
+                clearFormedPlayerWarningStyle();
+            });
+        }
+
+        const overflowAddModal = document.getElementById('overflowAddModal');
+        if (overflowAddModal) {
+            overflowAddModal.addEventListener('hidden.bs.modal', function () {
+                hideAllOverflowSuggestBoxes('add');
+                clearOverflowPlayerWarningStyle('add');
+            });
+        }
+
+        const overflowEditModal = document.getElementById('overflowEditModal');
+        if (overflowEditModal) {
+            overflowEditModal.addEventListener('hidden.bs.modal', function () {
+                hideAllOverflowSuggestBoxes('edit');
+                clearOverflowPlayerWarningStyle('edit');
+            });
+        }
+
+        const duplicateWarningMessage = {{ duplicate_warning_message|tojson|safe }};
+        const reopenEditGameId = {{ reopen_edit_game_id|tojson|safe }};
+
+        if (duplicateWarningMessage) {
+            setTimeout(() => {
+                alert(duplicateWarningMessage);
+                reopenEditModalByGameId(reopenEditGameId);
+            }, 260);
+        }
+    });
+</script>
+{% endblock %}

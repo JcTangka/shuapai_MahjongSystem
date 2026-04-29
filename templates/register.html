@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>注册 - 耍牌麻将系统</title>
+    <link href="{{ url_for('static', path='/css/bootstrap.min.css') }}" rel="stylesheet">
+    <style>
+        body { background-color: #f0f2f5; display: flex; align-items: center; justify-content: center; height: 100vh; }
+        .register-card { width: 100%; max-width: 400px; padding: 20px; }
+    </style>
+</head>
+<body>
+    <div class="card register-card shadow border-0">
+        <div class="card-body">
+            <h4 class="text-center mb-4">员工注册</h4>
+            <form action="/register" method="post">
+                <div class="mb-3">
+                    <label class="form-label">登录账号 (拼音或英文)</label>
+                    <input type="text" name="username" class="form-control" placeholder="如: zhangsan" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">显示名称 (中文)</label>
+                    <input type="text" name="display_name" class="form-control" placeholder="如: 张三" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">设置密码</label>
+                    <input type="password" name="password" class="form-control" required>
+                </div>
+                <button type="submit" class="btn btn-success w-100 py-2">注 册</button>
+            </form>
+            <div class="text-center mt-3">
+                <a href="/login" class="text-decoration-none small">返回登录</a>
+            </div>
+        </div>
+    </div>
+
+<div class="modal fade" id="errorModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-warning text-dark">
+                    <h5 class="modal-title">注册失败</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body text-center py-4 fs-5" id="errorMsg">
+                    </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary w-100" data-bs-dismiss="modal">知道了</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', path='/js/bootstrap.bundle.min.js') }}"></script>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // 1. 获取 URL 中的查询参数
+            const urlParams = new URLSearchParams(window.location.search);
+            const error = urlParams.get('error');
+
+            // 2. 如果存在 error 参数
+            if (error) {
+                // 设置错误信息文本
+                document.getElementById('errorMsg').textContent = error;
+
+                // 初始化并显示模态框
+                var errorModal = new bootstrap.Modal(document.getElementById('errorModal'));
+                errorModal.show();
+
+                // (可选) 弹窗关闭后，清除 URL 里的 error 参数，防止刷新页面又弹出来
+                const newUrl = window.location.pathname;
+                window.history.replaceState({}, document.title, newUrl);
+            }
+        });
+    </script>
+</body>
+</html>

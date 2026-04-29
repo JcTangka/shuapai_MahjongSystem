@@ -1,0 +1,315 @@
+{% extends "base.html" %}
+
+{% block title %}自主到店登记 - 耍牌系统{% endblock %}
+
+{% block breadcrumb %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 自主到店登记
+{% endblock %}
+
+{% block content %}
+<style>
+    .page-section-title {
+        font-weight: 700;
+        color: #1d4ed8;
+        letter-spacing: 0.3px;
+    }
+
+    .highlight-primary { font-weight: 700; color: #1d4ed8; }
+    .highlight-success { font-weight: 700; color: #059669; }
+    .highlight-danger  { font-weight: 700; color: #dc2626; }
+
+    .record-card {
+        border: 1px solid #e5e7eb;
+        border-radius: 16px;
+        background: #fff;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
+        transition: all 0.2s ease;
+    }
+
+    .record-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.10);
+    }
+
+    .record-card-header {
+        border-bottom: 1px solid #eef2f7;
+        background: linear-gradient(135deg, #eff6ff 0%, #f8fbff 100%);
+        border-radius: 16px 16px 0 0;
+    }
+
+    .field-label {
+        color: #64748b;
+        font-size: 0.92rem;
+        margin-bottom: 4px;
+    }
+
+    .field-value {
+        color: #0f172a;
+        font-weight: 600;
+        word-break: break-all;
+    }
+
+    .modal-header.custom-header {
+        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+        color: #fff;
+        border-bottom: none;
+    }
+
+    .modal-header.custom-header .btn-close {
+        filter: invert(1) grayscale(100%);
+    }
+
+    .empty-state {
+        border: 1px dashed #cbd5e1;
+        border-radius: 18px;
+        background: #f8fafc;
+        padding: 48px 20px;
+        text-align: center;
+        color: #64748b;
+    }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
+    <div class="d-flex align-items-center">
+        <label class="me-2 fw-bold text-secondary">当前门店：</label>
+        <div class="dropdown">
+            <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                {{ current_store }}
+            </button>
+            <ul class="dropdown-menu">
+                {% for store in store_list %}
+                <li>
+                    <a class="dropdown-item {% if store == current_store %}active{% endif %}"
+                       href="/self-arrival-register?store={{ store }}">
+                        {{ store }}
+                    </a>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+
+    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addSelfArrivalModal">
+        <i class="bi bi-plus-circle me-1"></i> 新增自主到店
+    </button>
+</div>
+
+{% if request.query_params.get('success') %}
+<div class="alert alert-success alert-dismissible fade show" role="alert">
+    <i class="bi bi-check-circle me-1"></i> {{ request.query_params.get('success') }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+
+{% if request.query_params.get('error') %}
+<div class="alert alert-danger alert-dismissible fade show" role="alert">
+    <i class="bi bi-exclamation-triangle me-1"></i> {{ request.query_params.get('error') }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+
+<div class="mb-3">
+    <h5 class="page-section-title mb-0">
+        <i class="bi bi-journal-check me-2"></i>自主到店登记列表
+    </h5>
+</div>
+
+{% if record_list %}
+<div class="row g-3">
+    {% for item in record_list %}
+    <div class="col-12">
+        <div class="record-card">
+            <div class="record-card-header px-4 py-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <div class="d-flex align-items-center flex-wrap gap-3">
+                    <span class="badge bg-primary fs-6">
+                        序号（月序号）：{{ item.serial_number }}
+                    </span>
+                    <span class="badge bg-light text-dark border">
+                        预约包间：{{ item.room_name }}
+                    </span>
+                    <span class="badge bg-light text-dark border">
+                        下单方式：{{ item.order_method }}
+                    </span>
+                </div>
+                <div class="text-muted small">
+                    操作人：<span class="highlight-primary">{{ item.operator_name }}</span>
+                </div>
+            </div>
+
+            <div class="px-4 py-3">
+                <div class="row g-3">
+                    <div class="col-md-3">
+                        <div class="field-label">订单开始时间</div>
+                        <div class="field-value">{{ item.order_start_time }}</div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="field-label">下单用户小程序名称 / 微信昵称</div>
+                        <div class="field-value">{{ item.customer_name }}</div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="field-label">下单用户手机号 / 微信号</div>
+                        <div class="field-value">{{ item.customer_contact }}</div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="field-label">最后更新时间</div>
+                        <div class="field-value">{{ item.updated_at.strftime('%Y-%m-%d %H:%M') if item.updated_at else '-' }}</div>
+                    </div>
+                </div>
+
+                <div class="d-flex justify-content-end gap-2 mt-3">
+                    <button class="btn btn-outline-primary btn-sm"
+                            data-bs-toggle="modal"
+                            data-bs-target="#editSelfArrivalModal{{ item.id }}">
+                        <i class="bi bi-pencil-square me-1"></i>编辑
+                    </button>
+
+                    <a class="btn btn-outline-danger btn-sm"
+                       href="/self-arrival-register/delete/{{ item.id }}?store={{ current_store }}"
+                       onclick="return confirm('确定删除这条自主到店登记吗？');">
+                        <i class="bi bi-trash me-1"></i>删除
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 编辑弹窗 -->
+    <div class="modal fade" id="editSelfArrivalModal{{ item.id }}" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <form method="post" action="/self-arrival-register/update/{{ item.id }}">
+                    <div class="modal-header custom-header">
+                        <h5 class="modal-title">
+                            <i class="bi bi-pencil-square me-2"></i>编辑自主到店登记
+                        </h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+
+                    <div class="modal-body">
+                        <input type="hidden" name="store_name" value="{{ current_store }}">
+
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label class="form-label fw-bold">预约包间</label>
+                                <select class="form-select" name="room_name" required>
+                                    <option value="">请选择包间</option>
+                                    {% for room in room_list %}
+                                    <option value="{{ room }}" {% if room == item.room_name %}selected{% endif %}>{{ room }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+
+                            <div class="col-md-6">
+                                <label class="form-label fw-bold">订单开始时间</label>
+                                <input type="datetime-local"
+                                       class="form-control"
+                                       name="order_start_time_full"
+                                       value="{{ item.order_start_time.replace(' ', 'T') if item.order_start_time else '' }}"
+                                       required>
+                            </div>
+
+                            <div class="col-md-6">
+                                <label class="form-label fw-bold">下单用户小程序名称 / 微信昵称</label>
+                                <input type="text" class="form-control" name="customer_name" value="{{ item.customer_name }}" required>
+                            </div>
+
+                            <div class="col-md-6">
+                                <label class="form-label fw-bold">下单用户手机号 / 微信号</label>
+                                <input type="text" class="form-control" name="customer_contact" value="{{ item.customer_contact }}" required>
+                            </div>
+
+                            <div class="col-12">
+                                <label class="form-label fw-bold">下单方式</label>
+                                <select class="form-select" name="order_method" required>
+                                    {% set method_list = ['美团团购','抖音团购','美团预定','小程序端口预约','代客收款下单','代客验券下单'] %}
+                                    {% for method in method_list %}
+                                    <option value="{{ method }}" {% if item.order_method == method %}selected{% endif %}>{{ method }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-light border" data-bs-dismiss="modal">取消</button>
+                        <button type="submit" class="btn btn-primary">保存修改</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+    <div class="mb-2 fs-4"><i class="bi bi-inbox"></i></div>
+    <div class="fw-bold mb-1">当前门店暂无自主到店登记</div>
+    <div>你可以点击右上角 <span class="highlight-primary">“新增自主到店”</span> 创建第一条记录。</div>
+</div>
+{% endif %}
+
+<!-- 新增弹窗 -->
+<div class="modal fade" id="addSelfArrivalModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <form method="post" action="/self-arrival-register/add">
+                <div class="modal-header custom-header">
+                    <h5 class="modal-title">
+                        <i class="bi bi-plus-circle me-2"></i>新增自主到店
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+
+                <div class="modal-body">
+                    <input type="hidden" name="store_name" value="{{ current_store }}">
+
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">预约包间</label>
+                            <select class="form-select" name="room_name" required>
+                                <option value="">请选择包间</option>
+                                {% for room in room_list %}
+                                <option value="{{ room }}">{{ room }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">订单开始时间</label>
+                            <input type="datetime-local" class="form-control" name="order_start_time_full" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">下单用户小程序名称 / 微信昵称</label>
+                            <input type="text" class="form-control" name="customer_name" required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">下单用户手机号 / 微信号</label>
+                            <input type="text" class="form-control" name="customer_contact" required>
+                        </div>
+
+                        <div class="col-12">
+                            <label class="form-label fw-bold">下单方式</label>
+                            <select class="form-select" name="order_method" required>
+                                <option value="">请选择下单方式</option>
+                                <option value="美团团购">美团团购</option>
+                                <option value="抖音团购">抖音团购</option>
+                                <option value="美团预定">美团预定</option>
+                                <option value="小程序端口预约">小程序端口预约</option>
+                                <option value="代客收款下单">代客收款下单</option>
+                                <option value="代客验券下单">代客验券下单</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-light border" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">确定新增</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

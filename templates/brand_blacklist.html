@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block title %}品牌黑名单 - 耍牌系统{% endblock %}
+
+{% block breadcrumb %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 品牌黑名单
+{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <h4 class="mb-1 fw-bold text-danger">
+            <i class="bi bi-shield-slash"></i> 品牌黑名单
+        </h4>
+        <div class="text-secondary small">全门店统一生效，店长仅可查看，超级管理员可新增/编辑/撤销。</div>
+    </div>
+
+    {% if current_user.role == "admin" %}
+    <button class="btn btn-danger" data-bs-toggle="modal" data-bs-target="#addBrandBlacklistModal">
+        <i class="bi bi-plus-circle"></i> 新增全门店黑名单
+    </button>
+    {% endif %}
+</div>
+
+<form class="card shadow-sm border-0 mb-4">
+    <div class="card-body row g-3 align-items-end">
+        <div class="col-md-5">
+            <label class="form-label fw-bold">关键词</label>
+            <input type="text" class="form-control" name="keyword" value="{{ keyword }}" placeholder="昵称 / 微信号 / 理由">
+        </div>
+        <div class="col-md-3">
+            <label class="form-label fw-bold">状态</label>
+            <select class="form-select" name="status_filter">
+                <option value="active" {% if status_filter == 'active' %}selected{% endif %}>生效中</option>
+                <option value="revoked" {% if status_filter == 'revoked' %}selected{% endif %}>已撤销</option>
+                <option value="all" {% if status_filter == 'all' %}selected{% endif %}>全部</option>
+            </select>
+        </div>
+        <div class="col-md-2">
+            <button class="btn btn-primary w-100" type="submit">
+                <i class="bi bi-search"></i> 查询
+            </button>
+        </div>
+        <div class="col-md-2">
+            <a class="btn btn-outline-secondary w-100" href="/brand-blacklist">
+                重置
+            </a>
+        </div>
+    </div>
+</form>
+
+<div class="row g-3">
+    {% for item in record_list %}
+    <div class="col-12">
+        <div class="card shadow-sm border-0 {% if item.is_active %}border-start border-4 border-danger{% else %}opacity-75{% endif %}">
+            <div class="card-body">
+                <div class="d-flex justify-content-between flex-wrap gap-3">
+                    <div>
+                        <div class="d-flex align-items-center gap-2 mb-2">
+                            <span class="fw-bold fs-5">{{ item.nickname }}</span>
+                            <span class="badge {% if item.is_active %}bg-danger{% else %}bg-secondary{% endif %}">
+                                {% if item.is_active %}生效中{% else %}已撤销{% endif %}
+                            </span>
+                        </div>
+                        <div class="mb-2 text-secondary">
+                            <i class="bi bi-wechat"></i> 微信号：{{ item.wechat_id }}
+                        </div>
+                        <div class="mb-2">
+                            <span class="fw-bold text-danger">拉黑理由：</span>{{ item.reason }}
+                        </div>
+                        <div class="small text-muted">
+                            创建人：{{ item.created_by_name }}　
+                            创建时间：{{ item.created_at.strftime("%Y-%m-%d %H:%M") if item.created_at else "" }}
+                            {% if item.updated_by_name %}
+                            　|　最后操作：{{ item.updated_by_name }}
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    {% if current_user.role == "admin" %}
+                    <div class="d-flex align-items-start gap-2">
+                        {% if item.is_active %}
+                        <button class="btn btn-outline-primary btn-sm"
+                                data-bs-toggle="modal"
+                                data-bs-target="#editBrandBlacklistModal{{ item.id }}">
+                            编辑
+                        </button>
+                        <a class="btn btn-outline-danger btn-sm"
+                           href="/brand-blacklist/revoke/{{ item.id }}"
+                           onclick="return confirm('确认撤销该品牌黑名单记录吗？');">
+                            撤销
+                        </a>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% if current_user.role == "admin" %}
+    <div class="modal fade" id="editBrandBlacklistModal{{ item.id }}" tabindex="-1">
+        <div class="modal-dialog">
+            <form class="modal-content" method="post" action="/brand-blacklist/update/{{ item.id }}">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title"><i class="bi bi-pencil-square"></i> 编辑品牌黑名单</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">昵称</label>
+                        <input type="text" class="form-control" name="nickname" value="{{ item.nickname }}" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">微信号</label>
+                        <input type="text" class="form-control" name="wechat_id" value="{{ item.wechat_id }}" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">理由</label>
+                        <textarea class="form-control" name="reason" rows="4" required>{{ item.reason }}</textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-light border" type="button" data-bs-dismiss="modal">取消</button>
+                    <button class="btn btn-primary" type="submit">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    {% endif %}
+    {% endfor %}
+</div>
+
+{% if current_user.role == "admin" %}
+<div class="modal fade" id="addBrandBlacklistModal" tabindex="-1">
+    <div class="modal-dialog">
+        <form class="modal-content" method="post" action="/brand-blacklist/add">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title"><i class="bi bi-person-fill-slash"></i> 新增全门店黑名单</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label fw-bold">昵称</label>
+                    <input type="text" class="form-control" name="nickname" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-bold">微信号</label>
+                    <input type="text" class="form-control" name="wechat_id" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-bold">理由</label>
+                    <textarea class="form-control" name="reason" rows="4" required></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-light border" type="button" data-bs-dismiss="modal">取消</button>
+                <button class="btn btn-danger" type="submit">确定新增</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
