@@ -681,8 +681,15 @@ class EmployeeLeaveRequest(SQLModel, table=True):
     reason: str
     remark: Optional[str] = None
 
-    # pending / approved / rejected / cancelled
+    # pending / replacement_accepted / replacement_rejected_wait_employee /
+    # force_leave_deducted / approved / rejected / cancelled
     status: str = Field(default="pending", index=True)
+
+    # 指定休班顶班人
+    replacement_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    replacement_employee_name_snapshot: Optional[str] = Field(default=None, index=True)
+    replacement_response: Optional[str] = Field(default=None, index=True)  # accepted / rejected
+    replacement_response_at: Optional[datetime] = Field(default=None, index=True)
 
     # 是否满足至少提前一天申请
     is_before_one_day: bool = Field(default=False, index=True)
@@ -699,6 +706,7 @@ class EmployeeLeaveRequest(SQLModel, table=True):
     # 审批通过后关联生成的考勤记录和工资流水
     attendance_record_id: Optional[int] = Field(default=None, index=True)
     salary_flow_id: Optional[int] = Field(default=None, index=True)
+    replacement_salary_flow_id: Optional[int] = Field(default=None, index=True)
 
     created_at: datetime = Field(default_factory=datetime.now, index=True)
     updated_at: datetime = Field(default_factory=datetime.now, index=True)
@@ -873,6 +881,11 @@ class MonthlySalarySettlement(SQLModel, table=True):
     status: str = Field(default="draft", index=True)
 
     calculated_at: Optional[datetime] = Field(default=None, index=True)
+
+    employee_confirmed: bool = Field(default=False, index=True)
+    employee_confirmed_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    employee_confirmed_by_name: Optional[str] = None
+    employee_confirmed_at: Optional[datetime] = Field(default=None, index=True)
 
     confirmed_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
     confirmed_by_name: Optional[str] = None
@@ -1055,6 +1068,7 @@ def create_db_and_tables():
     migrate_employee_module_tables()
     # V3 员工管理模块：
     # 补充员工考勤表后续新增字段，避免旧库已有表时 create_all 不自动加列。
+    migrate_employee_leave_request_table()
     migrate_employee_attendance_record_table()
     migrate_monthly_salary_settlement_table()
 
@@ -1503,6 +1517,60 @@ def migrate_user_table():
 
         conn.commit()
 
+def migrate_employee_leave_request_table():
+    """
+    V3 员工请假表迁移：
+    为“指定休班员工顶班确认”流程补充字段。
+    """
+    with engine.begin() as conn:
+        table_exists = conn.execute(text("""
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table' AND name='employeeleaverequest'
+        """)).fetchone()
+
+        if not table_exists:
+            return
+
+        columns = conn.execute(text("PRAGMA table_info(employeeleaverequest)")).fetchall()
+        col_names = {col[1] for col in columns}
+
+        alter_columns = [
+            ("replacement_user_id", "INTEGER"),
+            ("replacement_employee_name_snapshot", "VARCHAR"),
+            ("replacement_response", "VARCHAR"),
+            ("replacement_response_at", "DATETIME"),
+            ("replacement_salary_flow_id", "INTEGER"),
+        ]
+
+        for col_name, col_type in alter_columns:
+            if col_name not in col_names:
+                conn.execute(text(f"""
+                    ALTER TABLE employeeleaverequest
+                    ADD COLUMN {col_name} {col_type}
+                """))
+
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_employeeleaverequest_replacement_user_id
+            ON employeeleaverequest (replacement_user_id)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_employeeleaverequest_replacement_employee_name_snapshot
+            ON employeeleaverequest (replacement_employee_name_snapshot)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_employeeleaverequest_replacement_response
+            ON employeeleaverequest (replacement_response)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_employeeleaverequest_replacement_response_at
+            ON employeeleaverequest (replacement_response_at)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_employeeleaverequest_replacement_salary_flow_id
+            ON employeeleaverequest (replacement_salary_flow_id)
+        """))
+
 def migrate_employee_attendance_record_table():
     """
     V3 员工考勤表迁移：
@@ -1545,7 +1613,8 @@ def migrate_monthly_salary_settlement_table():
     为 monthlysalarysettlement 表补充社保字段。
 
     employee_social_security_amount：员工社保，公司缴纳部分，计入应发工资；
-    social_security_amount：代缴社保，公司代个人缴纳部分，从实发工资中扣除。
+    social_security_amount：代缴社保，公司代个人缴纳部分，从实发工资中扣除；
+    employee_confirmed_*：普通员工在“我的工资”中确认本月工资。
     """
     with engine.begin() as conn:
         table_exists = conn.execute(text("""
@@ -1573,6 +1642,53 @@ def migrate_monthly_salary_settlement_table():
                 ADD COLUMN social_security_amount REAL NOT NULL DEFAULT 0
             """))
             print("已为 monthlysalarysettlement 表补充 social_security_amount 字段")
+
+        if "employee_confirmed" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE monthlysalarysettlement
+                ADD COLUMN employee_confirmed BOOLEAN NOT NULL DEFAULT 0
+            """))
+            print("已为 monthlysalarysettlement 表补充 employee_confirmed 字段")
+
+        if "employee_confirmed_by_user_id" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE monthlysalarysettlement
+                ADD COLUMN employee_confirmed_by_user_id INTEGER
+            """))
+
+        if "employee_confirmed_by_name" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE monthlysalarysettlement
+                ADD COLUMN employee_confirmed_by_name VARCHAR
+            """))
+
+        if "employee_confirmed_at" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE monthlysalarysettlement
+                ADD COLUMN employee_confirmed_at DATETIME
+            """))
+
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_monthlysalarysettlement_employee_confirmed
+            ON monthlysalarysettlement (employee_confirmed)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_monthlysalarysettlement_employee_confirmed_by_user_id
+            ON monthlysalarysettlement (employee_confirmed_by_user_id)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_monthlysalarysettlement_employee_confirmed_at
+            ON monthlysalarysettlement (employee_confirmed_at)
+        """))
+
+        conn.execute(text("""
+            UPDATE monthlysalarysettlement
+            SET employee_confirmed = 1,
+                employee_confirmed_by_name = COALESCE(employee_confirmed_by_name, '历史确认'),
+                employee_confirmed_at = COALESCE(employee_confirmed_at, confirmed_at, paid_at, calculated_at, updated_at)
+            WHERE status IN ('confirmed', 'paid', 'locked')
+              AND (employee_confirmed IS NULL OR employee_confirmed = 0)
+        """))
 
 
 def migrate_employee_module_tables():

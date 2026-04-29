@@ -645,7 +645,7 @@
                     <i class="bi bi-calendar-check me-1 text-primary"></i>请假审批
                 </div>
                 <div class="small text-muted mt-1">
-                    待审批 {{ pending_leave_count or 0 }} 条；审批通过后自动生成考勤记录和工资流水。
+                    待审批 {{ pending_leave_count or 0 }} 条；顶班人同意后由管理员审批，审批通过后自动生成考勤记录和工资流水。
                 </div>
             </div>
         </div>
@@ -659,6 +659,7 @@
                     <th>员工</th>
                     <th>请假日期</th>
                     <th>班次</th>
+                    <th>顶班人</th>
                     <th>申请日期</th>
                     <th>原因</th>
                     <th>预计扣款</th>
@@ -689,6 +690,21 @@
                     </td>
 
                     <td>
+                        {% if item.replacement_employee_name_snapshot %}
+                            <div class="fw-semibold">{{ item.replacement_employee_name_snapshot }}</div>
+                            {% if item.replacement_response == 'accepted' %}
+                                <span class="badge bg-success">已同意</span>
+                            {% elif item.replacement_response == 'rejected' %}
+                                <span class="badge bg-danger">已拒绝</span>
+                            {% else %}
+                                <span class="badge bg-warning text-dark">待确认</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+
+                    <td>
                         <span class="text-muted small">{{ item.apply_date }}</span>
                     </td>
 
@@ -704,7 +720,7 @@
                     </td>
 
                     <td>
-                        {% if item.status == 'approved' %}
+                        {% if item.status in ['approved', 'force_leave_deducted'] %}
                             <span class="fw-bold text-danger">¥{{ '%.2f'|format(item.final_deduct_amount or 0) }}</span>
                         {% else %}
                             <span class="text-muted">-</span>
@@ -713,7 +729,13 @@
 
                     <td>
                         {% if item.status == 'pending' %}
-                            <span class="badge bg-warning text-dark">待审批</span>
+                            <span class="badge bg-warning text-dark">待顶班确认</span>
+                        {% elif item.status == 'replacement_accepted' %}
+                            <span class="badge bg-primary">待管理员审批</span>
+                        {% elif item.status == 'replacement_rejected_wait_employee' %}
+                            <span class="badge bg-warning text-dark">待请假人确认</span>
+                        {% elif item.status == 'force_leave_deducted' %}
+                            <span class="badge bg-dark">坚持请假，已扣薪</span>
                         {% elif item.status == 'approved' %}
                             <span class="badge bg-success">已通过</span>
                         {% elif item.status == 'rejected' %}
@@ -736,7 +758,7 @@
                     </td>
 
                     <td>
-                        {% if item.status == 'pending' %}
+                        {% if item.status == 'replacement_accepted' or (item.status == 'pending' and not item.replacement_user_id) %}
                         <div class="d-flex flex-column gap-2">
 
                             <form action="/employees/leaves/approve/{{ item.id }}"
@@ -769,7 +791,7 @@
 
                         </div>
                         {% else %}
-                            <span class="text-muted small">已处理</span>
+                            <span class="text-muted small">暂无操作</span>
                         {% endif %}
                     </td>
                 </tr>
@@ -1445,7 +1467,9 @@
             <div class="card-body">
                 <div class="employee-stat-label">已生成工资</div>
                 <div class="employee-stat-value">{{ salary_settlement_data.generated_count }}</div>
-                <div class="small text-muted mt-1">已有月度结算记录</div>
+                <div class="small text-muted mt-1">
+                    已有月度结算记录；员工已确认 {{ salary_settlement_data.employee_confirmed_count or 0 }} 条
+                </div>
             </div>
         </div>
     </div>
@@ -1586,7 +1610,7 @@
                     {% set actual_salary = payable_salary - social_security_amount %}
 
                     <td>
-                        {% if item.status in ['paid', 'locked'] %}
+                        {% if item.status != 'draft' %}
                             <span class="fw-bold text-success">¥{{ '%.2f'|format(employee_social_security_amount) }}</span>
                         {% else %}
                             <form action="/employees/salary-settlement/social-security/{{ item.id }}"
@@ -1611,7 +1635,7 @@
                     </td>
 
                     <td>
-                        {% if item.status in ['paid', 'locked'] %}
+                        {% if item.status != 'draft' %}
                             <span class="fw-bold text-danger">¥{{ '%.2f'|format(social_security_amount) }}</span>
                         {% else %}
                             <form action="/employees/salary-settlement/social-security/{{ item.id }}"
@@ -1651,20 +1675,32 @@
                         {% if item.calculated_at %}
                         <div class="small text-muted mt-1">{{ item.calculated_at }}</div>
                         {% endif %}
+                        {% if item.employee_confirmed %}
+                        <div class="small text-success mt-1">
+                            员工已确认
+                            {% if item.employee_confirmed_at %}｜{{ item.employee_confirmed_at }}{% endif %}
+                        </div>
+                        {% else %}
+                        <div class="small text-muted mt-1">待员工确认</div>
+                        {% endif %}
                     </td>
 
                     <td>
                         <div class="d-flex flex-column gap-1">
-                            {% if item.status == 'draft' %}
+                            {% if item.status == 'draft' and item.employee_confirmed %}
                             <form action="/employees/salary-settlement/confirm/{{ item.id }}"
                                   method="post"
                                   data-employee-ajax-form="1"
-                                  onsubmit="return confirm('确定确认【{{ emp.display_name }}】的工资吗？确认后如需重算，需要先退回草稿。');">
+                                  onsubmit="return confirm('确定最终确认【{{ emp.display_name }}】的工资吗？确认后如需重算，需要先退回草稿。');">
                                 <input type="hidden" name="store" value="{{ current_store or '' }}">
                                 <button type="submit" class="btn btn-sm btn-outline-primary w-100">
                                     确认工资
                                 </button>
                             </form>
+                            {% elif item.status == 'draft' %}
+                            <button class="btn btn-sm btn-outline-secondary w-100" disabled>
+                                等待员工确认
+                            </button>
                             {% endif %}
 
                             {% if item.status == 'confirmed' %}
@@ -2699,6 +2735,14 @@
                                 <span class="badge bg-secondary fs-6">{{ my_salary_data.settlement_status_label }}</span>
                             {% endif %}
                         </div>
+                        {% if settlement.employee_confirmed %}
+                            <div class="small text-success mt-2">
+                                您已确认
+                                {% if settlement.employee_confirmed_at %}｜{{ settlement.employee_confirmed_at }}{% endif %}
+                            </div>
+                        {% else %}
+                            <div class="small text-muted mt-2">待您确认</div>
+                        {% endif %}
                     </div>
                 </div>
 
@@ -2767,6 +2811,29 @@
                 <i class="bi bi-info-circle me-1"></i>
                 本月工资已生成结算记录。若后续仍有补扣、补发，应由管理员新增工资修正流水，再重新结算或在结算模块处理。
             </div>
+
+            {% if settlement.status == 'draft' %}
+                <div class="mt-3 d-flex justify-content-end">
+                    {% if settlement.employee_confirmed %}
+                        <button type="button" class="btn btn-outline-success" disabled>
+                            <i class="bi bi-check-circle me-1"></i>您已确认工资
+                        </button>
+                    {% elif my_salary_data.can_employee_confirm_salary %}
+                        <form action="/employees/my-salary/confirm/{{ settlement.id }}"
+                              method="post"
+                              onsubmit="return confirm('确认本月工资无误吗？确认后管理员才能进行最终确认。');">
+                            <input type="hidden" name="store" value="{{ current_store or '' }}">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="bi bi-check-circle me-1"></i>确认工资
+                            </button>
+                        </form>
+                    {% else %}
+                        <button type="button" class="btn btn-outline-secondary" disabled>
+                            <i class="bi bi-clock me-1"></i>月底开放确认
+                        </button>
+                    {% endif %}
+                </div>
+            {% endif %}
         {% else %}
             <div class="employee-help-note">
                 <div class="fw-bold text-dark mb-1">
@@ -2982,7 +3049,7 @@
             <i class="bi bi-calendar-plus text-primary me-1"></i>我的请假
         </h5>
         <div class="text-muted small">
-            请假需至少提前一天提交；审批通过后按当天班次扣除对应日薪，但不影响全勤奖。
+            请假需至少提前一天提交；系统会先通知当天休班员工确认顶班，再进入管理员审批。
         </div>
     </div>
 
@@ -2992,6 +3059,61 @@
         <i class="bi bi-plus-circle me-1"></i>新增请假申请
     </button>
 </div>
+
+{% if my_replacement_requests %}
+<div class="card employee-module-card mb-3">
+    <div class="card-header bg-white py-3">
+        <div class="fw-bold">
+            <i class="bi bi-arrow-left-right me-1 text-primary"></i>待我确认的顶班
+        </div>
+    </div>
+    <div class="card-body">
+        <div class="row g-3" id="replacement-request-list">
+            {% for item in my_replacement_requests %}
+            <div class="col-md-6 col-xl-4" id="replacement-request-card-{{ item.id }}">
+                <div class="border rounded-3 p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <div>
+                            <div class="fw-bold">{{ item.employee_name_snapshot }}</div>
+                            <div class="small text-muted">{{ item.leave_date }} ｜ {{ shift_type_label(item.shift_type) }}</div>
+                        </div>
+                        <span class="badge bg-warning text-dark">待确认</span>
+                    </div>
+                    <div class="small mb-3">
+                        原因：{{ item.reason }}
+                        {% if item.remark %}
+                            <div class="text-muted mt-1">备注：{{ item.remark }}</div>
+                        {% endif %}
+                    </div>
+                    <div class="d-flex gap-2">
+                        <form action="/employees/leaves/replacement/accept/{{ item.id }}"
+                              method="post"
+                              data-employee-ajax-form="1"
+                              class="flex-fill"
+                              onsubmit="return confirm('确定同意为【{{ item.employee_name_snapshot }}】顶班吗？');">
+                            <input type="hidden" name="store" value="{{ current_store or '' }}">
+                            <button type="submit" class="btn btn-sm btn-success w-100">
+                                <i class="bi bi-check-circle me-1"></i>同意
+                            </button>
+                        </form>
+                        <form action="/employees/leaves/replacement/reject/{{ item.id }}"
+                              method="post"
+                              data-employee-ajax-form="1"
+                              class="flex-fill"
+                              onsubmit="return confirm('确定拒绝顶班吗？如果请假人坚持请假，您将扣除对方当天班次一倍日薪。');">
+                            <input type="hidden" name="store" value="{{ current_store or '' }}">
+                            <button type="submit" class="btn btn-sm btn-outline-danger w-100">
+                                <i class="bi bi-x-circle me-1"></i>拒绝
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
 
 <div class="card employee-module-card">
     <div class="card-header bg-white py-3">
@@ -3013,6 +3135,7 @@
                     <th>最终扣款</th>
                     <th>状态</th>
                     <th>审批信息</th>
+                    <th style="width: 220px;">操作</th>
                 </tr>
             </thead>
 
@@ -3049,7 +3172,7 @@
                     </td>
 
                     <td>
-                        {% if item.status == 'approved' %}
+                        {% if item.status in ['approved', 'force_leave_deducted'] %}
                             <span class="fw-bold text-danger">
                                 ¥{{ '%.2f'|format(item.final_deduct_amount or 0) }}
                             </span>
@@ -3060,7 +3183,13 @@
 
                     <td>
                         {% if item.status == 'pending' %}
-                            <span class="badge bg-warning text-dark">待审批</span>
+                            <span class="badge bg-warning text-dark">待顶班确认</span>
+                        {% elif item.status == 'replacement_accepted' %}
+                            <span class="badge bg-primary">待管理员审批</span>
+                        {% elif item.status == 'replacement_rejected_wait_employee' %}
+                            <span class="badge bg-warning text-dark">待您确认</span>
+                        {% elif item.status == 'force_leave_deducted' %}
+                            <span class="badge bg-dark">坚持请假，已扣薪</span>
                         {% elif item.status == 'approved' %}
                             <span class="badge bg-success">已通过</span>
                         {% elif item.status == 'rejected' %}
@@ -3085,14 +3214,46 @@
                                 备注：{{ item.approval_note }}
                             </div>
                             {% endif %}
+                        {% elif item.replacement_employee_name_snapshot %}
+                            <div class="small">顶班人：{{ item.replacement_employee_name_snapshot }}</div>
+                            {% if item.replacement_response_at %}
+                                <div class="small text-muted">确认时间：{{ item.replacement_response_at }}</div>
+                            {% endif %}
                         {% else %}
-                            <span class="text-muted small">等待管理员审批</span>
+                            <span class="text-muted small">等待顶班确认</span>
+                        {% endif %}
+                    </td>
+
+                    <td>
+                        {% if item.status == 'replacement_rejected_wait_employee' %}
+                        <div class="d-flex flex-column gap-2">
+                            <form action="/employees/leaves/force-after-replacement-reject/{{ item.id }}"
+                                  method="post"
+                                  data-employee-ajax-form="1"
+                                  onsubmit="return confirm('确定坚持请假吗？系统将自动生成您双倍日薪扣款，并扣除顶班人一倍日薪。');">
+                                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                <button type="submit" class="btn btn-sm btn-danger w-100">
+                                    <i class="bi bi-exclamation-circle me-1"></i>坚持请假
+                                </button>
+                            </form>
+                            <form action="/employees/leaves/cancel-after-replacement-reject/{{ item.id }}"
+                                  method="post"
+                                  data-employee-ajax-form="1"
+                                  onsubmit="return confirm('确定取消这次请假吗？取消后不产生扣薪。');">
+                                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                <button type="submit" class="btn btn-sm btn-outline-secondary w-100">
+                                    <i class="bi bi-x-circle me-1"></i>取消请假
+                                </button>
+                            </form>
+                        </div>
+                        {% else %}
+                            <span class="text-muted small">暂无操作</span>
                         {% endif %}
                     </td>
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="9" class="text-muted py-5">
+                    <td colspan="10" class="text-muted py-5">
                         <i class="bi bi-inbox fs-1 d-block mb-3"></i>
                         暂无请假记录
                     </td>
@@ -3123,7 +3284,7 @@
                             <i class="bi bi-info-circle me-1"></i>请假规则
                         </div>
                         <div class="small">
-                            当天无法请假，至少提前一天提交。审批通过后，按当天班次扣除对应日薪；休息日请假不扣款；审批通过请假不影响全勤奖。
+                            当天无法请假，至少提前一天提交。系统会指定当天休班员工确认顶班；顶班人同意后进入管理员审批，顶班人拒绝后您可选择取消或坚持请假。
                         </div>
                     </div>
 
@@ -3169,7 +3330,7 @@
                     </button>
                     <button type="submit"
                             class="btn btn-primary"
-                            onclick="return confirm('确定提交请假申请吗？提交后将等待管理员审批。');">
+                            onclick="return confirm('确定提交请假申请吗？提交后将先通知当天休班员工确认顶班。');">
                         <i class="bi bi-check-circle me-1"></i>提交申请
                     </button>
                 </div>
@@ -3446,15 +3607,19 @@ function updateEmployeeRow(emp) {
 }
 
 function leaveStatusBadge(status, statusLabel) {
-    if (status === "pending") return `<span class="badge bg-warning text-dark">待审批</span>`;
+    if (status === "pending") return `<span class="badge bg-warning text-dark">待顶班确认</span>`;
+    if (status === "replacement_accepted") return `<span class="badge bg-primary">待管理员审批</span>`;
+    if (status === "replacement_rejected_wait_employee") return `<span class="badge bg-warning text-dark">待请假人确认</span>`;
+    if (status === "force_leave_deducted") return `<span class="badge bg-dark">坚持请假，已扣薪</span>`;
     if (status === "approved") return `<span class="badge bg-success">已通过</span>`;
     if (status === "rejected") return `<span class="badge bg-danger">已拒绝</span>`;
+    if (status === "cancelled") return `<span class="badge bg-secondary">已撤销</span>`;
     return `<span class="badge bg-secondary">${escapeHtml(statusLabel || status || "未知")}</span>`;
 }
 
 function renderLeaveApprovalActionCell(leave) {
-    if (leave.status !== "pending") {
-        return `<span class="text-muted small">已处理</span>`;
+    if (leave.status !== "replacement_accepted" && !(leave.status === "pending" && !leave.replacement_user_id)) {
+        return `<span class="text-muted small">暂无操作</span>`;
     }
 
     return `
@@ -3495,16 +3660,17 @@ function updateLeaveApprovalRow(leave) {
     if (!row) return;
 
     const cells = row.children;
-    if (cells.length < 11) return;
+    if (cells.length < 12) return;
 
     cells[3].innerHTML = `<span class="badge bg-light text-dark border">${escapeHtml(leave.shift_label)}</span>`;
-    cells[7].innerHTML = leave.status === "approved"
+    cells[4].innerHTML = renderReplacementInfo(leave);
+    cells[8].innerHTML = (leave.status === "approved" || leave.status === "force_leave_deducted")
         ? `<span class="fw-bold text-danger">${fmtMoney(leave.final_deduct_amount)}</span>`
         : `<span class="text-muted">-</span>`;
-    cells[8].innerHTML = leaveStatusBadge(leave.status, leave.status_label);
+    cells[9].innerHTML = leaveStatusBadge(leave.status, leave.status_label);
 
     if (leave.approval_note || leave.approved_by_name) {
-        cells[9].innerHTML = `
+        cells[10].innerHTML = `
             <div class="small">${escapeHtml(leave.approval_note || "")}</div>
             <div class="small text-muted mt-1">
                 ${escapeHtml(leave.approved_by_name || "-")}
@@ -3512,13 +3678,29 @@ function updateLeaveApprovalRow(leave) {
             </div>
         `;
     } else {
-        cells[9].innerHTML = `<span class="text-muted">-</span>`;
+        cells[10].innerHTML = `<span class="text-muted">-</span>`;
     }
 
-    cells[10].innerHTML = renderLeaveApprovalActionCell(leave);
+    cells[11].innerHTML = renderLeaveApprovalActionCell(leave);
 
     row.classList.add("table-warning");
     setTimeout(() => row.classList.remove("table-warning"), 1200);
+}
+
+function renderReplacementInfo(leave) {
+    if (!leave.replacement_employee_name) {
+        return `<span class="text-muted">-</span>`;
+    }
+    let badge = `<span class="badge bg-warning text-dark">待确认</span>`;
+    if (leave.replacement_response === "accepted") {
+        badge = `<span class="badge bg-success">已同意</span>`;
+    } else if (leave.replacement_response === "rejected") {
+        badge = `<span class="badge bg-danger">已拒绝</span>`;
+    }
+    return `
+        <div class="fw-semibold">${escapeHtml(leave.replacement_employee_name)}</div>
+        ${badge}
+    `;
 }
 
 function renderMyLeaveRow(leave) {
@@ -3534,7 +3716,7 @@ function renderMyLeaveRow(leave) {
             </td>
             <td><span class="fw-bold text-danger">${fmtMoney(leave.estimated_deduct_amount)}</span></td>
             <td>
-                ${leave.status === "approved"
+                ${leave.status === "approved" || leave.status === "force_leave_deducted"
                     ? `<span class="fw-bold text-danger">${fmtMoney(leave.final_deduct_amount)}</span>`
                     : `<span class="text-muted">-</span>`}
             </td>
@@ -3542,6 +3724,7 @@ function renderMyLeaveRow(leave) {
             <td class="text-start" style="max-width: 260px;">
                 ${renderMyLeaveApprovalInfo(leave)}
             </td>
+            <td>${renderMyLeaveActionCell(leave)}</td>
         </tr>
     `;
 }
@@ -3554,7 +3737,54 @@ function renderMyLeaveApprovalInfo(leave) {
             ${leave.approval_note ? `<div class="small text-muted">备注：${escapeHtml(leave.approval_note)}</div>` : ""}
         `;
     }
-    return `<span class="text-muted small">等待管理员审批</span>`;
+    if (leave.replacement_employee_name) {
+        return `
+            <div class="small">顶班人：${escapeHtml(leave.replacement_employee_name)}</div>
+            ${leave.replacement_response_at ? `<div class="small text-muted">确认时间：${escapeHtml(leave.replacement_response_at)}</div>` : ""}
+        `;
+    }
+    return `<span class="text-muted small">等待顶班确认</span>`;
+}
+
+function renderMyLeaveActionCell(leave) {
+    if (leave.status !== "replacement_rejected_wait_employee") {
+        return `<span class="text-muted small">暂无操作</span>`;
+    }
+
+    return `
+        <div class="d-flex flex-column gap-2">
+            <form action="/employees/leaves/force-after-replacement-reject/${leave.id}"
+                  method="post"
+                  data-employee-ajax-form="1"
+                  onsubmit="return confirm('确定坚持请假吗？系统将自动生成您双倍日薪扣款，并扣除顶班人一倍日薪。');">
+                <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                <button type="submit" class="btn btn-sm btn-danger w-100">
+                    <i class="bi bi-exclamation-circle me-1"></i>坚持请假
+                </button>
+            </form>
+            <form action="/employees/leaves/cancel-after-replacement-reject/${leave.id}"
+                  method="post"
+                  data-employee-ajax-form="1"
+                  onsubmit="return confirm('确定取消这次请假吗？取消后不产生扣薪。');">
+                <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                <button type="submit" class="btn btn-sm btn-outline-secondary w-100">
+                    <i class="bi bi-x-circle me-1"></i>取消请假
+                </button>
+            </form>
+        </div>
+    `;
+}
+
+function removeReplacementRequestCard(leaveId) {
+    const card = document.getElementById(`replacement-request-card-${leaveId}`);
+    if (!card) return;
+    card.remove();
+
+    const list = document.getElementById("replacement-request-list");
+    if (list && !list.querySelector("[id^='replacement-request-card-']")) {
+        const moduleCard = list.closest(".employee-module-card");
+        if (moduleCard) moduleCard.remove();
+    }
 }
 
 function updateMyLeaveRow(leave) {
@@ -4097,16 +4327,18 @@ function renderSalarySettlementActionCell(item) {
 
     let html = `<div class="d-flex flex-column gap-1">`;
 
-    if (item.status === "draft") {
+    if (item.status === "draft" && item.employee_confirmed) {
         html += `
             <form action="/employees/salary-settlement/confirm/${item.id}"
                   method="post"
                   data-employee-ajax-form="1"
-                  onsubmit="return confirm('确定确认【${escapeHtml(item.employee_name)}】的工资吗？确认后如需重算，需要先退回草稿。');">
+                  onsubmit="return confirm('确定最终确认【${escapeHtml(item.employee_name)}】的工资吗？确认后如需重算，需要先退回草稿。');">
                 <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
                 <button type="submit" class="btn btn-sm btn-outline-primary w-100">确认工资</button>
             </form>
         `;
+    } else if (item.status === "draft") {
+        html += `<button class="btn btn-sm btn-outline-secondary w-100" disabled>等待员工确认</button>`;
     }
 
     if (item.status === "confirmed") {
@@ -4149,7 +4381,7 @@ function renderSalarySettlementRow(item) {
     const socialSecurity = Number(item.social_security_amount || 0);
     const payableSalary = Number(item.payable_salary || (Number(item.final_salary || 0) + employeeSocialSecurity));
     const actualSalary = Number(item.actual_salary || (payableSalary - socialSecurity));
-    const employeeSocialSecurityHtml = (item.status === "paid" || item.status === "locked")
+    const employeeSocialSecurityHtml = (item.status !== "draft")
         ? `<span class="fw-bold text-success">¥${employeeSocialSecurity.toFixed(2)}</span>`
         : `
             <form action="/employees/salary-settlement/social-security/${item.id}"
@@ -4167,7 +4399,7 @@ function renderSalarySettlementRow(item) {
                 <button type="submit" class="btn btn-sm btn-outline-primary">保存</button>
             </form>
         `;
-    const socialSecurityHtml = (item.status === "paid" || item.status === "locked")
+    const socialSecurityHtml = (item.status !== "draft")
         ? `<span class="fw-bold text-danger">¥${socialSecurity.toFixed(2)}</span>`
         : `
             <form action="/employees/salary-settlement/social-security/${item.id}"
@@ -4218,6 +4450,9 @@ function renderSalarySettlementRow(item) {
             <td>
                 ${settlementStatusBadge(item.status, item.status_label)}
                 ${item.calculated_at ? `<div class="small text-muted mt-1">${escapeHtml(item.calculated_at)}</div>` : ""}
+                ${item.employee_confirmed
+                    ? `<div class="small text-success mt-1">员工已确认${item.employee_confirmed_at ? "｜" + escapeHtml(item.employee_confirmed_at) : ""}</div>`
+                    : `<div class="small text-muted mt-1">待员工确认</div>`}
             </td>
 
             <td>${renderSalarySettlementActionCell(item)}</td>
@@ -4270,6 +4505,10 @@ function updateSalarySettlementSummary(summary) {
 
     cards[0].querySelector(".employee-stat-value").textContent = summary.employee_count ?? "-";
     cards[1].querySelector(".employee-stat-value").textContent = summary.generated_count ?? "-";
+    const generatedNote = cards[1].querySelector(".small");
+    if (generatedNote) {
+        generatedNote.textContent = `已有月度结算记录；员工已确认 ${summary.employee_confirmed_count ?? 0} 条`;
+    }
     cards[2].querySelector(".employee-stat-value").textContent = `${summary.paid_count ?? 0}/${summary.locked_count ?? 0}`;
     cards[3].querySelector(".employee-stat-value").textContent = `¥${Number(summary.total_final_salary || 0).toFixed(2)}`;
 }
@@ -4388,6 +4627,16 @@ function handleEmployeeAjaxResult(result) {
 
     if (result.action === "leave_approved" || result.action === "leave_rejected") {
         updateLeaveApprovalRow(payload.leave);
+        updateMyLeaveRow(payload.leave);
+    }
+
+    if (result.action === "leave_replacement_accepted" || result.action === "leave_replacement_rejected") {
+        if (payload.leave) {
+            removeReplacementRequestCard(payload.leave.id);
+        }
+    }
+
+    if (result.action === "leave_cancelled" || result.action === "leave_force_deducted") {
         updateMyLeaveRow(payload.leave);
     }
 
