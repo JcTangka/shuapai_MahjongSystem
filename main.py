@@ -910,8 +910,10 @@ def _salary_settlement_payload(item: MonthlySalarySettlement) -> dict:
     管理员生成、确认、发放、锁定工资后，前端只更新当前员工这一行。
     """
     final_salary = round(float(item.final_salary or 0), 2)
+    employee_social_security_amount = round(float(getattr(item, "employee_social_security_amount", 0) or 0), 2)
     social_security_amount = round(float(getattr(item, "social_security_amount", 0) or 0), 2)
-    actual_salary = round(final_salary - social_security_amount, 2)
+    payable_salary = round(final_salary + employee_social_security_amount, 2)
+    actual_salary = round(payable_salary - social_security_amount, 2)
 
     return {
         "id": item.id,
@@ -927,6 +929,8 @@ def _salary_settlement_payload(item: MonthlySalarySettlement) -> dict:
         "deduction_total": round(float(item.deduction_total or 0), 2),
         "manual_adjustment_total": round(float(item.manual_adjustment_total or 0), 2),
         "final_salary": final_salary,
+        "employee_social_security_amount": employee_social_security_amount,
+        "payable_salary": payable_salary,
         "social_security_amount": social_security_amount,
         "actual_salary": actual_salary,
 
@@ -1166,7 +1170,8 @@ def _build_salary_settlement_data(
     """
     employees = session.exec(
         select(User).where(
-            User.is_active == True
+            User.is_active == True,
+            User.hide_from_schedule_performance == False
         ).order_by(User.role, User.id)
     ).all()
 
@@ -1190,7 +1195,12 @@ def _build_salary_settlement_data(
         })
 
     generated_count = len([r for r in rows if r["settlement"]])
-    total_final_salary = round(sum(float(r["settlement"].final_salary or 0) for r in rows if r["settlement"]), 2)
+    total_final_salary = round(sum(
+        float(r["settlement"].final_salary or 0) +
+        float(getattr(r["settlement"], "employee_social_security_amount", 0) or 0)
+        for r in rows
+        if r["settlement"]
+    ), 2)
     # paid 是新版“已发放并锁定”状态；
     # locked 是旧版遗留状态，这里合并计入已归档数量。
     paid_count = len([
@@ -5496,7 +5506,10 @@ async def employee_salary_settlement_generate_all(
         )
 
     active_users = session.exec(
-        select(User).where(User.is_active == True).order_by(User.role, User.id)
+        select(User).where(
+            User.is_active == True,
+            User.hide_from_schedule_performance == False
+        ).order_by(User.role, User.id)
     ).all()
 
     all_order_count_map = _build_employee_order_count_map(
@@ -5591,7 +5604,8 @@ async def employee_salary_settlement_generate_all(
 async def employee_salary_settlement_social_security_update(
         request: Request,
         settlement_id: int,
-        social_security_amount: float = Form(0.0),
+        employee_social_security_amount: Optional[float] = Form(None),
+        social_security_amount: Optional[float] = Form(None),
         store: str = Form(""),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
@@ -5601,9 +5615,9 @@ async def employee_salary_settlement_social_security_update(
 
     规则：
     1. 只允许管理员操作；
-    2. 草稿 / 已确认工资可调整社保；
+    2. 草稿 / 已确认工资可调整员工社保和代缴社保；
     3. 已发放并锁定后不可调整；
-    4. 实发工资不落库，按“应发工资 - 社保”展示。
+    4. 应发工资、实发工资不落库，按字段实时计算展示。
     """
     if not user:
         if _is_ajax_request(request):
@@ -5635,9 +5649,22 @@ async def employee_salary_settlement_social_security_update(
             status_code=303
         )
 
-    final_social_security = round(max(float(social_security_amount or 0), 0.0), 2)
+    if employee_social_security_amount is None and social_security_amount is None:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("没有需要保存的社保金额")
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_settlement", error="没有需要保存的社保金额"),
+            status_code=303
+        )
 
-    settlement.social_security_amount = final_social_security
+    if employee_social_security_amount is not None:
+        final_employee_social_security = round(max(float(employee_social_security_amount or 0), 0.0), 2)
+        settlement.employee_social_security_amount = final_employee_social_security
+
+    if social_security_amount is not None:
+        final_social_security = round(max(float(social_security_amount or 0), 0.0), 2)
+        settlement.social_security_amount = final_social_security
+
     settlement.updated_at = datetime.now()
 
     session.add(settlement)

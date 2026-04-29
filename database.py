@@ -860,6 +860,7 @@ class MonthlySalarySettlement(SQLModel, table=True):
     manual_adjustment_total: float = Field(default=0.0)
 
     final_salary: float = Field(default=0.0)
+    employee_social_security_amount: float = Field(default=0.0)
     social_security_amount: float = Field(default=0.0)
 
     # 本月个人订单量，按 GameRecord.who_did 统计
@@ -1543,8 +1544,8 @@ def migrate_monthly_salary_settlement_table():
     V3 工资结算表迁移：
     为 monthlysalarysettlement 表补充社保字段。
 
-    社保由管理员在工资结算列表中手动填写；实发工资按
-    final_salary - social_security_amount 实时计算。
+    employee_social_security_amount：员工社保，公司缴纳部分，计入应发工资；
+    social_security_amount：代缴社保，公司代个人缴纳部分，从实发工资中扣除。
     """
     with engine.begin() as conn:
         table_exists = conn.execute(text("""
@@ -1558,6 +1559,13 @@ def migrate_monthly_salary_settlement_table():
 
         columns = conn.execute(text("PRAGMA table_info(monthlysalarysettlement)")).fetchall()
         col_names = {col[1] for col in columns}
+
+        if "employee_social_security_amount" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE monthlysalarysettlement
+                ADD COLUMN employee_social_security_amount REAL NOT NULL DEFAULT 0
+            """))
+            print("已为 monthlysalarysettlement 表补充 employee_social_security_amount 字段")
 
         if "social_security_amount" not in col_names:
             conn.execute(text("""

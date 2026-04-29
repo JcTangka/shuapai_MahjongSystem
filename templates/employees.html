@@ -1504,7 +1504,7 @@
             <div class="fw-bold text-dark mb-1">结算口径</div>
             <div>
                 应发工资 = 基础工资 + 个人提成 + 团队奖金 + 奖金项 + 工资调整流水 - 各类扣款。
-                实发工资 = 应发工资 - 社保，社保可由管理员在结算列表中手动填写调整。
+                应发工资还会加上“员工社保”；实发工资 = 应发工资 - 代缴社保。员工社保和代缴社保都可由管理员在结算列表中手动填写调整。
                 其中，请假扣款、迟到扣款、旷工扣款、工作失误扣款、顶班补贴、临时奖金等都来自工资流水表。
             </div>
         </div>
@@ -1524,16 +1524,15 @@
             <thead class="table-light">
                 <tr>
                     <th>员工</th>
-                    <th>个人单量</th>
-                    <th>所属团队</th>
                     <th>基础工资</th>
                     <th>个人提成</th>
                     <th>团队奖金</th>
                     <th>奖金</th>
                     <th>扣款</th>
                     <th>手工调整</th>
+                    <th style="width: 150px;">员工社保</th>
                     <th>应发工资</th>
-                    <th style="width: 150px;">社保</th>
+                    <th style="width: 150px;">代缴社保</th>
                     <th>实发工资</th>
                     <th>状态</th>
                     <th style="width: 220px;">操作</th>
@@ -1553,14 +1552,6 @@
                     </td>
 
                     {% if item %}
-                    <td>
-                        <span class="fw-bold">{{ item.personal_order_count or 0 }}</span> 单
-                    </td>
-
-                    <td>
-                        <span class="small">{{ item.team_name_snapshot or '-' }}</span>
-                    </td>
-
                     <td>
                         <span class="fw-bold">¥{{ '%.2f'|format(item.base_salary_total or 0) }}</span>
                     </td>
@@ -1589,11 +1580,34 @@
                         {% endif %}
                     </td>
 
+                    {% set employee_social_security_amount = item.employee_social_security_amount or 0 %}
                     {% set social_security_amount = item.social_security_amount or 0 %}
-                    {% set actual_salary = (item.final_salary or 0) - social_security_amount %}
+                    {% set payable_salary = (item.final_salary or 0) + employee_social_security_amount %}
+                    {% set actual_salary = payable_salary - social_security_amount %}
 
                     <td>
-                        <span class="fs-6 fw-bold text-primary">¥{{ '%.2f'|format(item.final_salary or 0) }}</span>
+                        {% if item.status in ['paid', 'locked'] %}
+                            <span class="fw-bold text-success">¥{{ '%.2f'|format(employee_social_security_amount) }}</span>
+                        {% else %}
+                            <form action="/employees/salary-settlement/social-security/{{ item.id }}"
+                                  method="post"
+                                  data-employee-ajax-form="1"
+                                  class="d-flex gap-1 justify-content-center align-items-center">
+                                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                <input type="number"
+                                       name="employee_social_security_amount"
+                                       value="{{ '%.2f'|format(employee_social_security_amount) }}"
+                                       step="0.01"
+                                       min="0"
+                                       class="form-control form-control-sm text-center"
+                                       style="width: 92px;">
+                                <button type="submit" class="btn btn-sm btn-outline-primary">保存</button>
+                            </form>
+                        {% endif %}
+                    </td>
+
+                    <td>
+                        <span class="fs-6 fw-bold text-primary">¥{{ '%.2f'|format(payable_salary) }}</span>
                     </td>
 
                     <td>
@@ -1690,14 +1704,11 @@
                     <td>
                         <span class="badge bg-light text-dark border">未生成</span>
                     </td>
-                    <td>
-                        <span class="text-muted small">-</span>
-                    </td>
                     {% endif %}
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="14" class="text-muted py-5">
+                    <td colspan="13" class="text-muted py-5">
                         <i class="bi bi-inbox fs-1 d-block mb-3"></i>
                         暂无员工可结算
                     </td>
@@ -2639,12 +2650,37 @@
     <div class="card-body">
         {% if my_salary_data.has_settlement %}
             {% set settlement = my_salary_data.settlement %}
+            {% set employee_social_security_amount = settlement.employee_social_security_amount or 0 %}
+            {% set social_security_amount = settlement.social_security_amount or 0 %}
+            {% set payable_salary = (settlement.final_salary or 0) + employee_social_security_amount %}
+            {% set actual_salary = payable_salary - social_security_amount %}
             <div class="row g-3">
                 <div class="col-md-6 col-xl-3">
                     <div class="border rounded-3 p-3 bg-light h-100">
-                        <div class="small text-muted">最终工资</div>
+                        <div class="small text-muted">应发工资</div>
                         <div class="fs-4 fw-bold text-success">
-                            ¥{{ '%.2f'|format(settlement.final_salary or 0) }}
+                            ¥{{ '%.2f'|format(payable_salary) }}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-md-6 col-xl-3">
+                    <div class="border rounded-3 p-3 bg-light h-100">
+                        <div class="small text-muted">社保调整</div>
+                        <div class="small mt-2">
+                            公司缴纳：<span class="fw-bold text-success">¥{{ '%.2f'|format(employee_social_security_amount) }}</span>
+                        </div>
+                        <div class="small mt-1">
+                            公司代个人缴纳：<span class="fw-bold text-danger">¥{{ '%.2f'|format(social_security_amount) }}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-md-6 col-xl-3">
+                    <div class="border rounded-3 p-3 bg-light h-100">
+                        <div class="small text-muted">实发工资</div>
+                        <div class="fs-4 fw-bold text-primary">
+                            ¥{{ '%.2f'|format(actual_salary) }}
                         </div>
                     </div>
                 </div>
@@ -2734,7 +2770,7 @@
         {% else %}
             <div class="employee-help-note">
                 <div class="fw-bold text-dark mb-1">
-                    <i class="bi bi-info-circle me-1"></i>本月暂未生成最终工资结算
+                    <i class="bi bi-info-circle me-1"></i>本月暂未生成应发工资结算
                 </div>
                 <div>
                     当前页面先展示已进入系统的工资流水，例如请假扣款、迟到扣款、旷工扣款、工作失误扣款、顶班补贴、临时奖金、临时扣款等。
@@ -4109,8 +4145,28 @@ function renderSalarySettlementRow(item) {
     const manualHtml = Number(item.manual_adjustment_total || 0) >= 0
         ? `<span class="fw-bold text-success">+¥${Number(item.manual_adjustment_total || 0).toFixed(2)}</span>`
         : `<span class="fw-bold text-danger">-¥${Math.abs(Number(item.manual_adjustment_total || 0)).toFixed(2)}</span>`;
+    const employeeSocialSecurity = Number(item.employee_social_security_amount || 0);
     const socialSecurity = Number(item.social_security_amount || 0);
-    const actualSalary = Number(item.actual_salary || (Number(item.final_salary || 0) - socialSecurity));
+    const payableSalary = Number(item.payable_salary || (Number(item.final_salary || 0) + employeeSocialSecurity));
+    const actualSalary = Number(item.actual_salary || (payableSalary - socialSecurity));
+    const employeeSocialSecurityHtml = (item.status === "paid" || item.status === "locked")
+        ? `<span class="fw-bold text-success">¥${employeeSocialSecurity.toFixed(2)}</span>`
+        : `
+            <form action="/employees/salary-settlement/social-security/${item.id}"
+                  method="post"
+                  data-employee-ajax-form="1"
+                  class="d-flex gap-1 justify-content-center align-items-center">
+                <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                <input type="number"
+                       name="employee_social_security_amount"
+                       value="${employeeSocialSecurity.toFixed(2)}"
+                       step="0.01"
+                       min="0"
+                       class="form-control form-control-sm text-center"
+                       style="width: 92px;">
+                <button type="submit" class="btn btn-sm btn-outline-primary">保存</button>
+            </form>
+        `;
     const socialSecurityHtml = (item.status === "paid" || item.status === "locked")
         ? `<span class="fw-bold text-danger">¥${socialSecurity.toFixed(2)}</span>`
         : `
@@ -4139,10 +4195,6 @@ function renderSalarySettlementRow(item) {
                 <div class="small text-muted">员工</div>
             </td>
 
-            <td><span class="fw-bold">${item.personal_order_count || 0}</span> 单</td>
-
-            <td><span class="small">${escapeHtml(item.team_name || "-")}</span></td>
-
             <td><span class="fw-bold">¥${Number(item.base_salary_total || 0).toFixed(2)}</span></td>
 
             <td><span class="fw-bold text-success">¥${Number(item.personal_commission_total || 0).toFixed(2)}</span></td>
@@ -4155,7 +4207,9 @@ function renderSalarySettlementRow(item) {
 
             <td>${manualHtml}</td>
 
-            <td><span class="fs-6 fw-bold text-primary">¥${Number(item.final_salary || 0).toFixed(2)}</span></td>
+            <td>${employeeSocialSecurityHtml}</td>
+
+            <td><span class="fs-6 fw-bold text-primary">¥${payableSalary.toFixed(2)}</span></td>
 
             <td>${socialSecurityHtml}</td>
 
