@@ -333,7 +333,7 @@ class ShiftSchedule(SQLModel, table=True):
     # 店长/操作员显示名（与 User.display_name 对齐）
     operator_name: str = Field(index=True)
 
-    # 班次：early / mid / bigmid / night / off
+    # 班次：early / mid / bigmid / night / flexible / off
     shift_type: str = Field(default="off", index=True)
 
 # ===================== 新增：待办及信息同步业务表 =====================
@@ -676,7 +676,7 @@ class EmployeeLeaveRequest(SQLModel, table=True):
     apply_date: date = Field(default_factory=date.today)  # 申请日期
 
     # 系统根据 ShiftSchedule 自动读取并保存快照
-    shift_type: str = Field(default="off", index=True)    # mid / bigmid / night / off
+    shift_type: str = Field(default="off", index=True)    # mid / bigmid / night / flexible / off
 
     reason: str
     remark: Optional[str] = None
@@ -735,7 +735,7 @@ class EmployeeAttendanceRecord(SQLModel, table=True):
     # leave / late / absent / mistake / other
     event_type: str = Field(index=True)
 
-    # 当天班次快照：mid / bigmid / night / off
+    # 当天班次快照：mid / bigmid / night / flexible / off
     shift_type: str = Field(default="off", index=True)
 
     reason: str
@@ -2116,7 +2116,7 @@ def get_shift_performance_stats(
 
     # 7) 下半部分：各班次业绩汇总
     #    汇总按“上半部分最终显示的班次归属”来汇总
-    summary_keys = ["early","mid", "bigmid", "night"]
+    summary_keys = ["early", "mid", "bigmid", "night", "flexible"]
     summary_map = {}
     for sk in summary_keys:
         for d in day_list:

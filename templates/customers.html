@@ -28,9 +28,14 @@
     </div>
 
     <div class="d-flex gap-2">
-        <form action="/customers" method="get" class="d-flex">
+        <form action="/customers" method="get" class="d-flex gap-2">
             <input type="hidden" name="store" value="{{ current_store }}">
-            <input type="text" name="search_query" class="form-control me-2" placeholder="搜索昵称或微信号..." value="{{ search_query }}">
+            <select name="sort_by" class="form-select" style="width: 190px;">
+                <option value="default" {% if sort_by == 'default' %}selected{% endif %}>默认排序</option>
+                <option value="last_visit_desc" {% if sort_by == 'last_visit_desc' %}selected{% endif %}>最后到店降序</option>
+                <option value="store_visit_count_desc" {% if sort_by == 'store_visit_count_desc' %}selected{% endif %}>本门店次数降序</option>
+            </select>
+            <input type="text" name="search_query" class="form-control" placeholder="搜索昵称或微信号..." value="{{ search_query }}">
             <button type="submit" class="btn btn-outline-primary"><i class="bi bi-search"></i></button>
         </form>
 

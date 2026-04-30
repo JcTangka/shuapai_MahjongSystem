@@ -480,6 +480,19 @@
         </div>
     </div>
 </div>
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body">
+        <div class="row g-3">
+            <div class="col-md-6 col-xl-3">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">组齐单总数</div>
+                    <div class="fs-4 fw-bold text-dark">{{ normal_formed_order_count or 0 }}</div>
+                    <div class="small text-muted mt-1">当前门店 + 当前时间范围内的常规已组齐订单总数</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
 {% elif source_filter == 'overflow' %}
 <div class="card border-0 shadow-sm mb-4">
     <div class="card-body">

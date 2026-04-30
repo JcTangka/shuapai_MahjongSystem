@@ -48,6 +48,18 @@ pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
+SHIFT_TYPE_FLEXIBLE = "flexible"
+SHIFT_OPTIONS = [
+    ("off", "休息"),
+    ("early", "早班"),
+    ("mid", "中班"),
+    ("bigmid", "大中班"),
+    ("night", "晚班"),
+    (SHIFT_TYPE_FLEXIBLE, "机动"),
+]
+ALLOWED_SHIFT_TYPES = {value for value, _ in SHIFT_OPTIONS}
+SHIFT_LABEL_MAP = {value: label for value, label in SHIFT_OPTIONS}
+
 
 # === 辅助函数 ===
 def verify_password(plain_password, hashed_password):
@@ -106,6 +118,7 @@ def _get_shift_type_for_employee_on_date(
     - mid     中班
     - bigmid  大中班
     - night   晚班
+    - flexible 机动
     - off     休息
 
     如果当天没有排班记录，第一版默认视为 off。
@@ -121,6 +134,32 @@ def _get_shift_type_for_employee_on_date(
         return "off"
 
     return shift.shift_type or "off"
+
+
+def _employee_has_flexible_shift(
+        session: Session,
+        employee_name: str,
+        year: int,
+        month: int
+) -> bool:
+    """
+    判断员工某月是否出现过机动班次。
+
+    工资规则：
+    一旦当月有任意一天为“机动”，基础工资为 0，且不发全勤奖。
+    """
+    month_start, month_end = _get_month_start_end(year, month)
+
+    hit = session.exec(
+        select(ShiftSchedule).where(
+            ShiftSchedule.operator_name == employee_name,
+            ShiftSchedule.work_date >= month_start,
+            ShiftSchedule.work_date <= month_end,
+            ShiftSchedule.shift_type == SHIFT_TYPE_FLEXIBLE
+        )
+    ).first()
+
+    return hit is not None
 
 
 def _get_employee_salary_profile(
@@ -334,14 +373,7 @@ def _shift_type_label(shift_type: str) -> str:
     """
     班次中文展示。
     """
-    mapping = {
-        "off": "休息",
-        "early": "早班",
-        "mid": "中班",
-        "bigmid": "大中班",
-        "night": "晚班",
-    }
-    return mapping.get(shift_type or "off", shift_type or "未知")
+    return SHIFT_LABEL_MAP.get(shift_type or "off", shift_type or "未知")
 
 
 def _leave_status_label(status: str) -> str:
@@ -839,6 +871,7 @@ def _build_employee_order_count_map(
 def _employee_has_full_attendance_bonus(
         session: Session,
         user_id: int,
+        employee_name: str,
         year: int,
         month: int
 ) -> bool:
@@ -849,8 +882,12 @@ def _employee_has_full_attendance_bonus(
     1. 请假审批通过不影响全勤，所以 leave 且 affect_full_attendance=False 不影响；
     2. 迟到、旷工、管理员标记影响全勤的其他考勤异常，会取消全勤；
     3. 工作失误不在考勤表，不影响全勤。
+    4. 当月出现任意“机动”班次，直接取消全勤奖。
     """
     month_start, month_end = _get_month_start_end(year, month)
+
+    if _employee_has_flexible_shift(session, employee_name, year, month):
+        return False
 
     hit = session.exec(
         select(EmployeeAttendanceRecord).where(
@@ -1180,6 +1217,13 @@ def _calculate_salary_for_one_employee(
     personal_order_count = all_order_count_map.get(user_obj.display_name, 0)
     personal_commission = _calc_personal_order_commission(personal_order_count)
 
+    has_flexible_shift = _employee_has_flexible_shift(
+        session=session,
+        employee_name=user_obj.display_name,
+        year=year,
+        month=month
+    )
+
     # ===== 团队奖金 =====
     team, _ = _get_employee_team_for_month(session, user_obj.id, year, month)
 
@@ -1194,7 +1238,7 @@ def _calculate_salary_for_one_employee(
             year=year,
             month=month
         )
-        team_bonus = round(float(team_assessment.per_member_bonus_amount or 0), 2)
+        team_bonus = 0.0 if has_flexible_shift else round(float(team_assessment.per_member_bonus_amount or 0), 2)
         team_id = team.id
         team_name_snapshot = team.name
 
@@ -1202,6 +1246,7 @@ def _calculate_salary_for_one_employee(
     has_full_attendance = _employee_has_full_attendance_bonus(
         session=session,
         user_id=user_obj.id,
+        employee_name=user_obj.display_name,
         year=year,
         month=month
     )
@@ -1214,7 +1259,12 @@ def _calculate_salary_for_one_employee(
         sales_champion_bonus = 200.0
 
     # ===== 生成自动工资流水 =====
-    base_salary = round(float(profile.base_salary or 2800.0), 2)
+    base_salary = 0.0 if has_flexible_shift else round(float(profile.base_salary or 2800.0), 2)
+    base_salary_description = (
+        f"{year}年{month}月存在机动班次，基础工资由管理员在工资调整中手工添加，系统自动基础工资为 0 元。"
+        if has_flexible_shift
+        else f"{year}年{month}月基础工资。"
+    )
 
     _create_salary_settlement_flow(
         session=session,
@@ -1225,7 +1275,7 @@ def _calculate_salary_for_one_employee(
         flow_category="base_salary",
         flow_type="monthly_base_salary",
         title="基础工资",
-        description=f"{year}年{month}月基础工资。",
+        description=base_salary_description,
         settlement_id=settlement.id,
         operator=operator
     )
@@ -3044,16 +3094,19 @@ def get_brand_store_dashboard_stats(
         customer_total = len(customer_total_ids)
 
     # ========= 3. 选定范围内的成功组局 =========
+    # 与已组齐页保持一致：时间筛选优先按 order_start_time，缺失时再回退 record_date + start_time。
     game_stmt = select(GameRecord).where(
-        GameRecord.status == "formed",
-        GameRecord.record_date >= start_date,
-        GameRecord.record_date <= end_date
+        GameRecord.status == "formed"
     )
 
     if is_store:
         game_stmt = game_stmt.where(GameRecord.store_name == store_name)
 
-    period_games = session.exec(game_stmt).all()
+    formed_games = session.exec(game_stmt).all()
+    period_games = [
+        g for g in formed_games
+        if start_date <= _game_effective_order_dt(g).date() <= end_date
+    ]
 
     # 正常营收单：排除 overflow
     normal_period_games = [
@@ -3150,12 +3203,12 @@ def get_brand_store_dashboard_stats(
 
     # 收入趋势：只算正常营收单
     for g in normal_period_games:
-        day_key = g.record_date.strftime("%Y-%m-%d")
+        day_key = _game_effective_order_dt(g).strftime("%Y-%m-%d")
         revenue_by_day[day_key] += (_safe_float(g.wechat_pay) + _safe_float(g.Alipay))
 
     # 桌数趋势：全部 formed 都算，包含溢出单
     for g in period_games:
-        day_key = g.record_date.strftime("%Y-%m-%d")
+        day_key = _game_effective_order_dt(g).strftime("%Y-%m-%d")
         orders_by_day[day_key] += 1
 
     trend_labels = list(revenue_by_day.keys())
@@ -8370,6 +8423,7 @@ async def formed_games(
     uncollected_amount = 0.0
     wechat_collection_amount = 0.0
     alipay_collection_amount = 0.0
+    normal_formed_order_count = 0
 
     overflow_order_count = 0
     overflow_reserved_total = 0.0
@@ -8379,6 +8433,19 @@ async def formed_games(
     overflow_unpaid_count = 0
 
     if source_filter == FORMED_SOURCE_NORMAL:
+        normal_formed_order_count = len([
+            g for g in results
+            if _match_formed_game_filters(
+                g,
+                source_filter=FORMED_SOURCE_NORMAL,
+                pay_status="all",
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter="all"
+            )
+        ])
+
         collection_games = [
             g for g in filtered_results
             if _normalize_text(g.payment_method) == "代客收款"
@@ -8426,6 +8493,7 @@ async def formed_games(
         "uncollected_amount": uncollected_amount,
         "wechat_collection_amount": wechat_collection_amount,
         "alipay_collection_amount": alipay_collection_amount,
+        "normal_formed_order_count": normal_formed_order_count,
 
         "overflow_order_count": overflow_order_count,
         "overflow_reserved_total": overflow_reserved_total,
@@ -10460,6 +10528,7 @@ async def read_customers(
         request: Request,
         store: str = "牛王庙店",
         search_query: str = "",
+        sort_by: str = "default",
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -10474,6 +10543,7 @@ async def read_customers(
         store = store_list[0]
 
     keyword = (search_query or "").strip()
+    sort_by = sort_by if sort_by in {"default", "last_visit_desc", "store_visit_count_desc"} else "default"
 
     # 2. 先按关键词查顾客
     query = select(Customer)
@@ -10526,8 +10596,25 @@ async def read_customers(
             "is_loss": cust.is_loss
         })
 
+    if sort_by == "last_visit_desc":
+        customer_data_list.sort(
+            key=lambda x: (
+                x["last_visit_date"] is None,
+                -(x["last_visit_date"].toordinal() if x["last_visit_date"] else 0),
+                x["id"]
+            )
+        )
+    elif sort_by == "store_visit_count_desc":
+        customer_data_list.sort(
+            key=lambda x: (
+                -(x["current_store_visit_count"] or 0),
+                x["last_visit_date"] is None,
+                -(x["last_visit_date"].toordinal() if x["last_visit_date"] else 0),
+                x["id"]
+            )
+        )
     # 搜索时，给更直观的排序
-    if keyword:
+    elif keyword:
         customer_data_list.sort(
             key=lambda x: (
                 0 if (x["nickname"] or "") == keyword else 1,
@@ -10544,6 +10631,7 @@ async def read_customers(
         "store_list": store_list,
         "customer_list": customer_data_list,
         "search_query": search_query,
+        "sort_by": sort_by,
         "current_user": user
     })
 
@@ -11488,13 +11576,7 @@ async def manager_performance(
             month=m
         )
 
-    shift_label = {
-        "off": "休息",
-        "early": "早班",
-        "mid": "中班",
-        "bigmid": "大中班",
-        "night": "晚班"
-    }
+    shift_label = SHIFT_LABEL_MAP
 
     return templates.TemplateResponse("manager_performance.html", {
         "request": request,
@@ -11556,13 +11638,7 @@ async def schedule_page(
     shifts_map = get_month_shifts_map(session, y, m)
 
     # 给前端的 shift label
-    shift_options = [
-        ("off", "休息"),
-        ("early", "早班"),
-        ("mid", "中班"),
-        ("bigmid", "大中班"),
-        ("night", "晚班"),
-    ]
+    shift_options = SHIFT_OPTIONS
     shift_label = {k: v for k, v in shift_options}
 
     # 年份下拉（最近 5 年）
@@ -11591,6 +11667,7 @@ async def schedule_page(
             "mid": "11:00-20:00",
             "bigmid": "11:00-22:00",
             "night": "16:00-次日1:00",
+            SHIFT_TYPE_FLEXIBLE: "机动",
             "off": "-"
         }
     })
@@ -11626,7 +11703,7 @@ async def schedule_save(
 
     form = await request.form()
 
-    allowed = {"off", "early", "mid", "bigmid", "night"}
+    allowed = ALLOWED_SHIFT_TYPES
 
     updated = 0
     skipped = 0
