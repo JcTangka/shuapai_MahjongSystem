@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}耍牌麻将组局统计系统{% endblock %}</title>
+    <title>{% block title %}耍牌公司管理系统{% endblock %}</title>
 
     <link href="{{ url_for('static', path='/css/bootstrap.min.css') }}" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
@@ -15,7 +15,11 @@
         #sidebar {
             min-width: 250px;
             max-width: 250px;
-            min-height: 100vh;
+            height: 100vh;
+            position: fixed;
+            top: 0;
+            left: 0;
+            z-index: 1000;
             background-color: #0f1627; /* 深蓝黑色背景 */
             color: #fff;
             transition: all 0.3s;
@@ -37,6 +41,7 @@
         /* 菜单列表容器，让它占据剩余空间 */
         .sidebar-menu-container {
             flex-grow: 1;
+            min-height: 0;
             overflow-y: auto; /* 如果菜单太长，允许垂直滚动 */
         }
 
@@ -67,7 +72,12 @@
         }
 
         /* 内容区域 */
-        #content { width: 100%; display: flex; flex-direction: column; }
+        #content {
+            width: calc(100% - 250px);
+            margin-left: 250px;
+            display: flex;
+            flex-direction: column;
+        }
 
         /* 面包屑导航条 */
         .breadcrumb-bar {
@@ -85,7 +95,7 @@
 <div class="d-flex">
     <nav id="sidebar">
         <div class="sidebar-header">
-            <i class="bi bi-suit-spade-fill me-2 text-primary"></i> 耍牌·组局系统
+            <i class="bi bi-suit-spade-fill me-2 text-primary"></i> 耍牌·公司管理系统
         </div>
 
         <div class="sidebar-menu-container custom-scrollbar">

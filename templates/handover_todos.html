@@ -262,6 +262,15 @@
         min-width: 44px;
         flex: 0 0 44px;
     }
+
+    .todo-focus-flash {
+        animation: todoFocusFlash 2.4s ease-out;
+    }
+
+    @keyframes todoFocusFlash {
+        0% { box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.25); }
+        100% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0); }
+    }
 </style>
 
 
@@ -290,6 +299,7 @@
     </button>
 </div>
 
+<div id="handoverSyncContentArea">
 {% if request.query_params.get('error') %}
 <div class="alert alert-danger py-2">{{ request.query_params.get('error') }}</div>
 {% endif %}
@@ -394,7 +404,7 @@
 {% if todo_cards %}
 <div class="d-flex flex-column gap-3">
     {% for todo in todo_cards %}
-    <div class="card border-0 shadow-sm rounded-4 {% if todo.status == 'unresolved' and todo.is_pinned %}border-start border-4 border-warning{% endif %}">
+    <div id="todo-card-{{ todo.id }}" class="card border-0 shadow-sm rounded-4 {% if todo.status == 'unresolved' and todo.is_pinned %}border-start border-4 border-warning{% endif %}">
         <div class="card-body">
             <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
                 <div>
@@ -451,11 +461,11 @@
                         标记已解决
                     </button>
 
-                    <a href="/handover-sync/pin/{{ todo.id }}?store={{ current_store }}" class="btn btn-warning btn-sm">
+                    <a href="/handover-sync/pin/{{ todo.id }}?store={{ current_store }}" class="btn btn-warning btn-sm" data-handover-action>
                         {% if todo.is_pinned %}取消置顶{% else %}置顶{% endif %}
                     </a>
                     {% else %}
-                    <a href="/handover-sync/reopen/{{ todo.id }}?store={{ current_store }}" class="btn btn-outline-danger btn-sm">
+                    <a href="/handover-sync/reopen/{{ todo.id }}?store={{ current_store }}" class="btn btn-outline-danger btn-sm" data-handover-action>
                         改回未解决
                     </a>
                     {% endif %}
@@ -498,6 +508,7 @@
     <div class="card-body text-center text-secondary py-5">当前筛选条件下暂无待办记录</div>
 </div>
 {% endif %}
+</div>
 
 <div class="modal fade" id="addTodoModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog">
@@ -509,7 +520,7 @@
                 </h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <form method="post" action="/handover-sync/add" class="todo-modal-form">
+            <form method="post" action="/handover-sync/add" class="todo-modal-form" id="addTodoForm">
                 <div class="modal-body">
                     <input type="hidden" name="store_name" value="{{ current_store }}">
                     <div class="row g-3">
@@ -754,6 +765,15 @@
                     <i class="bi bi-trash3 me-1"></i>确认删除
                 </a>
             </div>
+        </div>
+    </div>
+</div>
+
+<div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 1085;">
+    <div id="handoverSuccessToast" class="toast align-items-center text-bg-success border-0" role="status" aria-live="polite" aria-atomic="true">
+        <div class="d-flex">
+            <div class="toast-body" id="handoverSuccessToastBody">操作成功</div>
+            <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="关闭"></button>
         </div>
     </div>
 </div>
@@ -1118,8 +1138,180 @@ function openDeleteTodoModal(todoId, summary) {
     new bootstrap.Modal(document.getElementById('deleteTodoModal')).show();
 }
 
+function getCurrentHandoverUrl() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('success');
+    url.searchParams.delete('error');
+    return url.toString();
+}
+
+async function fetchUpdatedHandoverHtml() {
+    const resp = await fetch(getCurrentHandoverUrl(), {
+        method: 'GET',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+    });
+
+    if (!resp.ok) {
+        throw new Error('刷新待办列表失败');
+    }
+
+    return await resp.text();
+}
+
+function replaceHandoverContentArea(htmlText) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(htmlText, 'text/html');
+    const newContent = doc.getElementById('handoverSyncContentArea');
+    const currentContent = document.getElementById('handoverSyncContentArea');
+
+    if (!newContent || !currentContent) {
+        throw new Error('未找到待办列表内容区');
+    }
+
+    currentContent.innerHTML = newContent.innerHTML;
+}
+
+function getHandoverErrorMessage(message) {
+    const messageMap = {
+        process_note_required: '处理过程不能为空',
+        pin_requires_unresolved: '置顶只对未解决待办生效'
+    };
+    return messageMap[message] || message || '操作失败';
+}
+
+function showHandoverSuccessToast(message) {
+    const toastEl = document.getElementById('handoverSuccessToast');
+    const bodyEl = document.getElementById('handoverSuccessToastBody');
+
+    if (!toastEl || !bodyEl) {
+        alert(message || '操作成功');
+        return;
+    }
+
+    bodyEl.textContent = message || '操作成功';
+    bootstrap.Toast.getOrCreateInstance(toastEl, {
+        delay: 1800,
+        autohide: true
+    }).show();
+}
+
+async function refreshHandoverContentAndKeepViewport(todoId = null) {
+    const viewportTop = window.scrollY || window.pageYOffset || 0;
+    const htmlText = await fetchUpdatedHandoverHtml();
+
+    replaceHandoverContentArea(htmlText);
+    window.scrollTo(0, viewportTop);
+
+    if (todoId) {
+        const card = document.getElementById(`todo-card-${todoId}`);
+        if (card) {
+            card.classList.add('todo-focus-flash');
+            setTimeout(() => card.classList.remove('todo-focus-flash'), 2400);
+        }
+    }
+}
+
+async function submitHandoverFormAjax(form) {
+    const resp = await fetch(form.action, {
+        method: form.method || 'POST',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: new FormData(form)
+    });
+
+    let data = {};
+    try {
+        data = await resp.json();
+    } catch (e) {
+        throw new Error('后端没有返回有效 JSON');
+    }
+
+    if (!resp.ok || !data.ok) {
+        throw new Error(getHandoverErrorMessage(data.message));
+    }
+
+    return data;
+}
+
+async function runHandoverUrlAction(url) {
+    const resp = await fetch(url, {
+        method: 'GET',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+    });
+
+    let data = {};
+    try {
+        data = await resp.json();
+    } catch (e) {
+        throw new Error('后端没有返回有效 JSON');
+    }
+
+    if (!resp.ok || !data.ok) {
+        throw new Error(getHandoverErrorMessage(data.message));
+    }
+
+    return data;
+}
+
+function bindHandoverAjaxForms() {
+    [
+        ['addTodoForm', 'addTodoModal'],
+        ['editTodoForm', 'editTodoModal'],
+        ['processForm', 'processModal'],
+        ['resolveForm', 'resolveModal']
+    ].forEach(([formId, modalId]) => {
+        const form = document.getElementById(formId);
+        if (!form || form.dataset.ajaxBound === '1') return;
+
+        form.dataset.ajaxBound = '1';
+        form.addEventListener('submit', async function (e) {
+            e.preventDefault();
+            try {
+                const data = await submitHandoverFormAjax(form);
+                const modalEl = document.getElementById(modalId);
+                if (modalEl) bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+                if (formId === 'addTodoForm') form.reset();
+                await refreshHandoverContentAndKeepViewport(data.todo_id || null);
+                showHandoverSuccessToast(data.message || '操作成功');
+            } catch (err) {
+                alert(err.message || '操作失败');
+            }
+        });
+    });
+}
 
 document.addEventListener('click', function (e) {
+    const deleteConfirmBtn = e.target.closest('#deleteTodoConfirmBtn');
+    if (deleteConfirmBtn) {
+        e.preventDefault();
+        runHandoverUrlAction(deleteConfirmBtn.href)
+            .then(async data => {
+                const modalEl = document.getElementById('deleteTodoModal');
+                if (modalEl) bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+                await refreshHandoverContentAndKeepViewport(null);
+                showHandoverSuccessToast(data.message || '操作成功');
+            })
+            .catch(err => alert(err.message || '操作失败'));
+        return;
+    }
+
+    const actionLink = e.target.closest('[data-handover-action]');
+    if (actionLink) {
+        e.preventDefault();
+        runHandoverUrlAction(actionLink.href)
+            .then(async data => {
+                await refreshHandoverContentAndKeepViewport(data.todo_id || null);
+                showHandoverSuccessToast(data.message || '操作成功');
+            })
+            .catch(err => alert(err.message || '操作失败'));
+        return;
+    }
+
     ['add', 'edit'].forEach(mode => {
         const { keywordInput, resultBox } = getModeElements(mode);
         if (!keywordInput || !resultBox) return;
@@ -1136,6 +1328,7 @@ document.addEventListener('click', function (e) {
 document.addEventListener('DOMContentLoaded', function () {
     bindCustomerSearch('add');
     bindCustomerSearch('edit');
+    bindHandoverAjaxForms();
 
     preloadCustomerSelect('add');
     preloadCustomerSelect('edit');

@@ -312,7 +312,7 @@
                 {% for store_name in store_list %}
                 <li>
                     <a class="dropdown-item {% if store_name == current_store %}active{% endif %}"
-                       href="/formed-games?store={{ store_name }}&source_filter={{ source_filter or 'normal' }}&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}{% if focus_game_id %}&focus_game_id={{ focus_game_id }}{% endif %}">
+                       href="/formed-games?store={{ store_name }}&source_filter={{ source_filter or 'normal' }}&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}&keyword={{ (keyword or '')|urlencode }}{% if focus_game_id %}&focus_game_id={{ focus_game_id }}{% endif %}">
                         {{ store_name }}
                     </a>
                 </li>
@@ -343,15 +343,15 @@
         <div class="d-flex flex-wrap gap-2 align-items-center">
             <span class="fw-bold text-secondary me-1">已组齐视图：</span>
             <a class="source-switch-link {% if source_filter == 'normal' %}active{% endif %}"
-               href="/formed-games?store={{ current_store }}&source_filter=normal&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}">
+               href="/formed-games?store={{ current_store }}&source_filter=normal&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}&keyword={{ (keyword or '')|urlencode }}">
                 常规牌局
             </a>
             <a class="source-switch-link {% if source_filter == 'self_arrival' %}active{% endif %}"
-               href="/formed-games?store={{ current_store }}&source_filter=self_arrival&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}">
+               href="/formed-games?store={{ current_store }}&source_filter=self_arrival&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}&keyword={{ (keyword or '')|urlencode }}">
                 自主到店
             </a>
             <a class="source-switch-link {% if source_filter == 'overflow' %}active{% endif %}"
-               href="/formed-games?store={{ current_store }}&source_filter=overflow&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}">
+               href="/formed-games?store={{ current_store }}&source_filter=overflow&pay_status={{ pay_status or 'all' }}&date_filter={{ date_filter or 'today' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&payment_method_filter={{ payment_method_filter or 'all' }}&keyword={{ (keyword or '')|urlencode }}">
                 门店溢出单
             </a>
             <span class="page-view-hint ms-auto">当前视图只展示对应来源的已组齐订单</span>
@@ -366,7 +366,7 @@
             <input type="hidden" name="source_filter" value="{{ source_filter or 'normal' }}">
 
             <div class="row g-3 align-items-end">
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <label class="form-label fw-bold">组局订单状态</label>
                     <select class="form-select" name="pay_status">
                         <option value="all" {% if pay_status == 'all' %}selected{% endif %}>全部组局订单</option>
@@ -375,7 +375,7 @@
                     </select>
                 </div>
 
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <label class="form-label fw-bold">订单时间</label>
                     <select class="form-select" name="date_filter" id="dateFilterSelect" onchange="toggleCustomDateRange()">
                         <option value="today" {% if date_filter == 'today' %}selected{% endif %}>当日</option>
@@ -388,7 +388,7 @@
                     </select>
                 </div>
 
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <label class="form-label fw-bold">{% if source_filter == 'overflow' %}收款方式{% else %}下单方式{% endif %}</label>
                     <select class="form-select" name="payment_method_filter">
                         <option value="all" {% if payment_method_filter == 'all' %}selected{% endif %}>全部</option>
@@ -403,6 +403,15 @@
                         <option value="美团预定" {% if payment_method_filter == '美团预定' %}selected{% endif %}>美团预定</option>
                         {% endif %}
                     </select>
+                </div>
+
+                <div class="col-md-3">
+                    <label class="form-label fw-bold">关键词</label>
+                    <input type="text"
+                           class="form-control"
+                           name="keyword"
+                           value="{{ keyword or '' }}"
+                           placeholder="昵称 / 微信号 / 包间">
                 </div>
 
                 <div class="col-md-3 custom-date-range" style="display: none;">

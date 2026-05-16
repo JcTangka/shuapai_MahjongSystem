@@ -2808,6 +2808,23 @@ def _match_formed_game_filters(
     return True
 
 
+def _match_formed_game_keyword(game: GameRecord, keyword: str) -> bool:
+    kw = _normalize_text(keyword).lower()
+    if not kw:
+        return True
+
+    search_values = [
+        game.player_1, game.player_2, game.player_3, game.player_4,
+        game.player_1_wechat, game.player_2_wechat, game.player_3_wechat, game.player_4_wechat,
+        game.room_name, game.external_store_name, game.table_note, game.tags,
+        game.player_1_note, game.player_2_note, game.player_3_note, game.player_4_note,
+        game.stakes, game.game_type, game.payment_method, game.who_did,
+        str(game.serial_number) if game.serial_number is not None else "",
+    ]
+
+    return any(kw in str(value).lower() for value in search_values if value is not None)
+
+
 def _parse_export_date_range(
     export_date_filter: str,
     export_start_date: Optional[str],
@@ -8363,6 +8380,7 @@ async def formed_games(
         start_date: str = "",
         end_date: str = "",
         payment_method_filter: str = "all",
+        keyword: str = "",
 
         focus_game_id: Optional[int] = None,
         duplicate_warning_message: str = "",
@@ -8405,6 +8423,13 @@ async def formed_games(
         )
     ]
 
+    keyword = _normalize_text(keyword)
+    if keyword:
+        filtered_results = [
+            g for g in filtered_results
+            if _match_formed_game_keyword(g, keyword)
+        ]
+
     if focus_game_id:
         focus_game = session.get(GameRecord, focus_game_id)
         if (
@@ -8433,18 +8458,7 @@ async def formed_games(
     overflow_unpaid_count = 0
 
     if source_filter == FORMED_SOURCE_NORMAL:
-        normal_formed_order_count = len([
-            g for g in results
-            if _match_formed_game_filters(
-                g,
-                source_filter=FORMED_SOURCE_NORMAL,
-                pay_status="all",
-                date_filter=date_filter,
-                start_date=start_date,
-                end_date=end_date,
-                payment_method_filter="all"
-            )
-        ])
+        normal_formed_order_count = len(filtered_results)
 
         collection_games = [
             g for g in filtered_results
@@ -8482,6 +8496,7 @@ async def formed_games(
         "start_date": start_date,
         "end_date": end_date,
         "payment_method_filter": payment_method_filter,
+        "keyword": keyword,
         "today_date": date.today(),
         "focus_game_id": focus_game_id,
 
@@ -12124,6 +12139,7 @@ async def handover_sync_page(
 
 @app.post("/handover-sync/add")
 async def add_handover_todo(
+        request: Request,
         store_name: str = Form(...),
         room_id: str = Form(""),
         summary: str = Form(...),
@@ -12177,6 +12193,13 @@ async def add_handover_todo(
 
     session.commit()
 
+    if _is_ajax_request(request):
+        return JSONResponse({
+            "ok": True,
+            "todo_id": new_todo.id,
+            "message": "新增待办成功"
+        })
+
     return RedirectResponse(
         url=f"/handover-sync?store={store_name}&success=新增成功",
         status_code=303
@@ -12185,6 +12208,7 @@ async def add_handover_todo(
 
 @app.post("/handover-sync/update/{todo_id}")
 async def update_handover_todo(
+        request: Request,
         todo_id: int,
         store_name: str = Form(...),
         room_id: str = Form(""),
@@ -12239,6 +12263,13 @@ async def update_handover_todo(
 
     session.commit()
 
+    if _is_ajax_request(request):
+        return JSONResponse({
+            "ok": True,
+            "todo_id": todo.id,
+            "message": "修改已保存"
+        })
+
     return RedirectResponse(
         url=f"/handover-sync?store={store_name}&success=修改成功",
         status_code=303
@@ -12247,6 +12278,7 @@ async def update_handover_todo(
 
 @app.post("/handover-sync/process/{todo_id}")
 async def save_handover_process(
+        request: Request,
         todo_id: int,
         process_note: str = Form(...),
         session: Session = Depends(get_session),
@@ -12261,6 +12293,8 @@ async def save_handover_process(
 
     final_note = (process_note or "").strip()
     if not final_note:
+        if _is_ajax_request(request):
+            return JSONResponse({"ok": False, "message": "process_note_required"}, status_code=400)
         return RedirectResponse(
             url=f"/handover-sync?store={todo.store_name}&error=解决过程为空时，不允许保存处理过程",
             status_code=303
@@ -12279,6 +12313,13 @@ async def save_handover_process(
     session.add(todo)
     session.commit()
 
+    if _is_ajax_request(request):
+        return JSONResponse({
+            "ok": True,
+            "todo_id": todo.id,
+            "message": "处理过程已保存"
+        })
+
     return RedirectResponse(
         url=f"/handover-sync?store={todo.store_name}&success=处理过程已保存",
         status_code=303
@@ -12287,6 +12328,7 @@ async def save_handover_process(
 
 @app.post("/handover-sync/resolve/{todo_id}")
 async def resolve_handover_todo(
+        request: Request,
         todo_id: int,
         process_note: str = Form(...),
         session: Session = Depends(get_session),
@@ -12301,6 +12343,8 @@ async def resolve_handover_todo(
 
     final_note = (process_note or "").strip()
     if not final_note:
+        if _is_ajax_request(request):
+            return JSONResponse({"ok": False, "message": "process_note_required"}, status_code=400)
         return RedirectResponse(
             url=f"/handover-sync?store={todo.store_name}&error=标记已解决时，必须填写至少一句解决说明",
             status_code=303
@@ -12317,6 +12361,13 @@ async def resolve_handover_todo(
     session.add(todo)
     session.commit()
 
+    if _is_ajax_request(request):
+        return JSONResponse({
+            "ok": True,
+            "todo_id": todo.id,
+            "message": "已标记为已解决"
+        })
+
     return RedirectResponse(
         url=f"/handover-sync?store={todo.store_name}&success=该待办已标记为已解决",
         status_code=303
@@ -12325,6 +12376,7 @@ async def resolve_handover_todo(
 
 @app.get("/handover-sync/reopen/{todo_id}")
 async def reopen_handover_todo(
+        request: Request,
         todo_id: int,
         store: Optional[str] = None,
         session: Session = Depends(get_session),
@@ -12353,6 +12405,13 @@ async def reopen_handover_todo(
     session.commit()
 
     target_store = store or todo.store_name
+    if _is_ajax_request(request):
+        return JSONResponse({
+            "ok": True,
+            "todo_id": todo.id,
+            "message": "已改回未解决"
+        })
+
     return RedirectResponse(
         url=f"/handover-sync?store={target_store}&success=已改回未解决",
         status_code=303
@@ -12361,6 +12420,7 @@ async def reopen_handover_todo(
 # ======= 待办置顶 ========
 @app.get("/handover-sync/pin/{todo_id}")
 async def toggle_handover_pin(
+        request: Request,
         todo_id: int,
         store: Optional[str] = None,
         session: Session = Depends(get_session),
@@ -12375,6 +12435,8 @@ async def toggle_handover_pin(
 
     # 按你确认的规则：置顶只对未解决项生效
     if todo.status != "unresolved":
+        if _is_ajax_request(request):
+            return JSONResponse({"ok": False, "message": "pin_requires_unresolved"}, status_code=400)
         return RedirectResponse(
             url=f"/handover-sync?store={todo.store_name}&error=置顶只对未解决待办生效",
             status_code=303
@@ -12388,6 +12450,13 @@ async def toggle_handover_pin(
 
     target_store = store or todo.store_name
     action_text = "已置顶" if todo.is_pinned else "已取消置顶"
+    if _is_ajax_request(request):
+        return JSONResponse({
+            "ok": True,
+            "todo_id": todo.id,
+            "message": action_text
+        })
+
     return RedirectResponse(
         url=f"/handover-sync?store={target_store}&success={action_text}",
         status_code=303
@@ -12396,6 +12465,7 @@ async def toggle_handover_pin(
 # ================= 待办项删除 ===============
 @app.get("/handover-sync/delete/{todo_id}")
 async def delete_handover_todo(
+        request: Request,
         todo_id: int,
         store: Optional[str] = None,
         session: Session = Depends(get_session),
@@ -12430,6 +12500,13 @@ async def delete_handover_todo(
     # 3) 删除待办主记录
     session.delete(todo)
     session.commit()
+
+    if _is_ajax_request(request):
+        return JSONResponse({
+            "ok": True,
+            "todo_id": todo_id,
+            "message": "待办已删除"
+        })
 
     return RedirectResponse(
         url=f"/handover-sync?store={target_store}&success=待办已删除",

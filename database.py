@@ -1055,6 +1055,7 @@ class EmployeeNotification(SQLModel, table=True):
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
 
+    migrate_store_room_settings_table()
     migrate_customer_store_link_table()
     migrate_game_record_table()
     migrate_formed_game_handover_link_table()
@@ -1135,6 +1136,124 @@ def migrate_brand_blacklist_entry_table():
         """))
 
         print("已创建 brandblacklistentry 表（品牌黑名单表）")
+
+def migrate_store_room_settings_table():
+    """
+    V3 门店/包间设置迁移：
+    1. 保留 room.store_name 等旧字段；
+    2. 只在新字段不存在时补列；
+    3. 回填 created_at / updated_at / store_id 时只处理空值，避免覆盖旧数据。
+    """
+    with engine.begin() as conn:
+        room_exists = conn.execute(text("""
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table' AND name='room'
+        """)).fetchone()
+
+        if not room_exists:
+            return
+
+        room_columns = conn.execute(text("PRAGMA table_info(room)")).fetchall()
+        room_col_names = {col[1] for col in room_columns}
+
+        alter_columns = [
+            ("store_id", "INTEGER"),
+            ("is_active", "BOOLEAN NOT NULL DEFAULT 1"),
+            ("sort_order", "INTEGER NOT NULL DEFAULT 0"),
+            ("created_at", "DATETIME"),
+            ("updated_at", "DATETIME"),
+        ]
+
+        for col_name, col_type in alter_columns:
+            if col_name not in room_col_names:
+                conn.execute(text(f"""
+                    ALTER TABLE room
+                    ADD COLUMN {col_name} {col_type}
+                """))
+
+        now = datetime.now()
+
+        conn.execute(text("""
+            UPDATE room
+            SET created_at = :now
+            WHERE created_at IS NULL OR TRIM(CAST(created_at AS TEXT)) = ''
+        """), {"now": now})
+
+        conn.execute(text("""
+            UPDATE room
+            SET updated_at = :now
+            WHERE updated_at IS NULL OR TRIM(CAST(updated_at AS TEXT)) = ''
+        """), {"now": now})
+
+        store_names = set()
+        source_tables = [
+            ("room", "store_name"),
+            ("gamerecord", "store_name"),
+            ("customerstorelink", "store_name"),
+            ("maintenancerecord", "store_name"),
+        ]
+
+        for table_name, column_name in source_tables:
+            table_exists = conn.execute(text("""
+                SELECT name
+                FROM sqlite_master
+                WHERE type='table' AND name=:table_name
+            """), {"table_name": table_name}).fetchone()
+            if not table_exists:
+                continue
+
+            columns = conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+            if column_name not in {col[1] for col in columns}:
+                continue
+
+            rows = conn.execute(text(f"""
+                SELECT DISTINCT TRIM({column_name})
+                FROM {table_name}
+                WHERE {column_name} IS NOT NULL
+                  AND TRIM({column_name}) != ''
+            """)).fetchall()
+            store_names.update(row[0] for row in rows if row[0])
+
+        for store_name in sorted(store_names):
+            exists = conn.execute(text("""
+                SELECT id
+                FROM store
+                WHERE name = :name
+                LIMIT 1
+            """), {"name": store_name}).fetchone()
+            if exists:
+                continue
+
+            conn.execute(text("""
+                INSERT INTO store
+                (name, short_name, address, contact_phone, is_active, sort_order, remark, created_at, updated_at)
+                VALUES (:name, NULL, NULL, NULL, 1, 0, :remark, :now, :now)
+            """), {
+                "name": store_name,
+                "remark": "由历史数据自动迁移生成",
+                "now": now,
+            })
+
+        if "store_name" in room_col_names:
+            conn.execute(text("""
+                UPDATE room
+                SET store_id = (
+                    SELECT s.id
+                    FROM store s
+                    WHERE s.name = room.store_name
+                    LIMIT 1
+                )
+                WHERE (store_id IS NULL OR TRIM(CAST(store_id AS TEXT)) = '')
+                  AND store_name IS NOT NULL
+                  AND TRIM(store_name) != ''
+            """))
+
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_room_store_id ON room(store_id)"))
+        if "store_name" in room_col_names:
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_room_store_name ON room(store_name)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_room_is_active ON room(is_active)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_room_sort_order ON room(sort_order)"))
 
 def migrate_customer_store_link_table():
     """
@@ -1643,7 +1762,9 @@ def migrate_monthly_salary_settlement_table():
             """))
             print("已为 monthlysalarysettlement 表补充 social_security_amount 字段")
 
-        if "employee_confirmed" not in col_names:
+        employee_confirmed_added = "employee_confirmed" not in col_names
+
+        if employee_confirmed_added:
             conn.execute(text("""
                 ALTER TABLE monthlysalarysettlement
                 ADD COLUMN employee_confirmed BOOLEAN NOT NULL DEFAULT 0
@@ -1681,14 +1802,15 @@ def migrate_monthly_salary_settlement_table():
             ON monthlysalarysettlement (employee_confirmed_at)
         """))
 
-        conn.execute(text("""
-            UPDATE monthlysalarysettlement
-            SET employee_confirmed = 1,
-                employee_confirmed_by_name = COALESCE(employee_confirmed_by_name, '历史确认'),
-                employee_confirmed_at = COALESCE(employee_confirmed_at, confirmed_at, paid_at, calculated_at, updated_at)
-            WHERE status IN ('confirmed', 'paid', 'locked')
-              AND (employee_confirmed IS NULL OR employee_confirmed = 0)
-        """))
+        if employee_confirmed_added:
+            conn.execute(text("""
+                UPDATE monthlysalarysettlement
+                SET employee_confirmed = 1,
+                    employee_confirmed_by_name = COALESCE(employee_confirmed_by_name, '历史确认'),
+                    employee_confirmed_at = COALESCE(employee_confirmed_at, confirmed_at, paid_at, calculated_at, updated_at)
+                WHERE status IN ('confirmed', 'paid', 'locked')
+                  AND employee_confirmed = 0
+            """))
 
 
 def migrate_employee_module_tables():
