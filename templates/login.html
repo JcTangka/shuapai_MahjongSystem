@@ -28,6 +28,26 @@
 
             <div class="text-center mt-3">
                 <a href="/register" class="text-decoration-none small">注册新账号</a>
+                <span class="text-muted mx-2 small">|</span>
+                <a href="#" class="text-decoration-none small" data-bs-toggle="modal" data-bs-target="#forgotPasswordModal">忘记密码？</a>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="forgotPasswordModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title">忘记密码</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="mb-2">普通员工请联系管理员重置临时密码。</p>
+                    <p class="mb-0 text-muted small">管理员忘记密码时，请由系统维护人使用服务器本地脚本重置。</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary w-100" data-bs-dismiss="modal">知道了</button>
+                </div>
             </div>
         </div>
     </div>

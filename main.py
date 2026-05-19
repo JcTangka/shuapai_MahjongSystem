@@ -10,6 +10,8 @@ from urllib.parse import quote
 
 import calendar
 import json
+import secrets
+import string
 from sqlmodel import Session, select
 from sqlalchemy import func, or_, delete, text  # 用于搜索逻辑；text 用于团队硬删除时兼容清理工资结算表
 from datetime import date, datetime,timedelta,time
@@ -67,6 +69,11 @@ def verify_password(plain_password, hashed_password):
 
 def get_password_hash(password):
     return pwd_context.hash(password)
+
+def generate_temp_password(length: int = 10) -> str:
+    alphabet = string.ascii_letters + string.digits
+    random_part = "".join(secrets.choice(alphabet) for _ in range(length))
+    return f"SP-{random_part}"
 
 def _get_all_store_list(session: Session):
     all_rooms = session.exec(select(Room)).all()
@@ -442,6 +449,7 @@ def _employee_user_payload(emp: User, current_user: User) -> dict:
         "status_label": "在职" if getattr(emp, "is_active", True) else "已停用",
         "deleted_at": emp.deleted_at.strftime("%Y-%m-%d %H:%M:%S") if getattr(emp, "deleted_at", None) else "",
         "is_current_user": emp.id == current_user.id,
+        "must_change_password": bool(getattr(emp, "must_change_password", False)),
     }
 
 
@@ -2285,6 +2293,9 @@ FORMED_SOURCE_OPTIONS = {
     FORMED_SOURCE_OVERFLOW,
 }
 
+FORMED_GAMES_PAGE_SIZE = 40
+LIST_PAGE_SIZE = 40
+
 OVERFLOW_PAYMENT_METHOD = "溢出收款"
 
 
@@ -2693,11 +2704,11 @@ def _find_possible_duplicate_formed_game(
     base_stmt = select(GameRecord).where(
         GameRecord.id != current_game.id,
         GameRecord.status == "formed",
-        GameRecord.store_name == current_game.store_name,
-        GameRecord.record_source == current_source
+        GameRecord.store_name == current_game.store_name
     )
 
     if current_source == FORMED_SOURCE_OVERFLOW:
+        base_stmt = base_stmt.where(GameRecord.record_source == FORMED_SOURCE_OVERFLOW)
         ext_store = _normalize_text(current_game.external_store_name)
         room_name = _normalize_text(current_game.room_name)
         if not ext_store or not room_name:
@@ -2710,6 +2721,10 @@ def _find_possible_duplicate_formed_game(
             )
         ).all()
     else:
+        base_stmt = base_stmt.where(GameRecord.record_source.in_([
+            FORMED_SOURCE_NORMAL,
+            FORMED_SOURCE_SELF_ARRIVAL
+        ]))
         room_name = _normalize_text(current_game.room_name)
         if not room_name:
             return None
@@ -3753,6 +3768,17 @@ def get_game_noted_players_snapshot(session: Session, game: GameRecord) -> List[
             "customer_id": customer_id
         })
 
+    table_note = _normalize_text(game.table_note)
+    if table_note:
+        result.append({
+            "slot": 0,
+            "nickname": "整桌备注",
+            "wechat_id": "",
+            "note": table_note,
+            "customer_id": None,
+            "note_type": "table"
+        })
+
     return result
 
 def build_formed_game_handover_summary(game: GameRecord) -> str:
@@ -3779,7 +3805,7 @@ def build_formed_game_handover_detail(game: GameRecord, noted_players: List[dict
     """
     lines = []
 
-    lines.append("【来源】已组齐牌局参与人备注自动同步")
+    lines.append("【来源】已组齐牌局备注自动同步")
     lines.append(f"门店：{game.store_name or ''}")
     lines.append(f"牌局月序号：#{game.serial_number}")
 
@@ -3791,9 +3817,18 @@ def build_formed_game_handover_detail(game: GameRecord, noted_players: List[dict
     lines.append(f"包间：{game.room_name or '未填写'}")
     lines.append("")
 
-    if noted_players:
+    table_notes = [p for p in noted_players if p.get("note_type") == "table"]
+    player_notes = [p for p in noted_players if p.get("note_type") != "table"]
+
+    if table_notes:
+        lines.append("【整桌备注】")
+        for p in table_notes:
+            lines.append(f"- {p.get('note') or ''}")
+        lines.append("")
+
+    if player_notes:
         lines.append("【当前有备注的参与人】")
-        for p in noted_players:
+        for p in player_notes:
             nickname = p["nickname"] or "未填写昵称"
             wechat_id = p["wechat_id"] or "未填写微信号"
             note = p["note"] or ""
@@ -3844,7 +3879,8 @@ def handover_note_snapshot_changed(old_players: List[dict], new_players: List[di
 
 def get_game_noted_players_snapshot_from_raw(
     session: Session,
-    player_data: List[dict]
+    player_data: List[dict],
+    table_note: Optional[str] = None
 ) -> List[dict]:
     """
     根据原始参与人数据构造“有备注参与人快照”。
@@ -3877,6 +3913,17 @@ def get_game_noted_players_snapshot_from_raw(
             "wechat_id": wechat_id,
             "note": note,
             "customer_id": customer_id
+        })
+
+    clean_table_note = _normalize_text(table_note)
+    if clean_table_note:
+        result.append({
+            "slot": 0,
+            "nickname": "整桌备注",
+            "wechat_id": "",
+            "note": clean_table_note,
+            "customer_id": None,
+            "note_type": "table"
         })
 
     return result
@@ -4105,6 +4152,35 @@ async def get_current_user(
 
     return user
 
+
+@app.middleware("http")
+async def enforce_password_change(request: Request, call_next):
+    allowed_prefixes = ("/static",)
+    allowed_paths = {"/login", "/logout", "/change-password"}
+    path = request.url.path
+
+    if path in allowed_paths or any(path.startswith(prefix) for prefix in allowed_prefixes):
+        return await call_next(request)
+
+    user_id = request.cookies.get("user_id")
+    if user_id:
+        try:
+            user_id_int = int(user_id)
+        except Exception:
+            user_id_int = None
+
+        if user_id_int:
+            with Session(engine) as session:
+                user = session.get(User, user_id_int)
+                if (
+                    user
+                    and getattr(user, "is_active", True)
+                    and getattr(user, "must_change_password", False)
+                ):
+                    return RedirectResponse(url="/change-password", status_code=303)
+
+    return await call_next(request)
+
 # 初始化数据库 (第一次运行时会自动建表)
 # 初始化管理员
 # 修改 startup 事件：增加初始化默认包间数据的逻辑
@@ -4218,7 +4294,8 @@ async def login_action(
             status_code=303
         )
 
-    response = RedirectResponse(url="/", status_code=303)
+    target_url = "/change-password" if getattr(user, "must_change_password", False) else "/"
+    response = RedirectResponse(url=target_url, status_code=303)
     response.set_cookie(
         key="user_id",
         value=str(user.id),
@@ -4254,6 +4331,58 @@ async def logout():
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie("user_id")
     return response
+
+
+@app.get("/change-password")
+async def change_password_page(
+        request: Request,
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    return templates.TemplateResponse("change_password.html", {
+        "request": request,
+        "current_user": user
+    })
+
+
+@app.post("/change-password")
+async def change_password_action(
+        current_password: str = Form(...),
+        new_password: str = Form(...),
+        confirm_password: str = Form(...),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    if not verify_password(current_password, user.hashed_password):
+        return RedirectResponse(url="/change-password?error=当前密码不正确", status_code=303)
+
+    new_password = (new_password or "").strip()
+    confirm_password = (confirm_password or "").strip()
+
+    if len(new_password) < 8:
+        return RedirectResponse(url="/change-password?error=新密码至少需要 8 位", status_code=303)
+
+    if new_password != confirm_password:
+        return RedirectResponse(url="/change-password?error=两次输入的新密码不一致", status_code=303)
+
+    if verify_password(new_password, user.hashed_password):
+        return RedirectResponse(url="/change-password?error=新密码不能与当前密码相同", status_code=303)
+
+    user.hashed_password = get_password_hash(new_password)
+    user.must_change_password = False
+    user.password_reset_at = None
+    user.password_reset_by_user_id = None
+    user.password_reset_by_name = None
+
+    session.add(user)
+    session.commit()
+
+    return RedirectResponse(url="/?success=密码已修改", status_code=303)
 
 # =========================
 # V3 员工管理页面
@@ -4727,6 +4856,82 @@ async def restore_employee(
 
     return RedirectResponse(
         url=f"/employees?store={store}&tab=employee_list&status_filter=active&success=员工已恢复",
+        status_code=303
+    )
+
+
+@app.post("/employees/reset-password/{employee_id}")
+async def reset_employee_password(
+        request: Request,
+        employee_id: int,
+        store: str = Form(""),
+        status_filter: str = Form("active"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请先登录", 401)
+        return RedirectResponse(url="/login", status_code=303)
+
+    if user.role != "admin":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("只有管理员可以重置普通员工密码", 403)
+        return RedirectResponse(
+            url=f"/employees?store={store}&tab=employee_list&status_filter={status_filter}&error=只有管理员可以重置普通员工密码",
+            status_code=303
+        )
+
+    employee = session.get(User, employee_id)
+    if not employee:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("员工不存在", 404)
+        return RedirectResponse(
+            url=f"/employees?store={store}&tab=employee_list&status_filter={status_filter}&error=员工不存在",
+            status_code=303
+        )
+
+    if employee.id == user.id:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("不能在网页中重置当前登录账号密码")
+        return RedirectResponse(
+            url=f"/employees?store={store}&tab=employee_list&status_filter={status_filter}&error=不能在网页中重置当前登录账号密码",
+            status_code=303
+        )
+
+    if employee.role == "admin":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("管理员密码只能通过本地维护脚本重置")
+        return RedirectResponse(
+            url=f"/employees?store={store}&tab=employee_list&status_filter={status_filter}&error=管理员密码只能通过本地维护脚本重置",
+            status_code=303
+        )
+
+    temp_password = generate_temp_password()
+    now = datetime.now()
+
+    employee.hashed_password = get_password_hash(temp_password)
+    employee.must_change_password = True
+    employee.password_reset_at = now
+    employee.password_reset_by_user_id = user.id
+    employee.password_reset_by_name = user.display_name
+
+    session.add(employee)
+    session.commit()
+    session.refresh(employee)
+
+    if _is_ajax_request(request):
+        return _employee_ajax_success(
+            message=f"已为 {employee.display_name} 重置密码",
+            action="employee_password_reset",
+            payload={
+                "employee": _employee_user_payload(employee, user),
+                "temp_password": temp_password
+            }
+        )
+
+    return RedirectResponse(
+        url=f"/employees?store={store}&tab=employee_list&status_filter={status_filter}&success=员工密码已重置，请将临时密码告知本人",
         status_code=303
     )
 
@@ -8195,7 +8400,6 @@ async def update_payment(
         request: Request,
         game_id: int,
         store_name: str = Form(...),
-        is_payAll: str = Form(...),
         wechat_pay: float = Form(0.0),
         Alipay: float = Form(0.0),
 
@@ -8258,7 +8462,46 @@ async def update_payment(
 
     was_paid = game.is_payAll
 
-    new_is_payAll = (is_payAll == "true")
+    if wechat_pay < 0 or Alipay < 0:
+        msg = "收款金额不能小于0"
+        if _is_ajax_request(request):
+            return JSONResponse({"ok": False, "message": msg}, status_code=400)
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=current_source_filter,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=msg
+            ),
+            status_code=303
+        )
+
+    fee_amount = round(float(game.room_fee or 0), 2)
+    received_amount = round(float(wechat_pay or 0) + float(Alipay or 0), 2)
+    is_overflow_game = game.record_source == FORMED_SOURCE_OVERFLOW
+    if received_amount > fee_amount and not is_overflow_game:
+        msg = f"收款金额不能大于费用，当前多收 ¥{received_amount - fee_amount:.2f}"
+        if _is_ajax_request(request):
+            return JSONResponse({"ok": False, "message": msg}, status_code=400)
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=current_source_filter,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=msg
+            ),
+            status_code=303
+        )
+
+    new_is_payAll = (received_amount >= fee_amount) if is_overflow_game else (received_amount == fee_amount)
     game.is_payAll = new_is_payAll
     game.wechat_pay = wechat_pay
     game.Alipay = Alipay
@@ -8381,6 +8624,8 @@ async def formed_games(
         end_date: str = "",
         payment_method_filter: str = "all",
         keyword: str = "",
+        list_offset: int = 0,
+        list_limit: int = FORMED_GAMES_PAGE_SIZE,
 
         focus_game_id: Optional[int] = None,
         duplicate_warning_message: str = "",
@@ -8393,6 +8638,11 @@ async def formed_games(
         return RedirectResponse(url="/login", status_code=303)
 
     source_filter = _normalize_formed_source_filter(source_filter)
+    list_offset = max(0, int(list_offset or 0))
+    list_limit = int(list_limit or FORMED_GAMES_PAGE_SIZE)
+    if list_limit <= 0:
+        list_limit = FORMED_GAMES_PAGE_SIZE
+    list_limit = min(list_limit, 1000)
 
     store_objs = get_store_list(session)
     store_list = [s.name for s in store_objs if s.is_active]
@@ -8481,13 +8731,43 @@ async def formed_games(
         overflow_paid_count = len([g for g in filtered_results if g.is_payAll])
         overflow_unpaid_count = len([g for g in filtered_results if not g.is_payAll])
 
+    if source_filter == FORMED_SOURCE_SELF_ARRIVAL:
+        self_arrival_total_count = len(filtered_results)
+        self_arrival_charge_games = [
+            g for g in filtered_results
+            if _normalize_text(g.payment_method) == "代客收款"
+        ]
+        self_arrival_charge_count = len(self_arrival_charge_games)
+        self_arrival_charge_amount = round(sum((g.room_fee or 0) for g in self_arrival_charge_games), 2)
+        self_arrival_received_amount = round(
+            sum((g.wechat_pay or 0) + (g.Alipay or 0) for g in self_arrival_charge_games),
+            2
+        )
+        self_arrival_unpaid_count = len([g for g in self_arrival_charge_games if not g.is_payAll])
+        self_arrival_non_cashier_count = self_arrival_total_count - self_arrival_charge_count
+    else:
+        self_arrival_total_count = 0
+        self_arrival_charge_count = 0
+        self_arrival_charge_amount = 0.0
+        self_arrival_received_amount = 0.0
+        self_arrival_unpaid_count = 0
+        self_arrival_non_cashier_count = 0
+
+    total_game_count = len(filtered_results)
+    page_slice = filtered_results[list_offset:list_offset + list_limit]
+    page_game_list = list(page_slice)
+    if focus_game_id and list_offset == 0 and all(g.id != focus_game_id for g in page_game_list):
+        focus_page_game = next((g for g in filtered_results if g.id == focus_game_id), None)
+        if focus_page_game:
+            page_game_list.append(focus_page_game)
+
     return templates.TemplateResponse("formed_games.html", {
         "request": request,
         "page_name": "formed",
         "current_store": store,
         "store_list": store_list,
         "room_list": current_store_rooms,
-        "game_list": filtered_results,
+        "game_list": page_game_list,
         "current_user": user,
 
         "source_filter": source_filter,
@@ -8516,6 +8796,20 @@ async def formed_games(
         "overflow_profit_total": overflow_profit_total,
         "overflow_paid_count": overflow_paid_count,
         "overflow_unpaid_count": overflow_unpaid_count,
+
+        "self_arrival_total_count": self_arrival_total_count,
+        "self_arrival_charge_count": self_arrival_charge_count,
+        "self_arrival_charge_amount": self_arrival_charge_amount,
+        "self_arrival_received_amount": self_arrival_received_amount,
+        "self_arrival_unpaid_count": self_arrival_unpaid_count,
+        "self_arrival_non_cashier_count": self_arrival_non_cashier_count,
+
+        "list_offset": list_offset,
+        "list_limit": list_limit,
+        "list_page_size": FORMED_GAMES_PAGE_SIZE,
+        "total_game_count": total_game_count,
+        "loaded_game_count": list_offset + len(page_slice),
+        "has_more_games": (list_offset + len(page_slice)) < total_game_count,
     })
 
 @app.post("/formed-games/self-arrival/add")
@@ -8527,6 +8821,8 @@ async def add_self_arrival_game(
         player_1_wechat: str = Form(...),
         payment_method: str = Form(...),
         room_fee: float = Form(0.0),
+        table_note: str = Form(""),
+        note_added: str = Form("否"),
 
         pay_status: str = Form("all"),
         date_filter: str = Form("today"),
@@ -8694,6 +8990,7 @@ async def add_self_arrival_game(
             )
     else:
         final_room_fee = 0.0
+    final_note_added = "是" if _normalize_text(note_added) == "是" else "否"
 
     new_serial = _get_monthly_serial_number(session, store_name, order_date)
     now = datetime.now()
@@ -8717,13 +9014,13 @@ async def add_self_arrival_game(
         player_3_wechat=None,
         player_4_wechat=None,
 
-        tags=None,
+        tags=final_note_added,
 
         player_1_note=None,
         player_2_note=None,
         player_3_note=None,
         player_4_note=None,
-        table_note="该单为自主到店登记单",
+        table_note=_normalize_text(table_note) or None,
 
         room_name=room_name,
         payment_method=payment_method,
@@ -8746,6 +9043,13 @@ async def add_self_arrival_game(
 
     session.add(new_game)
     session.flush()
+
+    sync_formed_game_note_to_handover(
+        session=session,
+        game=new_game,
+        operator=user,
+        old_noted_players_snapshot=[]
+    )
 
     duplicate_warning_message = ""
     duplicate_hit = _find_possible_duplicate_formed_game(
@@ -8819,6 +9123,8 @@ async def update_self_arrival_game(
         player_1_wechat: str = Form(...),
         payment_method: str = Form(...),
         room_fee: float = Form(0.0),
+        table_note: str = Form(""),
+        note_added: str = Form("否"),
 
         pay_status: str = Form("all"),
         date_filter: str = Form("today"),
@@ -8850,6 +9156,8 @@ async def update_self_arrival_game(
             ),
             status_code=303
         )
+
+    old_noted_players_snapshot = get_game_noted_players_snapshot(session, game)
 
     store_obj = get_store_by_name(session, store_name)
     if not store_obj:
@@ -9020,6 +9328,7 @@ async def update_self_arrival_game(
             )
     else:
         final_room_fee = 0.0
+    final_note_added = "是" if _normalize_text(note_added) == "是" else "否"
 
     old_month_key = (game.record_date.year, game.record_date.month) if game.record_date else None
     new_month_key = (order_date.year, order_date.month)
@@ -9037,7 +9346,7 @@ async def update_self_arrival_game(
 
     game.stakes = "无"
     game.game_type = "无"
-    game.tags = None
+    game.tags = final_note_added
 
     game.player_1 = _normalize_text(player_1)
     game.player_1_wechat = _normalize_text(player_1_wechat)
@@ -9055,7 +9364,7 @@ async def update_self_arrival_game(
     game.player_3_note = None
     game.player_4_note = None
 
-    game.table_note = "该单为自主到店登记单"
+    game.table_note = _normalize_text(table_note) or None
     game.status = "formed"
     game.record_source = FORMED_SOURCE_SELF_ARRIVAL
 
@@ -9064,6 +9373,13 @@ async def update_self_arrival_game(
 
     session.add(game)
     session.flush()
+
+    sync_formed_game_note_to_handover(
+        session=session,
+        game=game,
+        operator=user,
+        old_noted_players_snapshot=old_noted_players_snapshot
+    )
 
     duplicate_warning_message = ""
     duplicate_hit = _find_possible_duplicate_formed_game(
@@ -9518,7 +9834,8 @@ async def update_overflow_game(
             {"slot": 2, "nickname": game.player_2, "wechat_id": game.player_2_wechat, "note": game.player_2_note},
             {"slot": 3, "nickname": game.player_3, "wechat_id": game.player_3_wechat, "note": game.player_3_note},
             {"slot": 4, "nickname": game.player_4, "wechat_id": game.player_4_wechat, "note": game.player_4_note},
-        ]
+        ],
+        table_note=game.table_note
     )
 
     if _normalize_text(start_time_full):
@@ -9545,6 +9862,21 @@ async def update_overflow_game(
                 end_date=end_date,
                 payment_method_filter=payment_method_filter,
                 error="预定金额不能小于0"
+            ),
+            status_code=303
+        )
+
+    if final_room_fee <= 0:
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_OVERFLOW,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error="预定金额不能为0"
             ),
             status_code=303
         )
@@ -10228,7 +10560,8 @@ async def update_formed_game(
                 "wechat_id": game.player_4_wechat,
                 "note": game.player_4_note
             },
-        ]
+        ],
+        table_note=game.table_note
     )
 
     store_obj = get_store_by_name(session, store_name)
@@ -10348,6 +10681,25 @@ async def update_formed_game(
 
     new_record_date, new_start_time_str = _parse_reservation_datetime_local(start_time_full)
     final_stakes = _normalize_text(stakes_custom) if stakes_select == "其他" else _normalize_text(stakes_select)
+    final_payment_method = _normalize_text(payment_method) or None
+    final_room_fee = room_fee or 0.0
+
+    if final_payment_method == "代客收款" and final_room_fee <= 0:
+        msg = "支付方式为代客收款时，费用必须大于0"
+        return _ajax_or_redirect_error(
+            request,
+            message=msg,
+            redirect_url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_NORMAL,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=msg
+            )
+        )
 
     p1_changed = _player_changed(game.player_1, game.player_1_wechat, player_1, player_1_wechat)
     p2_changed = _player_changed(game.player_2, game.player_2_wechat, player_2, player_2_wechat)
@@ -10366,8 +10718,8 @@ async def update_formed_game(
     game.order_start_time = _parse_optional_order_start_time(order_start_time_full)
 
     game.room_name = room_name
-    game.payment_method = _normalize_text(payment_method) or None
-    game.room_fee = room_fee or 0.0
+    game.payment_method = final_payment_method
+    game.room_fee = final_room_fee
 
     game.stakes = final_stakes
     game.game_type = _normalize_text(game_type)
@@ -10544,6 +10896,8 @@ async def read_customers(
         store: str = "牛王庙店",
         search_query: str = "",
         sort_by: str = "default",
+        list_offset: int = 0,
+        list_limit: int = LIST_PAGE_SIZE,
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -10559,6 +10913,8 @@ async def read_customers(
 
     keyword = (search_query or "").strip()
     sort_by = sort_by if sort_by in {"default", "last_visit_desc", "store_visit_count_desc"} else "default"
+    list_offset = max(0, int(list_offset or 0))
+    list_limit = min(max(1, int(list_limit or LIST_PAGE_SIZE)), 1000)
 
     # 2. 先按关键词查顾客
     query = select(Customer)
@@ -10639,14 +10995,22 @@ async def read_customers(
             )
         )
 
+    total_customer_count = len(customer_data_list)
+    page_customer_list = customer_data_list[list_offset:list_offset + list_limit]
+
     return templates.TemplateResponse("customers.html", {
         "request": request,
         "page_name": "customers",
         "current_store": store,
         "store_list": store_list,
-        "customer_list": customer_data_list,
+        "customer_list": page_customer_list,
         "search_query": search_query,
         "sort_by": sort_by,
+        "list_offset": list_offset,
+        "list_page_size": LIST_PAGE_SIZE,
+        "total_customer_count": total_customer_count,
+        "loaded_customer_count": list_offset + len(page_customer_list),
+        "has_more_customers": (list_offset + len(page_customer_list)) < total_customer_count,
         "current_user": user
     })
 
@@ -11276,11 +11640,15 @@ async def brand_blacklist_page(
         request: Request,
         keyword: str = "",
         status_filter: str = "active",   # active / revoked / all
+        list_offset: int = 0,
+        list_limit: int = LIST_PAGE_SIZE,
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
     if not user:
         return RedirectResponse(url="/login", status_code=303)
+    list_offset = max(0, int(list_offset or 0))
+    list_limit = min(max(1, int(list_limit or LIST_PAGE_SIZE)), 1000)
 
     stmt = select(BrandBlacklistEntry)
 
@@ -11304,14 +11672,21 @@ async def brand_blacklist_page(
             BrandBlacklistEntry.id.desc()
         )
     ).all()
+    total_record_count = len(records)
+    page_records = records[list_offset:list_offset + list_limit]
 
     return templates.TemplateResponse("brand_blacklist.html", {
         "request": request,
         "page_name": "brand_blacklist",
         "current_user": user,
-        "record_list": records,
+        "record_list": page_records,
         "keyword": keyword,
-        "status_filter": status_filter
+        "status_filter": status_filter,
+        "list_offset": list_offset,
+        "list_page_size": LIST_PAGE_SIZE,
+        "total_record_count": total_record_count,
+        "loaded_record_count": list_offset + len(page_records),
+        "has_more_records": (list_offset + len(page_records)) < total_record_count,
     })
 
 
@@ -11772,6 +12147,8 @@ async def maintenance_records_page(
         year: int = date.today().year,
         month: int = date.today().month,
         focus_record_id: Optional[int] = None,
+        list_offset: int = 0,
+        list_limit: int = LIST_PAGE_SIZE,
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -11780,6 +12157,8 @@ async def maintenance_records_page(
 
     if month < 1 or month > 12:
         raise HTTPException(status_code=400, detail="month 必须在 1-12 之间")
+    list_offset = max(0, int(list_offset or 0))
+    list_limit = min(max(1, int(list_limit or LIST_PAGE_SIZE)), 1000)
 
     # 门店列表
     store_list = get_all_store_list(session)
@@ -11848,6 +12227,7 @@ async def maintenance_records_page(
     # 统计区
     total_count = len(records)
     total_amount = round(sum([r.amount for r in records]), 2)
+    page_record_list = record_list[list_offset:list_offset + list_limit]
 
     return templates.TemplateResponse("maintenance_records.html", {
         "request": request,
@@ -11857,12 +12237,16 @@ async def maintenance_records_page(
         "room_list": current_store_rooms,
         "customer_map": customer_map,
         "room_map": room_map,
-        "record_list": record_list,
+        "record_list": page_record_list,
         "selected_year": year,
         "selected_month": month,
         "total_count": total_count,
         "total_amount": total_amount,
         "focus_record_id": focus_record_id,
+        "list_offset": list_offset,
+        "list_page_size": LIST_PAGE_SIZE,
+        "loaded_record_count": list_offset + len(page_record_list),
+        "has_more_records": (list_offset + len(page_record_list)) < total_count,
         "current_user": user
     })
 
@@ -12054,11 +12438,15 @@ async def handover_sync_page(
         tag_filter: str = "all",
         room_filter: str = "",
         keyword: str = "",
+        list_offset: int = 0,
+        list_limit: int = LIST_PAGE_SIZE,
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
     if not user:
         return RedirectResponse(url="/login", status_code=303)
+    list_offset = max(0, int(list_offset or 0))
+    list_limit = min(max(1, int(list_limit or LIST_PAGE_SIZE)), 1000)
 
     # 先解析当前应使用的门店
     store = resolve_store_from_request(request, session, store)
@@ -12117,6 +12505,8 @@ async def handover_sync_page(
 
     stats = build_handover_stats(session, store, start_date, end_date)
     todo_cards = build_handover_cards(session, todos)
+    total_todo_count = len(todo_cards)
+    page_todo_cards = todo_cards[list_offset:list_offset + list_limit]
 
     return templates.TemplateResponse("handover_todos.html", {
         "request": request,
@@ -12125,7 +12515,12 @@ async def handover_sync_page(
         "store_list": store_list,
         "room_list": room_list,
         "customer_options": customer_options,
-        "todo_cards": todo_cards,
+        "todo_cards": page_todo_cards,
+        "total_todo_count": total_todo_count,
+        "loaded_todo_count": list_offset + len(page_todo_cards),
+        "has_more_todos": (list_offset + len(page_todo_cards)) < total_todo_count,
+        "list_offset": list_offset,
+        "list_page_size": LIST_PAGE_SIZE,
         "stats": stats,
         "start_date": start_date,
         "end_date": end_date,

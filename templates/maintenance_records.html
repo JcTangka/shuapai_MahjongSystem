@@ -145,7 +145,7 @@
             <tbody>
                 {% for row in record_list %}
                 <tr id="record-row-{{ row.id }}" {% if focus_record_id and row.id == focus_record_id %}class="table-warning"{% endif %}>
-                    <td class="text-secondary fw-bold">{{ loop.index }}</td>
+                    <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
 
                     <td>
                         <span class="fw-bold">{{ row.record_date }}</span>
@@ -190,6 +190,20 @@
             </tbody>
         </table>
     </div>
+</div>
+
+<div id="maintenanceInfiniteLoader"
+     class="text-center text-muted py-3"
+     data-loaded="{{ loaded_record_count or 0 }}"
+     data-total="{{ total_count or 0 }}"
+     data-page-size="{{ list_page_size or 40 }}"
+     data-has-more="{{ 'true' if has_more_records else 'false' }}">
+  {% if has_more_records %}
+    <span class="spinner-border spinner-border-sm me-2 d-none" id="maintenanceLoadSpinner"></span>
+    <span id="maintenanceLoadText">已显示 {{ loaded_record_count or 0 }} / {{ total_count or 0 }} 条，滚动到底部继续加载</span>
+  {% elif total_count %}
+    已显示全部 {{ total_count or 0 }} 条
+  {% endif %}
 </div>
 
 <!-- 新增维护弹窗 -->
@@ -425,8 +439,63 @@
     modal.show();
   }
 
+  let maintenanceInfiniteObserver = null;
+  let maintenanceLoadingMore = false;
+
+  async function loadMoreMaintenanceRecords() {
+    const loader = document.getElementById("maintenanceInfiniteLoader");
+    const tbody = document.querySelector("tbody");
+    if (!loader || !tbody || maintenanceLoadingMore || loader.dataset.hasMore !== "true") return;
+
+    maintenanceLoadingMore = true;
+    const spinner = document.getElementById("maintenanceLoadSpinner");
+    const text = document.getElementById("maintenanceLoadText");
+    if (spinner) spinner.classList.remove("d-none");
+    if (text) text.textContent = "正在加载更多...";
+
+    const loaded = parseInt(loader.dataset.loaded || "0", 10) || 0;
+    const pageSize = parseInt(loader.dataset.pageSize || "40", 10) || 40;
+    const url = new URL(window.location.href);
+    url.searchParams.set("list_offset", String(loaded));
+    url.searchParams.set("list_limit", String(pageSize));
+
+    try {
+      const resp = await fetch(url.toString(), { headers: { "X-Requested-With": "XMLHttpRequest" } });
+      if (!resp.ok) throw new Error("加载失败");
+      const doc = new DOMParser().parseFromString(await resp.text(), "text/html");
+      doc.querySelectorAll('tr[id^="record-row-"]').forEach(row => {
+        if (!document.getElementById(row.id)) tbody.appendChild(document.importNode(row, true));
+      });
+      const newLoader = doc.getElementById("maintenanceInfiniteLoader");
+      if (newLoader) {
+        loader.dataset.loaded = newLoader.dataset.loaded || loader.dataset.loaded;
+        loader.dataset.total = newLoader.dataset.total || loader.dataset.total;
+        loader.dataset.hasMore = newLoader.dataset.hasMore || "false";
+        loader.innerHTML = newLoader.innerHTML;
+      }
+    } catch (err) {
+      console.error(err);
+      loader.innerHTML = '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadMoreMaintenanceRecords()">加载失败，点击重试</button>';
+      loader.dataset.hasMore = "true";
+    } finally {
+      maintenanceLoadingMore = false;
+      setupMaintenanceInfiniteScroll();
+    }
+  }
+
+  function setupMaintenanceInfiniteScroll() {
+    const loader = document.getElementById("maintenanceInfiniteLoader");
+    if (maintenanceInfiniteObserver) maintenanceInfiniteObserver.disconnect();
+    if (!loader || loader.dataset.hasMore !== "true") return;
+    maintenanceInfiniteObserver = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) loadMoreMaintenanceRecords();
+    }, { rootMargin: "240px 0px", threshold: 0.01 });
+    maintenanceInfiniteObserver.observe(loader);
+  }
+
   document.addEventListener("DOMContentLoaded", function() {
     syncAddStoreOptions();
+    setupMaintenanceInfiniteScroll();
 
     const focusId = "{{ focus_record_id or '' }}";
     if (focusId) {

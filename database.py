@@ -188,6 +188,12 @@ class User(SQLModel, table=True):
     # True = 账号仍可正常登录，但不展示在排班表、店长业绩-各班次业绩-耍牌绩效考核表中
     hide_from_schedule_performance: bool = Field(default=False, index=True)
 
+    # V4：密码重置流程
+    must_change_password: bool = Field(default=False, index=True)
+    password_reset_at: Optional[datetime] = Field(default=None, index=True)
+    password_reset_by_user_id: Optional[int] = Field(default=None, index=True)
+    password_reset_by_name: Optional[str] = None
+
 # === 顾客主表 ===
 class Customer(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -1056,6 +1062,7 @@ def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
 
     migrate_store_room_settings_table()
+    migrate_user_password_reset_fields()
     migrate_customer_store_link_table()
     migrate_game_record_table()
     migrate_formed_game_handover_link_table()
@@ -1254,6 +1261,44 @@ def migrate_store_room_settings_table():
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_room_store_name ON room(store_name)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_room_is_active ON room(is_active)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_room_sort_order ON room(sort_order)"))
+
+
+def migrate_user_password_reset_fields():
+    """
+    V4 密码重置流程：
+    只给 user 表补充密码重置相关字段，不改变用户 id 和历史业务关联。
+    """
+    with engine.begin() as conn:
+        user_exists = conn.execute(text("""
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table' AND name='user'
+        """)).fetchone()
+
+        if not user_exists:
+            return
+
+        columns = conn.execute(text("PRAGMA table_info(user)")).fetchall()
+        col_names = {col[1] for col in columns}
+
+        alter_columns = [
+            ("must_change_password", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("password_reset_at", "DATETIME"),
+            ("password_reset_by_user_id", "INTEGER"),
+            ("password_reset_by_name", "TEXT"),
+        ]
+
+        for col_name, col_type in alter_columns:
+            if col_name not in col_names:
+                conn.execute(text(f"""
+                    ALTER TABLE user
+                    ADD COLUMN {col_name} {col_type}
+                """))
+
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_must_change_password ON user(must_change_password)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_password_reset_at ON user(password_reset_at)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_password_reset_by_user_id ON user(password_reset_by_user_id)"))
+
 
 def migrate_customer_store_link_table():
     """

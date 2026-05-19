@@ -398,11 +398,11 @@
     <h5 class="mb-0 page-section-title">
         <i class="bi bi-card-checklist me-1"></i>待办列表
     </h5>
-    <span class="text-secondary">共 {{ todo_cards|length }} 条</span>
+    <span class="text-secondary">共 {{ total_todo_count or 0 }} 条</span>
 </div>
 
 {% if todo_cards %}
-<div class="d-flex flex-column gap-3">
+<div class="d-flex flex-column gap-3" id="handoverTodoList">
     {% for todo in todo_cards %}
     <div id="todo-card-{{ todo.id }}" class="card border-0 shadow-sm rounded-4 {% if todo.status == 'unresolved' and todo.is_pinned %}border-start border-4 border-warning{% endif %}">
         <div class="card-body">
@@ -508,6 +508,19 @@
     <div class="card-body text-center text-secondary py-5">当前筛选条件下暂无待办记录</div>
 </div>
 {% endif %}
+<div id="handoverInfiniteLoader"
+     class="text-center text-muted py-3"
+     data-loaded="{{ loaded_todo_count or 0 }}"
+     data-total="{{ total_todo_count or 0 }}"
+     data-page-size="{{ list_page_size or 40 }}"
+     data-has-more="{{ 'true' if has_more_todos else 'false' }}">
+    {% if has_more_todos %}
+        <span class="spinner-border spinner-border-sm me-2 d-none" id="handoverLoadSpinner"></span>
+        <span id="handoverLoadText">已显示 {{ loaded_todo_count or 0 }} / {{ total_todo_count or 0 }} 条，滚动到底部继续加载</span>
+    {% elif total_todo_count %}
+        已显示全部 {{ total_todo_count or 0 }} 条
+    {% endif %}
+</div>
 </div>
 
 <div class="modal fade" id="addTodoModal" tabindex="-1" aria-hidden="true">
@@ -1142,6 +1155,8 @@ function getCurrentHandoverUrl() {
     const url = new URL(window.location.href);
     url.searchParams.delete('success');
     url.searchParams.delete('error');
+    url.searchParams.set('list_offset', '0');
+    url.searchParams.set('list_limit', String(Math.max(40, document.querySelectorAll('[id^="todo-card-"]').length)));
     return url.toString();
 }
 
@@ -1171,6 +1186,63 @@ function replaceHandoverContentArea(htmlText) {
     }
 
     currentContent.innerHTML = newContent.innerHTML;
+    setupHandoverInfiniteScroll();
+}
+
+let handoverInfiniteObserver = null;
+let handoverLoadingMore = false;
+
+async function loadMoreHandoverTodos() {
+    const loader = document.getElementById('handoverInfiniteLoader');
+    const list = document.getElementById('handoverTodoList');
+    if (!loader || !list || handoverLoadingMore || loader.dataset.hasMore !== 'true') return;
+
+    handoverLoadingMore = true;
+    const spinner = document.getElementById('handoverLoadSpinner');
+    const text = document.getElementById('handoverLoadText');
+    if (spinner) spinner.classList.remove('d-none');
+    if (text) text.textContent = '正在加载更多...';
+
+    const loaded = parseInt(loader.dataset.loaded || '0', 10) || 0;
+    const pageSize = parseInt(loader.dataset.pageSize || '40', 10) || 40;
+    const url = new URL(window.location.href);
+    url.searchParams.delete('success');
+    url.searchParams.delete('error');
+    url.searchParams.set('list_offset', String(loaded));
+    url.searchParams.set('list_limit', String(pageSize));
+
+    try {
+        const resp = await fetch(url.toString(), { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        if (!resp.ok) throw new Error('加载失败');
+        const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+        doc.querySelectorAll('[id^="todo-card-"]').forEach(card => {
+            if (!document.getElementById(card.id)) list.appendChild(document.importNode(card, true));
+        });
+        const newLoader = doc.getElementById('handoverInfiniteLoader');
+        if (newLoader) {
+            loader.dataset.loaded = newLoader.dataset.loaded || loader.dataset.loaded;
+            loader.dataset.total = newLoader.dataset.total || loader.dataset.total;
+            loader.dataset.hasMore = newLoader.dataset.hasMore || 'false';
+            loader.innerHTML = newLoader.innerHTML;
+        }
+    } catch (err) {
+        console.error(err);
+        loader.innerHTML = '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadMoreHandoverTodos()">加载失败，点击重试</button>';
+        loader.dataset.hasMore = 'true';
+    } finally {
+        handoverLoadingMore = false;
+        setupHandoverInfiniteScroll();
+    }
+}
+
+function setupHandoverInfiniteScroll() {
+    const loader = document.getElementById('handoverInfiniteLoader');
+    if (handoverInfiniteObserver) handoverInfiniteObserver.disconnect();
+    if (!loader || loader.dataset.hasMore !== 'true') return;
+    handoverInfiniteObserver = new IntersectionObserver(entries => {
+        if (entries.some(entry => entry.isIntersecting)) loadMoreHandoverTodos();
+    }, { rootMargin: '240px 0px', threshold: 0.01 });
+    handoverInfiniteObserver.observe(loader);
 }
 
 function getHandoverErrorMessage(message) {
@@ -1329,6 +1401,7 @@ document.addEventListener('DOMContentLoaded', function () {
     bindCustomerSearch('add');
     bindCustomerSearch('edit');
     bindHandoverAjaxForms();
+    setupHandoverInfiniteScroll();
 
     preloadCustomerSelect('add');
     preloadCustomerSelect('edit');

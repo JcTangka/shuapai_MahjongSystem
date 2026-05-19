@@ -63,8 +63,8 @@
             </thead>
             <tbody>
                 {% for cust in customer_list %}
-                <tr>
-                    <td class="text-secondary fw-bold">{{ loop.index }}</td>
+                <tr id="customer-row-{{ cust.id }}">
+                    <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
 
                     <td>
                         <div class="fw-bold">{{ cust.nickname }}</div>
@@ -127,6 +127,20 @@
             </tbody>
         </table>
     </div>
+</div>
+
+<div id="customerInfiniteLoader"
+     class="text-center text-muted py-3"
+     data-loaded="{{ loaded_customer_count or 0 }}"
+     data-total="{{ total_customer_count or 0 }}"
+     data-page-size="{{ list_page_size or 40 }}"
+     data-has-more="{{ 'true' if has_more_customers else 'false' }}">
+    {% if has_more_customers %}
+        <span class="spinner-border spinner-border-sm me-2 d-none" id="customerLoadSpinner"></span>
+        <span id="customerLoadText">已显示 {{ loaded_customer_count or 0 }} / {{ total_customer_count or 0 }} 条，滚动到底部继续加载</span>
+    {% elif total_customer_count %}
+        已显示全部 {{ total_customer_count or 0 }} 条
+    {% endif %}
 </div>
 
 <div class="modal fade" id="addCustomerModal" tabindex="-1">
@@ -714,5 +728,61 @@
             .replaceAll('\\', '\\\\')
             .replaceAll("'", "\\'");
     }
+
+    let customerInfiniteObserver = null;
+    let customerLoadingMore = false;
+
+    async function loadMoreCustomers() {
+        const loader = document.getElementById('customerInfiniteLoader');
+        const tbody = document.querySelector('tbody');
+        if (!loader || !tbody || customerLoadingMore || loader.dataset.hasMore !== 'true') return;
+
+        customerLoadingMore = true;
+        const spinner = document.getElementById('customerLoadSpinner');
+        const text = document.getElementById('customerLoadText');
+        if (spinner) spinner.classList.remove('d-none');
+        if (text) text.textContent = '正在加载更多...';
+
+        const loaded = parseInt(loader.dataset.loaded || '0', 10) || 0;
+        const pageSize = parseInt(loader.dataset.pageSize || '40', 10) || 40;
+        const url = new URL(window.location.href);
+        url.searchParams.set('list_offset', String(loaded));
+        url.searchParams.set('list_limit', String(pageSize));
+
+        try {
+            const resp = await fetch(url.toString(), { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            if (!resp.ok) throw new Error('加载失败');
+            const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+            doc.querySelectorAll('tr[id^="customer-row-"]').forEach(row => {
+                if (!document.getElementById(row.id)) tbody.appendChild(document.importNode(row, true));
+            });
+            const newLoader = doc.getElementById('customerInfiniteLoader');
+            if (newLoader) {
+                loader.dataset.loaded = newLoader.dataset.loaded || loader.dataset.loaded;
+                loader.dataset.total = newLoader.dataset.total || loader.dataset.total;
+                loader.dataset.hasMore = newLoader.dataset.hasMore || 'false';
+                loader.innerHTML = newLoader.innerHTML;
+            }
+        } catch (err) {
+            console.error(err);
+            loader.innerHTML = '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadMoreCustomers()">加载失败，点击重试</button>';
+            loader.dataset.hasMore = 'true';
+        } finally {
+            customerLoadingMore = false;
+            setupCustomerInfiniteScroll();
+        }
+    }
+
+    function setupCustomerInfiniteScroll() {
+        const loader = document.getElementById('customerInfiniteLoader');
+        if (customerInfiniteObserver) customerInfiniteObserver.disconnect();
+        if (!loader || loader.dataset.hasMore !== 'true') return;
+        customerInfiniteObserver = new IntersectionObserver(entries => {
+            if (entries.some(entry => entry.isIntersecting)) loadMoreCustomers();
+        }, { rootMargin: '240px 0px', threshold: 0.01 });
+        customerInfiniteObserver.observe(loader);
+    }
+
+    document.addEventListener('DOMContentLoaded', setupCustomerInfiniteScroll);
 </script>
 {% endblock %}

@@ -49,9 +49,9 @@
     </div>
 </form>
 
-<div class="row g-3">
+<div class="row g-3" id="brandBlacklistList">
     {% for item in record_list %}
-    <div class="col-12">
+    <div class="col-12" id="brand-blacklist-row-{{ item.id }}">
         <div class="card shadow-sm border-0 {% if item.is_active %}border-start border-4 border-danger{% else %}opacity-75{% endif %}">
             <div class="card-body">
                 <div class="d-flex justify-content-between flex-wrap gap-3">
@@ -131,6 +131,24 @@
     {% endfor %}
 </div>
 
+<div id="brandBlacklistInfiniteLoader"
+     class="text-center text-muted py-3"
+     data-loaded="{{ loaded_record_count or 0 }}"
+     data-total="{{ total_record_count or 0 }}"
+     data-page-size="{{ list_page_size or 40 }}"
+     data-has-more="{{ 'true' if has_more_records else 'false' }}">
+    {% if has_more_records %}
+        <span class="spinner-border spinner-border-sm me-2 d-none" id="brandBlacklistLoadSpinner"></span>
+        <span id="brandBlacklistLoadText">已显示 {{ loaded_record_count or 0 }} / {{ total_record_count or 0 }} 条，滚动到底部继续加载</span>
+    {% elif total_record_count %}
+        已显示全部 {{ total_record_count or 0 }} 条
+    {% else %}
+        <div class="card border-0 shadow-sm">
+            <div class="card-body text-center text-secondary py-5">当前筛选条件下暂无品牌黑名单记录</div>
+        </div>
+    {% endif %}
+</div>
+
 {% if current_user.role == "admin" %}
 <div class="modal fade" id="addBrandBlacklistModal" tabindex="-1">
     <div class="modal-dialog">
@@ -161,4 +179,68 @@
     </div>
 </div>
 {% endif %}
+<script>
+let brandBlacklistInfiniteObserver = null;
+let brandBlacklistLoadingMore = false;
+
+async function loadMoreBrandBlacklist() {
+    const loader = document.getElementById('brandBlacklistInfiniteLoader');
+    const list = document.getElementById('brandBlacklistList');
+    if (!loader || !list || brandBlacklistLoadingMore || loader.dataset.hasMore !== 'true') return;
+
+    brandBlacklistLoadingMore = true;
+    const spinner = document.getElementById('brandBlacklistLoadSpinner');
+    const text = document.getElementById('brandBlacklistLoadText');
+    if (spinner) spinner.classList.remove('d-none');
+    if (text) text.textContent = '正在加载更多...';
+
+    const loaded = parseInt(loader.dataset.loaded || '0', 10) || 0;
+    const pageSize = parseInt(loader.dataset.pageSize || '40', 10) || 40;
+    const url = new URL(window.location.href);
+    url.searchParams.set('list_offset', String(loaded));
+    url.searchParams.set('list_limit', String(pageSize));
+
+    try {
+        const resp = await fetch(url.toString(), { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        if (!resp.ok) throw new Error('加载失败');
+        const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+        doc.querySelectorAll('[id^="brand-blacklist-row-"]').forEach(card => {
+            if (!document.getElementById(card.id)) {
+                list.appendChild(document.importNode(card, true));
+                const recordId = card.id.replace('brand-blacklist-row-', '');
+                const modal = doc.getElementById(`editBrandBlacklistModal${recordId}`);
+                if (modal && !document.getElementById(modal.id)) {
+                    document.body.appendChild(document.importNode(modal, true));
+                }
+            }
+        });
+        const newLoader = doc.getElementById('brandBlacklistInfiniteLoader');
+        if (newLoader) {
+            loader.dataset.loaded = newLoader.dataset.loaded || loader.dataset.loaded;
+            loader.dataset.total = newLoader.dataset.total || loader.dataset.total;
+            loader.dataset.hasMore = newLoader.dataset.hasMore || 'false';
+            loader.innerHTML = newLoader.innerHTML;
+        }
+    } catch (err) {
+        console.error(err);
+        loader.innerHTML = '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadMoreBrandBlacklist()">加载失败，点击重试</button>';
+        loader.dataset.hasMore = 'true';
+    } finally {
+        brandBlacklistLoadingMore = false;
+        setupBrandBlacklistInfiniteScroll();
+    }
+}
+
+function setupBrandBlacklistInfiniteScroll() {
+    const loader = document.getElementById('brandBlacklistInfiniteLoader');
+    if (brandBlacklistInfiniteObserver) brandBlacklistInfiniteObserver.disconnect();
+    if (!loader || loader.dataset.hasMore !== 'true') return;
+    brandBlacklistInfiniteObserver = new IntersectionObserver(entries => {
+        if (entries.some(entry => entry.isIntersecting)) loadMoreBrandBlacklist();
+    }, { rootMargin: '240px 0px', threshold: 0.01 });
+    brandBlacklistInfiniteObserver.observe(loader);
+}
+
+document.addEventListener('DOMContentLoaded', setupBrandBlacklistInfiniteScroll);
+</script>
 {% endblock %}

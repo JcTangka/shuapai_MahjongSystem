@@ -534,7 +534,7 @@
                     <th>系统角色</th>
                     <th>账号状态</th>
                     <th>停用时间</th>
-                    <th style="width: 220px;">操作</th>
+                    <th style="width: 330px;">操作</th>
                 </tr>
             </thead>
 
@@ -551,6 +551,9 @@
                         <span class="fw-bold">{{ emp.display_name }}</span>
                         {% if emp.id == current_user.id %}
                             <span class="badge bg-secondary ms-1">当前账号</span>
+                        {% endif %}
+                        {% if emp.must_change_password %}
+                            <span class="badge bg-warning text-dark ms-1">需改密</span>
                         {% endif %}
                     </td>
 
@@ -586,6 +589,19 @@
                                 </button>
                             {% else %}
                                 {% if emp.is_active %}
+                                    {% if emp.role != 'admin' %}
+                                    <form action="/employees/reset-password/{{ emp.id }}"
+                                          method="post"
+                                          class="d-inline"
+                                          data-employee-ajax-form="1"
+                                          onsubmit="return confirm('确定要为【{{ emp.display_name }}】重置登录密码吗？系统会生成临时密码。');">
+                                        <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                        <input type="hidden" name="status_filter" value="{{ status_filter or 'active' }}">
+                                        <button type="submit" class="btn btn-sm btn-outline-primary">
+                                            <i class="bi bi-key me-1"></i>重置密码
+                                        </button>
+                                    </form>
+                                    {% endif %}
                                     <form action="/employees/delete/{{ emp.id }}"
                                           method="post"
                                           class="d-inline"
@@ -3135,7 +3151,7 @@
                     <th>最终扣款</th>
                     <th>状态</th>
                     <th>审批信息</th>
-                    <th style="width: 220px;">操作</th>
+                    <th style="width: 330px;">操作</th>
                 </tr>
             </thead>
 
@@ -3467,6 +3483,30 @@
 </div>
 {% endif %}
 
+<div class="modal fade" id="passwordResetResultModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content rounded-4 border-0 shadow">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-key-fill me-2"></i>密码已重置</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-warning small">
+                    临时密码只在本次弹窗中展示，请立即告知员工。员工登录后会被要求修改密码。
+                </div>
+                <label class="form-label fw-bold">临时密码</label>
+                <div class="input-group">
+                    <input type="text" class="form-control fw-bold" id="passwordResetTempInput" readonly>
+                    <button class="btn btn-outline-primary" type="button" onclick="copyPasswordResetTemp()">复制</button>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-primary w-100" data-bs-dismiss="modal">已记录</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
@@ -3550,6 +3590,19 @@ function renderEmployeeActionCell(emp) {
 
     if (emp.is_active) {
         return `
+            ${emp.role !== "admin" ? `
+            <form action="/employees/reset-password/${emp.id}"
+                  method="post"
+                  class="d-inline"
+                  data-employee-ajax-form="1"
+                  onsubmit="return confirm('确定要为【${escapeHtml(emp.display_name)}】重置登录密码吗？系统会生成临时密码。');">
+                <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                <input type="hidden" name="status_filter" value="${escapeHtml(currentEmployeeStatusFilter())}">
+                <button type="submit" class="btn btn-sm btn-outline-primary">
+                    <i class="bi bi-key me-1"></i>重置密码
+                </button>
+            </form>
+            ` : ""}
             <form action="/employees/delete/${emp.id}"
                   method="post"
                   class="d-inline"
@@ -3579,6 +3632,41 @@ function renderEmployeeActionCell(emp) {
     `;
 }
 
+function renderEmployeeNameCell(emp) {
+    return `
+        <span class="fw-bold">${escapeHtml(emp.display_name)}</span>
+        ${emp.is_current_user ? `<span class="badge bg-secondary ms-1">当前账号</span>` : ""}
+        ${emp.must_change_password ? `<span class="badge bg-warning text-dark ms-1">需改密</span>` : ""}
+    `;
+}
+
+function showPasswordResetResult(tempPassword) {
+    const input = document.getElementById("passwordResetTempInput");
+    if (input) input.value = tempPassword || "";
+
+    const modalEl = document.getElementById("passwordResetResultModal");
+    if (modalEl) {
+        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    }
+}
+
+async function copyPasswordResetTemp() {
+    const input = document.getElementById("passwordResetTempInput");
+    const value = input ? input.value : "";
+    if (!value) return;
+
+    try {
+        await navigator.clipboard.writeText(value);
+        employeeShowToast("临时密码已复制", "success");
+    } catch (e) {
+        if (input) {
+            input.focus();
+            input.select();
+        }
+        employeeShowToast("请手动复制临时密码", "error");
+    }
+}
+
 function currentEmployeeStore() {
     const params = new URLSearchParams(window.location.search);
     return params.get("store") || "";
@@ -3596,6 +3684,7 @@ function updateEmployeeRow(emp) {
     const cells = row.children;
     if (cells.length < 7) return;
 
+    cells[2].innerHTML = renderEmployeeNameCell(emp);
     cells[4].innerHTML = renderEmployeeStatusBadge(emp);
     cells[5].innerHTML = emp.deleted_at
         ? `<span class="small text-muted">${escapeHtml(emp.deleted_at)}</span>`
@@ -4612,6 +4701,11 @@ function handleEmployeeAjaxResult(result) {
     if (result.action === "employee_disabled" || result.action === "employee_restored") {
         updateEmployeeRow(payload.employee);
         updateEmployeeStatCards(payload.counts);
+    }
+
+    if (result.action === "employee_password_reset") {
+        updateEmployeeRow(payload.employee);
+        showPasswordResetResult(payload.temp_password);
     }
 
     if (result.action === "leave_created") {
