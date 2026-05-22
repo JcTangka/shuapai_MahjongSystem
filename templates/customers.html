@@ -56,6 +56,7 @@
                     <th>去过的门店</th>
                     <th>最后到店</th>
                     <th>本门店次数</th>
+                    <th>常玩玩法</th>
                     <th>押金</th>
                     <th>状态</th>
                     <th>操作</th>
@@ -97,6 +98,17 @@
                         </span>
                     </td>
 
+                    <td>
+                        {% if cust.favorite_play_types %}
+                            <span class="small text-dark"
+                                  title="{{ cust.favorite_play_types_full }}">
+                                {{ cust.favorite_play_types }}
+                            </span>
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+
                     <td class="text-success fw-bold">
                         ¥{{ cust.guarantee_deposit }}
                     </td>
@@ -118,7 +130,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="9" class="text-muted py-5">
+                    <td colspan="10" class="text-muted py-5">
                         <i class="bi bi-people fs-1 d-block mb-3"></i>
                         暂无符合条件的顾客数据。
                     </td>

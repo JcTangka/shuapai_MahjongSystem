@@ -61,6 +61,40 @@
     font-size: 12px;
     color: #6c757d;
   }
+
+  .customer-search-wrap {
+    position: relative;
+  }
+
+  .customer-search-list {
+    position: absolute;
+    z-index: 1080;
+    left: 0;
+    right: 0;
+    top: calc(100% + 4px);
+    max-height: 220px;
+    overflow-y: auto;
+    border: 1px solid #dbe3ef;
+    border-radius: 0.5rem;
+    background: #fff;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
+    display: none;
+  }
+
+  .customer-search-item {
+    padding: 8px 10px;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .customer-search-item:hover {
+    background: #f1f5ff;
+  }
+
+  .customer-search-item .wechat {
+    font-size: 12px;
+    color: #6c757d;
+  }
 </style>
 
 <div class="d-flex justify-content-between align-items-center mb-3">
@@ -135,7 +169,6 @@
                 <tr>
                     <th>序号</th>
                     <th>日期</th>
-                    <th>包间名</th>
                     <th>维护用户</th>
                     <th>赠送物品</th>
                     <th>金额</th>
@@ -149,10 +182,6 @@
 
                     <td>
                         <span class="fw-bold">{{ row.record_date }}</span>
-                    </td>
-
-                    <td>
-                        <span class="text-muted">{{ row.room_name }}</span>
                     </td>
 
                     <td>
@@ -181,7 +210,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="7" class="text-muted py-5">
+                    <td colspan="6" class="text-muted py-5">
                         <i class="bi bi-gift fs-1 d-block mb-3"></i>
                         当前条件下暂无维护记录。
                     </td>
@@ -217,7 +246,7 @@
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
       </div>
 
-      <form method="post" action="/maintenance-records/add">
+      <form method="post" action="/maintenance-records/add" id="addMaintenanceForm" onsubmit="return validateAddMaintenanceForm()">
         <div class="modal-body bg-light">
           <div class="card border-0 shadow-sm">
             <div class="card-header bg-white fw-bold">
@@ -235,13 +264,19 @@
                 </div>
 
                 <div class="col-md-6">
-                  <label class="form-label text-muted small">包间</label>
-                  <select class="form-select" name="room_name" id="add_room_name" required></select>
-                </div>
-
-                <div class="col-md-6">
                   <label class="form-label text-muted small">维护用户</label>
-                  <select class="form-select" name="customer_id" id="add_customer_id" required></select>
+                  <div class="customer-search-wrap">
+                    <input type="text"
+                           class="form-control"
+                           id="add_customer_search"
+                           autocomplete="off"
+                           placeholder="搜索昵称或微信号"
+                           oninput="renderCustomerSearchResults()"
+                           onfocus="renderCustomerSearchResults()"
+                           required>
+                    <input type="hidden" name="customer_id" id="add_customer_id">
+                    <div class="customer-search-list" id="add_customer_search_list"></div>
+                  </div>
                 </div>
 
                 <div class="col-md-6">
@@ -261,13 +296,8 @@
                 </div>
 
                 <div class="col-md-6">
-                  <label class="form-label text-muted small">付款账号</label>
-                  <input type="text" class="form-control" name="payment_account" required>
-                </div>
-
-                <div class="col-md-6">
                   <label class="form-label text-muted small">赠送理由</label>
-                  <input type="text" class="form-control" name="reason" required>
+                  <input type="text" class="form-control" name="reason">
                 </div>
               </div>
             </div>
@@ -308,11 +338,6 @@
                 </div>
 
                 <div class="col-md-3">
-                  <label class="form-label text-muted small">包间</label>
-                  <select class="form-select" name="room_name" id="detail_room_name" required></select>
-                </div>
-
-                <div class="col-md-3">
                   <label class="form-label text-muted small">维护用户</label>
                   <input type="text" class="form-control" id="detail_customer_name" readonly>
                 </div>
@@ -343,13 +368,8 @@
                 </div>
 
                 <div class="col-md-6">
-                  <label class="form-label text-muted small">付款账号</label>
-                  <input type="text" class="form-control" name="payment_account" id="detail_payment_account" required>
-                </div>
-
-                <div class="col-md-6">
                   <label class="form-label text-muted small">赠送理由</label>
-                  <input type="text" class="form-control" name="reason" id="detail_reason" required>
+                  <input type="text" class="form-control" name="reason" id="detail_reason">
                 </div>
               </div>
             </div>
@@ -366,42 +386,99 @@
 </div>
 
 <script>
-  const ROOM_MAP = {{ room_map | tojson }};
   const CUSTOMER_MAP = {{ customer_map | tojson }};
+  let selectedMaintenanceCustomerId = "";
 
-  function fillRoomOptions(storeName, roomSelectId, selectedRoomName = null) {
-    const roomSelect = document.getElementById(roomSelectId);
-    roomSelect.innerHTML = "";
-
-    const rooms = ROOM_MAP[storeName] || [];
-    rooms.forEach(room => {
-      const option = document.createElement("option");
-      option.value = room.name;
-      option.textContent = room.name;
-      if (selectedRoomName && room.name === selectedRoomName) {
-        option.selected = true;
-      }
-      roomSelect.appendChild(option);
-    });
+  function getCurrentStoreCustomers() {
+    const storeName = document.getElementById("add_store_name")?.value || "";
+    return CUSTOMER_MAP[storeName] || [];
   }
 
-  function fillCustomerOptions(storeName, customerSelectId) {
-    const customerSelect = document.getElementById(customerSelectId);
-    customerSelect.innerHTML = "";
+  function getCustomerDisplayText(cust) {
+    return `${cust.nickname}（${cust.wechat_id}）`;
+  }
 
-    const customers = CUSTOMER_MAP[storeName] || [];
+  function hideCustomerSearchResults() {
+    const list = document.getElementById("add_customer_search_list");
+    if (list) list.style.display = "none";
+  }
+
+  function selectMaintenanceCustomer(cust) {
+    selectedMaintenanceCustomerId = String(cust.id);
+    const input = document.getElementById("add_customer_search");
+    const label = getCustomerDisplayText(cust);
+    document.getElementById("add_customer_id").value = selectedMaintenanceCustomerId;
+    input.value = label;
+    input.dataset.selectedLabel = label;
+    hideCustomerSearchResults();
+  }
+
+  function renderCustomerSearchResults() {
+    const input = document.getElementById("add_customer_search");
+    const hidden = document.getElementById("add_customer_id");
+    const list = document.getElementById("add_customer_search_list");
+    if (!input || !hidden || !list) return;
+
+    const keyword = input.value.trim().toLowerCase();
+    if (hidden.value && input.value !== (input.dataset.selectedLabel || "")) {
+      hidden.value = "";
+      selectedMaintenanceCustomerId = "";
+      input.dataset.selectedLabel = "";
+    }
+
+    const customers = getCurrentStoreCustomers()
+      .filter(cust => {
+        const nickname = String(cust.nickname || "").toLowerCase();
+        const wechat = String(cust.wechat_id || "").toLowerCase();
+        return !keyword || nickname.includes(keyword) || wechat.includes(keyword);
+      })
+      .slice(0, 20);
+
+    list.innerHTML = "";
+    if (!customers.length) {
+      list.innerHTML = '<div class="customer-search-item text-muted">未找到当前门店顾客</div>';
+      list.style.display = "block";
+      return;
+    }
+
     customers.forEach(cust => {
-      const option = document.createElement("option");
-      option.value = cust.id;
-      option.textContent = `${cust.nickname}（${cust.wechat_id}）`;
-      customerSelect.appendChild(option);
+      const item = document.createElement("div");
+      item.className = "customer-search-item";
+      const nameEl = document.createElement("div");
+      nameEl.className = "fw-bold";
+      nameEl.textContent = cust.nickname || "";
+      const wechatEl = document.createElement("div");
+      wechatEl.className = "wechat";
+      wechatEl.textContent = cust.wechat_id || "";
+      item.appendChild(nameEl);
+      item.appendChild(wechatEl);
+      item.addEventListener("mousedown", event => {
+        event.preventDefault();
+        selectMaintenanceCustomer(cust);
+      });
+      list.appendChild(item);
     });
+    list.style.display = "block";
   }
 
   function syncAddStoreOptions() {
-    const storeName = document.getElementById("add_store_name").value;
-    fillRoomOptions(storeName, "add_room_name");
-    fillCustomerOptions(storeName, "add_customer_id");
+    selectedMaintenanceCustomerId = "";
+    document.getElementById("add_customer_id").value = "";
+    const searchInput = document.getElementById("add_customer_search");
+    if (searchInput) {
+      searchInput.value = "";
+      searchInput.dataset.selectedLabel = "";
+    }
+    hideCustomerSearchResults();
+  }
+
+  function validateAddMaintenanceForm() {
+    const customerId = document.getElementById("add_customer_id")?.value || "";
+    if (!customerId) {
+      alert("请从搜索结果中选择维护用户");
+      return false;
+    }
+    return true;
   }
 
   async function openDetailModal(recordId) {
@@ -420,18 +497,7 @@
     document.getElementById("detail_operator_name").value = data.operator_name;
     document.getElementById("detail_gift_name").value = data.gift_name;
     document.getElementById("detail_amount").value = data.amount;
-    document.getElementById("detail_payment_account").value = data.payment_account;
-    document.getElementById("detail_reason").value = data.reason;
-
-    const roomSelect = document.getElementById("detail_room_name");
-    roomSelect.innerHTML = "";
-    (data.room_options || []).forEach(room => {
-      const option = document.createElement("option");
-      option.value = room.name;
-      option.textContent = room.name;
-      if (room.name === data.room_name) option.selected = true;
-      roomSelect.appendChild(option);
-    });
+    document.getElementById("detail_reason").value = data.reason || "";
 
     document.getElementById("detailForm").action = `/maintenance-record/${recordId}/update`;
 
@@ -496,6 +562,12 @@
   document.addEventListener("DOMContentLoaded", function() {
     syncAddStoreOptions();
     setupMaintenanceInfiniteScroll();
+
+    document.addEventListener("click", event => {
+      if (!event.target.closest(".customer-search-wrap")) {
+        hideCustomerSearchResults();
+      }
+    });
 
     const focusId = "{{ focus_record_id or '' }}";
     if (focusId) {

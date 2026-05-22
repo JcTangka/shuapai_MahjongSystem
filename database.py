@@ -296,6 +296,23 @@ class PlayFrequency(SQLModel, table=True):
     count: int = Field(default=0)  # 同场次数
     last_play_date: date = Field(default_factory=date.today)  # 最后一次同场时间
 
+class CustomerPlayTypeStat(SQLModel, table=True):
+    """
+    顾客常玩玩法统计表。
+    按微信号聚合，避免顾客表尚未建档时丢失牌局参与统计。
+    """
+    __tablename__ = "customerplaytypestat"
+    __table_args__ = (
+        UniqueConstraint("wechat_id", "play_label", name="uq_customer_play_type_stat"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    wechat_id: str = Field(index=True)
+    play_label: str = Field(index=True)
+    play_count: int = Field(default=0, index=True)
+    last_played_at: datetime = Field(index=True)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
 # === 人情维护表 ===
 class MaintenanceRecord(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -1065,6 +1082,7 @@ def create_db_and_tables():
     migrate_user_password_reset_fields()
     migrate_customer_store_link_table()
     migrate_game_record_table()
+    migrate_customer_play_type_stat_table()
     migrate_formed_game_handover_link_table()
     migrate_brand_blacklist_entry_table()
     migrate_user_table()
@@ -1079,6 +1097,130 @@ def create_db_and_tables():
     migrate_employee_leave_request_table()
     migrate_employee_attendance_record_table()
     migrate_monthly_salary_settlement_table()
+
+def _normalize_migration_text(value: Optional[str]) -> str:
+    return (value or "").strip()
+
+def _migration_game_play_label(game: GameRecord) -> str:
+    stakes = _normalize_migration_text(game.stakes)
+    game_type = _normalize_migration_text(game.game_type)
+    if not stakes or not game_type or stakes == "无" or game_type == "无":
+        return ""
+    return f"{stakes}{game_type}"
+
+def _migration_game_played_at(game: GameRecord) -> datetime:
+    raw_order_start = _normalize_migration_text(game.order_start_time)
+    if raw_order_start:
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):
+            try:
+                return datetime.strptime(raw_order_start, fmt)
+            except ValueError:
+                pass
+
+    record_date = game.record_date or date.today()
+    start_time = _normalize_migration_text(game.start_time)
+    if start_time:
+        try:
+            if len(start_time) >= 11 and "-" in start_time and ":" in start_time:
+                return datetime.strptime(f"{record_date.year}-{start_time}", "%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+    return datetime.combine(record_date, time.min)
+
+def _migration_game_player_wechats(game: GameRecord) -> List[str]:
+    result = []
+    seen = set()
+    for wx in [
+        game.player_1_wechat,
+        game.player_2_wechat,
+        game.player_3_wechat,
+        game.player_4_wechat,
+    ]:
+        clean = _normalize_migration_text(wx)
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        result.append(clean)
+    return result
+
+def migrate_customer_play_type_stat_table():
+    """
+    创建并首次回填顾客常玩玩法统计表。
+    如果表中已有数据，则认为后续由增量逻辑维护，不再重复扫描历史牌局。
+    """
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS customerplaytypestat (
+                id INTEGER PRIMARY KEY,
+                wechat_id TEXT NOT NULL,
+                play_label TEXT NOT NULL,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                last_played_at DATETIME NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_customer_play_type_stat UNIQUE (wechat_id, play_label)
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_customerplaytypestat_wechat_id
+            ON customerplaytypestat (wechat_id)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_customerplaytypestat_play_label
+            ON customerplaytypestat (play_label)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_customerplaytypestat_play_count
+            ON customerplaytypestat (play_count)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_customerplaytypestat_last_played_at
+            ON customerplaytypestat (last_played_at)
+        """))
+
+        for col_name in ["status", "record_source", "player_1_wechat", "player_2_wechat", "player_3_wechat", "player_4_wechat"]:
+            conn.execute(text(f"""
+                CREATE INDEX IF NOT EXISTS idx_gamerecord_{col_name}
+                ON gamerecord ({col_name})
+            """))
+
+    with Session(engine) as session:
+        existing_count = session.exec(select(func.count(CustomerPlayTypeStat.id))).first() or 0
+        if existing_count > 0:
+            return
+
+        stats: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        games = session.exec(
+            select(GameRecord).where(
+                GameRecord.status == "formed",
+                GameRecord.record_source != "self_arrival"
+            )
+        ).all()
+
+        for game in games:
+            label = _migration_game_play_label(game)
+            if not label:
+                continue
+            played_at = _migration_game_played_at(game)
+            for wx in _migration_game_player_wechats(game):
+                key = (wx, label)
+                item = stats.setdefault(key, {"count": 0, "last_played_at": played_at})
+                item["count"] += 1
+                if played_at > item["last_played_at"]:
+                    item["last_played_at"] = played_at
+
+        now = datetime.now()
+        for (wechat_id, play_label), item in stats.items():
+            session.add(CustomerPlayTypeStat(
+                wechat_id=wechat_id,
+                play_label=play_label,
+                play_count=item["count"],
+                last_played_at=item["last_played_at"],
+                updated_at=now
+            ))
+
+        session.commit()
+        print(f"已回填顾客常玩玩法统计 {len(stats)} 条")
 
 def migrate_brand_blacklist_entry_table():
     """

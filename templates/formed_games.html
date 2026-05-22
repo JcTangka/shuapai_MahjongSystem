@@ -1279,8 +1279,16 @@
                         </div>
 
                         <div class="col-md-6">
-                            <label class="form-label fw-bold">订单开始时间 <span class="text-danger">*</span></label>
-                            <input type="datetime-local" class="form-control" name="order_start_time_full" id="self_arrival_edit_order_start_time_full" required>
+                            <label class="form-label fw-bold">订单开始时间</label>
+                            <input type="hidden" name="order_start_time_full" id="self_arrival_edit_order_start_time_full">
+                            <div class="row g-2">
+                                <div class="col-7">
+                                    <input type="date" class="form-control" id="self_arrival_edit_order_start_date" required>
+                                </div>
+                                <div class="col-5">
+                                    <input type="time" class="form-control" id="self_arrival_edit_order_start_time">
+                                </div>
+                            </div>
                         </div>
 
                         <div class="col-md-6">
@@ -1605,7 +1613,15 @@
                                     </div>
                                     <div class="col-md-6">
                                         <label class="form-label fw-bold">订单开始时间 </label>
-                                        <input type="datetime-local" class="form-control" name="order_start_time_full" id="overflow_edit_order_start_time_full" >
+                                        <input type="hidden" name="order_start_time_full" id="overflow_edit_order_start_time_full">
+                                        <div class="row g-2">
+                                            <div class="col-7">
+                                                <input type="date" class="form-control" id="overflow_edit_order_start_date" required>
+                                            </div>
+                                            <div class="col-5">
+                                                <input type="time" class="form-control" id="overflow_edit_order_start_time">
+                                            </div>
+                                        </div>
                                     </div>
                                     <div class="col-md-6">
                                         <label class="form-label fw-bold">外部包间 </label>
@@ -1813,7 +1829,15 @@
                         </div>
                         <div class="col-md-6">
                             <label class="form-label fw-bold">订单开始时间</label>
-                            <input type="datetime-local" class="form-control" name="order_start_time_full" id="edit_order_start_time_full">
+                            <input type="hidden" name="order_start_time_full" id="edit_order_start_time_full">
+                            <div class="row g-2">
+                                <div class="col-7">
+                                    <input type="date" class="form-control" id="edit_order_start_date" required>
+                                </div>
+                                <div class="col-5">
+                                    <input type="time" class="form-control" id="edit_order_start_time">
+                                </div>
+                            </div>
                         </div>
 
                         <div class="col-md-4">
@@ -2080,26 +2104,39 @@
     }
 
     async function submitFormAjaxExpectJson(form) {
-        const resp = await fetch(form.action, {
-            method: 'POST',
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
-            },
-            body: new FormData(form)
-        });
+        if (form.dataset.submitting === '1') {
+            throw new Error('正在保存，请稍候');
+        }
 
-        let data = {};
+        form.dataset.submitting = '1';
+
         try {
-            data = await resp.json();
-        } catch (e) {
-            throw new Error('后端没有返回有效 JSON');
-        }
+            const resp = await fetch(form.action, {
+                method: 'POST',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: new FormData(form)
+            });
 
-        if (!resp.ok || !data.ok) {
-            throw new Error(data.message || '保存失败');
-        }
+            let data = {};
+            try {
+                data = await resp.json();
+            } catch (e) {
+                throw new Error('后端没有返回有效 JSON');
+            }
 
-        return data;
+            if (!resp.ok || !data.ok) {
+                const detail = Array.isArray(data.detail)
+                    ? data.detail.map(item => item.msg).filter(Boolean).join('；')
+                    : '';
+                throw new Error(data.message || detail || '保存失败');
+            }
+
+            return data;
+        } finally {
+            form.dataset.submitting = '0';
+        }
     }
 
     function initTooltips() {
@@ -2224,7 +2261,53 @@
         return String(raw).replace(' ', 'T').slice(0, 16);
     }
 
+    function getTodayDateValue() {
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+
+    function setEditOrderStartParts(prefix, raw) {
+        const hiddenInput = document.getElementById(`${prefix}_order_start_time_full`);
+        const dateInput = document.getElementById(`${prefix}_order_start_date`);
+        const timeInput = document.getElementById(`${prefix}_order_start_time`);
+        if (!hiddenInput || !dateInput || !timeInput) return;
+
+        const normalized = normalizeOrderStartToDatetimeLocal(raw || '');
+        if (normalized) {
+            const [datePart, timePart = ''] = normalized.split('T');
+            dateInput.value = datePart || getTodayDateValue();
+            timeInput.value = timePart.slice(0, 5);
+            hiddenInput.value = normalized;
+        } else {
+            dateInput.value = getTodayDateValue();
+            timeInput.value = '';
+            hiddenInput.value = '';
+        }
+    }
+
+    function syncEditOrderStartParts(prefix) {
+        const hiddenInput = document.getElementById(`${prefix}_order_start_time_full`);
+        const dateInput = document.getElementById(`${prefix}_order_start_date`);
+        const timeInput = document.getElementById(`${prefix}_order_start_time`);
+        if (!hiddenInput || !dateInput || !timeInput) return;
+
+        const dateVal = (dateInput.value || getTodayDateValue()).trim();
+        const timeVal = (timeInput.value || '').trim();
+        hiddenInput.value = timeVal ? `${dateVal}T${timeVal}` : '';
+    }
+
     function validateSelfArrivalFields(mode) {
+        const form = document.getElementById(`selfArrival${mode === 'add' ? 'Add' : 'Edit'}Form`);
+        if (mode === 'edit') {
+            syncEditOrderStartParts('self_arrival_edit');
+        }
+        if (form && !form.reportValidity()) {
+            return false;
+        }
+
         const nicknameInput = document.getElementById(`self_arrival_${mode}_player_1`);
         const wechatInput = document.getElementById(`self_arrival_${mode}_player_1_wechat`);
         const paymentSelect = document.getElementById(`self_arrival_${mode}_payment_method`);
@@ -2300,10 +2383,6 @@
             }
             if (!(reservationInput?.value || '').trim()) {
                 alert('预约时间不能为空');
-                return false;
-            }
-            if (!(orderStartInput?.value || '').trim()) {
-                alert('订单开始时间不能为空');
                 return false;
             }
             if (!(tableNoteInput?.value || '').trim()) {
@@ -2417,6 +2496,8 @@
     }
 
     async function submitOverflowEditForm() {
+        syncEditOrderStartParts('overflow_edit');
+
         const ok = validateOverflowFields('edit');
         if (!ok) return false;
 
@@ -2478,10 +2559,15 @@
     }
 
     async function beforeSubmitFormedEdit() {
+        syncEditOrderStartParts('edit');
+
         const ok = validateFormedNicknameWechatPairs();
         if (!ok) return false;
 
         const form = document.getElementById('formedEditForm');
+        if (form && !form.reportValidity()) {
+            return false;
+        }
         const paymentMethod = (document.getElementById('edit_payment_method')?.value || '').trim();
         const fee = parseFloat(document.getElementById('edit_room_fee')?.value || 0) || 0;
         if (paymentMethod === '代客收款' && fee <= 0) {
@@ -2554,8 +2640,7 @@
         document.getElementById('edit_start_time_full').value =
             normalizeToDatetimeLocal(btn.dataset.date || '', btn.dataset.time || '');
 
-        document.getElementById('edit_order_start_time_full').value =
-            normalizeOrderStartToDatetimeLocal(btn.dataset.orderStart || '');
+        setEditOrderStartParts('edit', btn.dataset.orderStart || '');
 
         document.getElementById('edit_room_name').value = btn.dataset.room || '';
         document.getElementById('edit_game_type').value = btn.dataset.gametype || '';
@@ -2586,7 +2671,7 @@
         const gameId = btn.dataset.id;
         document.getElementById('selfArrivalEditForm').action = `/formed-games/self-arrival/update/${gameId}`;
         document.getElementById('self_arrival_edit_room_name').value = btn.dataset.room || '';
-        document.getElementById('self_arrival_edit_order_start_time_full').value = normalizeOrderStartToDatetimeLocal(btn.dataset.orderStart || '');
+        setEditOrderStartParts('self_arrival_edit', btn.dataset.orderStart || '');
         document.getElementById('self_arrival_edit_player_1').value = btn.dataset.p1 || '';
         document.getElementById('self_arrival_edit_player_1_wechat').value = btn.dataset.p1Wx || '';
         document.getElementById('self_arrival_edit_payment_method').value = btn.dataset.payment || '';
@@ -2625,8 +2710,7 @@
 
         document.getElementById('overflow_edit_start_time_full').value =
             normalizeToDatetimeLocal(btn.dataset.date || '', btn.dataset.time || '');
-        document.getElementById('overflow_edit_order_start_time_full').value =
-            normalizeOrderStartToDatetimeLocal(btn.dataset.orderStart || '');
+        setEditOrderStartParts('overflow_edit', btn.dataset.orderStart || '');
 
         document.getElementById('overflow_edit_external_store_name').value = btn.dataset.externalStore || '';
         document.getElementById('overflow_edit_room_name').value = btn.dataset.room || '';

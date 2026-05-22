@@ -21,7 +21,7 @@ import itertools
 #  导入数据库模型
 from database import (GameRecord,Store, Room, User,
                       Customer, CustomerStoreLink,
-                      Blacklist, BrandBlacklistEntry, PlayFrequency, create_db_and_tables, get_session,
+                      Blacklist, BrandBlacklistEntry, PlayFrequency, CustomerPlayTypeStat, create_db_and_tables, get_session,
                       ShiftSchedule, MaintenanceRecord, upsert_shift, get_month_shifts_map, get_month_date_range,
                       get_manager_performance_stats, get_shift_performance_stats,
                       HandoverTodo, HandoverTodoCustomerLink, FormedGameHandoverLink,SelfArrivalRecord,
@@ -2678,6 +2678,140 @@ def _game_effective_order_dt(game: GameRecord) -> datetime:
 
     return datetime.combine(game.record_date, datetime.min.time())
 
+def _game_snapshot_for_play_type_stats(game: GameRecord) -> dict:
+    return {
+        "id": game.id,
+        "status": game.status,
+        "record_source": game.record_source,
+        "stakes": game.stakes,
+        "game_type": game.game_type,
+        "record_date": game.record_date,
+        "start_time": game.start_time,
+        "order_start_time": game.order_start_time,
+        "player_1_wechat": game.player_1_wechat,
+        "player_2_wechat": game.player_2_wechat,
+        "player_3_wechat": game.player_3_wechat,
+        "player_4_wechat": game.player_4_wechat,
+    }
+
+def _game_value(game_or_snapshot, field_name: str):
+    if isinstance(game_or_snapshot, dict):
+        return game_or_snapshot.get(field_name)
+    return getattr(game_or_snapshot, field_name, None)
+
+def _game_play_type_label(game_or_snapshot) -> str:
+    stakes = _normalize_text(_game_value(game_or_snapshot, "stakes"))
+    game_type = _normalize_text(_game_value(game_or_snapshot, "game_type"))
+    if not stakes or not game_type or stakes == "无" or game_type == "无":
+        return ""
+    return f"{stakes}{game_type}"
+
+def _game_play_type_played_at(game_or_snapshot) -> datetime:
+    if isinstance(game_or_snapshot, GameRecord):
+        return _game_effective_order_dt(game_or_snapshot)
+
+    raw_order_start = _normalize_text(_game_value(game_or_snapshot, "order_start_time"))
+    if raw_order_start:
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):
+            try:
+                return datetime.strptime(raw_order_start, fmt)
+            except ValueError:
+                pass
+
+    record_date = _game_value(game_or_snapshot, "record_date") or date.today()
+    start_time = _normalize_text(_game_value(game_or_snapshot, "start_time"))
+    if start_time:
+        try:
+            if len(start_time) >= 11 and "-" in start_time and ":" in start_time:
+                return datetime.strptime(f"{record_date.year}-{start_time}", "%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+    return datetime.combine(record_date, time.min)
+
+def _game_play_type_stat_keys(game_or_snapshot) -> List[Tuple[str, str]]:
+    if _normalize_text(_game_value(game_or_snapshot, "status")) != "formed":
+        return []
+    if _normalize_text(_game_value(game_or_snapshot, "record_source")) == FORMED_SOURCE_SELF_ARRIVAL:
+        return []
+
+    label = _game_play_type_label(game_or_snapshot)
+    if not label:
+        return []
+
+    result = []
+    seen = set()
+    for idx in range(1, 5):
+        wx = _normalize_text(_game_value(game_or_snapshot, f"player_{idx}_wechat"))
+        if not wx or wx in seen:
+            continue
+        seen.add(wx)
+        result.append((wx, label))
+    return result
+
+def _recompute_customer_play_type_stat_key(session: Session, wechat_id: str, play_label: str):
+    games = session.exec(
+        select(GameRecord).where(
+            GameRecord.status == "formed",
+            GameRecord.record_source != FORMED_SOURCE_SELF_ARRIVAL,
+            or_(
+                GameRecord.player_1_wechat == wechat_id,
+                GameRecord.player_2_wechat == wechat_id,
+                GameRecord.player_3_wechat == wechat_id,
+                GameRecord.player_4_wechat == wechat_id,
+            )
+        )
+    ).all()
+
+    count = 0
+    last_played_at = None
+    for game in games:
+        if _game_play_type_label(game) != play_label:
+            continue
+        if (wechat_id, play_label) not in _game_play_type_stat_keys(game):
+            continue
+        played_at = _game_play_type_played_at(game)
+        count += 1
+        if last_played_at is None or played_at > last_played_at:
+            last_played_at = played_at
+
+    stat = session.exec(
+        select(CustomerPlayTypeStat).where(
+            CustomerPlayTypeStat.wechat_id == wechat_id,
+            CustomerPlayTypeStat.play_label == play_label
+        )
+    ).first()
+
+    if count <= 0 or last_played_at is None:
+        if stat:
+            session.delete(stat)
+        return
+
+    now = datetime.now()
+    if not stat:
+        stat = CustomerPlayTypeStat(
+            wechat_id=wechat_id,
+            play_label=play_label,
+            play_count=count,
+            last_played_at=last_played_at,
+            updated_at=now
+        )
+    else:
+        stat.play_count = count
+        stat.last_played_at = last_played_at
+        stat.updated_at = now
+    session.add(stat)
+
+def sync_customer_play_type_stats_for_changed_games(session: Session, *game_versions):
+    affected_keys = set()
+    for game_version in game_versions:
+        if not game_version:
+            continue
+        affected_keys.update(_game_play_type_stat_keys(game_version))
+
+    for wechat_id, play_label in sorted(affected_keys):
+        _recompute_customer_play_type_stat_key(session, wechat_id, play_label)
+
 def _format_duplicate_game_label(game: GameRecord) -> str:
     order_time_text = _normalize_text(game.order_start_time)
     if not order_time_text:
@@ -3723,7 +3857,9 @@ def resolve_store_from_request(
     # 4. 最终兜底
     return "牛王庙店"
 
-HANDOVER_EMPTY_NOTE_SYSTEM_HINT = "【系统提示】该牌局当前已无参与人备注，请人工确认该同步事项是否仍需继续跟进。"
+HANDOVER_LEGACY_EMPTY_NOTE_SYSTEM_HINT = "【系统提示】该牌局当前已无参与人备注，请人工确认该同步事项是否仍需继续跟进。"
+HANDOVER_EMPTY_NOTE_SYSTEM_HINT = "【系统提示】该牌局当前已无参与人备注，系统已自动将该同步事项标记为已解决。"
+HANDOVER_EMPTY_NOTE_AUTO_RESOLVE_PROCESS_NOTE = "牌局参与人备注已全部删除，系统自动标记为已解决。"
 
 def get_game_noted_players_snapshot(session: Session, game: GameRecord) -> List[dict]:
     """
@@ -3850,7 +3986,11 @@ def strip_empty_note_system_hint(detail: Optional[str]) -> str:
         return ""
 
     lines = [line.rstrip() for line in raw.splitlines()]
-    filtered = [line for line in lines if line.strip() != HANDOVER_EMPTY_NOTE_SYSTEM_HINT]
+    empty_note_hints = {
+        HANDOVER_EMPTY_NOTE_SYSTEM_HINT,
+        HANDOVER_LEGACY_EMPTY_NOTE_SYSTEM_HINT,
+    }
+    filtered = [line for line in lines if line.strip() not in empty_note_hints]
     return "\n".join(filtered).strip()
 
 
@@ -3975,7 +4115,7 @@ def sync_formed_game_note_to_handover(
        - 有关联待办则更新
     3. 备注全清空：
        - 若无关联待办，直接不处理
-       - 若有待办且未解决，则保留并追加系统提示
+       - 若有待办且未解决，则自动标记为已解决
     4. 若待办已解决，但备注内容变化，则自动改回未解决
     5. 不覆盖 process_note / remark / is_pinned
     """
@@ -4095,27 +4235,27 @@ def sync_formed_game_note_to_handover(
     clean_detail = strip_empty_note_system_hint(todo.detail)
     merged_detail = clean_detail
 
+    now = datetime.now()
+
     if todo.status == "unresolved":
         if merged_detail:
             merged_detail = merged_detail + "\n\n" + HANDOVER_EMPTY_NOTE_SYSTEM_HINT
         else:
             merged_detail = HANDOVER_EMPTY_NOTE_SYSTEM_HINT
+        todo.status = "resolved"
+        todo.resolved_at = now
+        todo.process_note = todo.process_note or HANDOVER_EMPTY_NOTE_AUTO_RESOLVE_PROCESS_NOTE
+        todo.handled_by_user_id = operator.id
+        todo.handled_by_name = operator.display_name
 
     todo.store_name = game.store_name
     todo.room_name = game.room_name or None
     todo.detail = merged_detail or None
-    todo.updated_at = datetime.now()
+    todo.updated_at = now
 
     # 若时间/月序号变化，summary 仍允许同步
     if _normalize_text(todo.summary) != summary:
         todo.summary = summary
-
-    # 若原来已解决，且备注状态发生变化（从有备注 -> 无备注），按规则 reopen
-    if todo.status == "resolved" and note_changed:
-        todo.status = "unresolved"
-        todo.resolved_at = None
-        todo.handled_by_user_id = operator.id
-        todo.handled_by_name = operator.display_name
 
     session.add(todo)
 
@@ -8184,6 +8324,8 @@ async def update_game_status(
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
 
+    old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
+
     # ===== 1) 组齐 =====
     if action == "confirm":
         game.status = "formed"
@@ -8195,6 +8337,8 @@ async def update_game_status(
         game.updated_by = user.display_name
 
         session.add(game)
+        session.flush()
+        sync_customer_play_type_stats_for_changed_games(session, game)
         session.commit()
         return RedirectResponse(
             url=f"/?store={store}",
@@ -8203,6 +8347,7 @@ async def update_game_status(
 
     # ===== 2) 退回未组齐 =====
     elif action == "revert":
+        old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
         # V2：原操作保留；订单开始时间清空
         # 但玩家备注、整桌备注、room_fee 不清空
         game.status = "unformed"
@@ -8212,6 +8357,8 @@ async def update_game_status(
         game.updated_by = user.display_name
 
         session.add(game)
+        session.flush()
+        sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
         session.commit()
         return RedirectResponse(
             url=_build_formed_redirect_url(
@@ -8227,6 +8374,7 @@ async def update_game_status(
 
     # ===== 3) 撤销 =====
     elif action == "delete":
+        old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
         if game.status == "unformed":
             if not _can_delete_unformed_game(user, game):
                 return RedirectResponse(
@@ -8252,6 +8400,8 @@ async def update_game_status(
                 )
 
         session.delete(game)
+        session.flush()
+        sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot)
         session.commit()
 
         redirect_base = "/formed-games" if game.status == "formed" else "/"
@@ -8292,6 +8442,8 @@ async def update_game(
     game = session.get(GameRecord, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
+
+    old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
 
     # 1. 门店合法性校验
     store_obj = get_store_by_name(session, store_name)
@@ -8388,6 +8540,8 @@ async def update_game(
     game.updated_by = user.display_name
 
     session.add(game)
+    session.flush()
+    sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
     session.commit()
 
     redirect_base = "/formed-games" if game.status == "formed" else "/"
@@ -9118,7 +9272,7 @@ async def update_self_arrival_game(
         game_id: int,
         store_name: str = Form(...),
         room_name: str = Form(...),
-        order_start_time_full: str = Form(...),
+        order_start_time_full: str = Form(""),
         player_1: str = Form(...),
         player_1_wechat: str = Form(...),
         payment_method: str = Form(...),
@@ -9226,22 +9380,26 @@ async def update_self_arrival_game(
             status_code=303
         )
 
-    try:
-        order_date, order_start_time = _parse_required_self_arrival_order_start_time(order_start_time_full)
-    except ValueError as e:
-        return RedirectResponse(
-            url=_build_formed_redirect_url(
-                store=store_name,
-                source_filter=FORMED_SOURCE_SELF_ARRIVAL,
-                pay_status=pay_status,
-                date_filter=date_filter,
-                start_date=start_date,
-                end_date=end_date,
-                payment_method_filter=payment_method_filter,
-                error=str(e)
-            ),
-            status_code=303
-        )
+    if _normalize_text(order_start_time_full):
+        try:
+            order_date, order_start_time = _parse_required_self_arrival_order_start_time(order_start_time_full)
+        except ValueError as e:
+            return RedirectResponse(
+                url=_build_formed_redirect_url(
+                    store=store_name,
+                    source_filter=FORMED_SOURCE_SELF_ARRIVAL,
+                    pay_status=pay_status,
+                    date_filter=date_filter,
+                    start_date=start_date,
+                    end_date=end_date,
+                    payment_method_filter=payment_method_filter,
+                    error=str(e)
+                ),
+                status_code=303
+            )
+    else:
+        order_date = date.today()
+        order_start_time = None
 
     payment_method = _normalize_text(payment_method)
     if payment_method not in SELF_ARRIVAL_PAYMENT_METHODS:
@@ -9380,7 +9538,6 @@ async def update_self_arrival_game(
         operator=user,
         old_noted_players_snapshot=old_noted_players_snapshot
     )
-
     duplicate_warning_message = ""
     duplicate_hit = _find_possible_duplicate_formed_game(
         session=session,
@@ -9687,6 +9844,7 @@ async def add_overflow_game(
         operator=user,
         old_noted_players_snapshot=[]
     )
+    sync_customer_play_type_stats_for_changed_games(session, new_game)
 
     duplicate_warning_message = ""
     duplicate_hit = _find_possible_duplicate_formed_game(
@@ -9837,6 +9995,7 @@ async def update_overflow_game(
         ],
         table_note=game.table_note
     )
+    old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
 
     if _normalize_text(start_time_full):
         new_record_date, new_start_time_str = _parse_reservation_datetime_local(start_time_full)
@@ -9973,6 +10132,7 @@ async def update_overflow_game(
         operator=user,
         old_noted_players_snapshot=old_noted_players_snapshot
     )
+    sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
 
     duplicate_warning_message = ""
     duplicate_hit = _find_possible_duplicate_formed_game(
@@ -10046,6 +10206,8 @@ async def delete_overflow_game(
             status_code=303
         )
 
+    old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
+
     is_admin = (user.role == "admin")
     is_owner = (game.who_did == user.display_name)
 
@@ -10065,6 +10227,8 @@ async def delete_overflow_game(
         )
 
     session.delete(game)
+    session.flush()
+    sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot)
     session.commit()
 
     return RedirectResponse(
@@ -10563,6 +10727,7 @@ async def update_formed_game(
         ],
         table_note=game.table_note
     )
+    old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
 
     store_obj = get_store_by_name(session, store_name)
     if not store_obj:
@@ -10754,6 +10919,7 @@ async def update_formed_game(
         operator=user,
         old_noted_players_snapshot=old_noted_players_snapshot
     )
+    sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
 
     duplicate_warning_message = ""
     duplicate_hit = _find_possible_duplicate_formed_game(
@@ -10997,6 +11163,37 @@ async def read_customers(
 
     total_customer_count = len(customer_data_list)
     page_customer_list = customer_data_list[list_offset:list_offset + list_limit]
+    page_wechat_ids = [
+        item["wechat_id"]
+        for item in page_customer_list
+        if _normalize_text(item.get("wechat_id"))
+    ]
+    play_stats_by_wechat = {}
+    if page_wechat_ids:
+        stat_rows = session.exec(
+            select(CustomerPlayTypeStat).where(CustomerPlayTypeStat.wechat_id.in_(page_wechat_ids))
+        ).all()
+        for row in stat_rows:
+            play_stats_by_wechat.setdefault(row.wechat_id, []).append(row)
+
+    for item in page_customer_list:
+        stats = play_stats_by_wechat.get(item["wechat_id"], [])
+        def _stat_dt_sort_value(dt_val):
+            if not dt_val:
+                return 0
+            return dt_val.toordinal() * 86400 + dt_val.hour * 3600 + dt_val.minute * 60 + dt_val.second
+
+        stats.sort(key=lambda s: (
+            -int(s.play_count or 0),
+            -_stat_dt_sort_value(s.last_played_at),
+            s.play_label
+        ))
+        display_items = [s.play_label for s in stats[:3]]
+        item["favorite_play_types"] = "、".join(display_items) + ("…" if len(stats) > 3 else "")
+        item["favorite_play_types_full"] = "；".join([
+            f"{s.play_label} {int(s.play_count or 0)}次"
+            for s in stats
+        ])
 
     return templates.TemplateResponse("customers.html", {
         "request": request,
@@ -12163,20 +12360,6 @@ async def maintenance_records_page(
     # 门店列表
     store_list = get_all_store_list(session)
 
-    # 当前门店下的包间
-    current_store_rooms = session.exec(
-        select(Room).where(Room.store_name == store).order_by(Room.name)
-    ).all()
-
-    # 所有门店 -> 包间映射（前端联动）
-    all_rooms = session.exec(select(Room)).all()
-    room_map = {}
-    for r in all_rooms:
-        room_map.setdefault(r.store_name, []).append({
-            "id": r.id,
-            "name": r.name
-        })
-
     # 所有门店 -> 顾客映射（只取去过该店的顾客）
     customer_links = session.exec(select(CustomerStoreLink)).all()
     store_customer_ids_map = {}
@@ -12218,7 +12401,6 @@ async def maintenance_records_page(
         record_list.append({
             "id": rec.id,
             "record_date": rec.record_date,
-            "room_name": rec.room_name,
             "customer_name": cust.nickname if cust else "未知顾客",
             "gift_name": rec.gift_name,
             "amount": rec.amount
@@ -12234,9 +12416,7 @@ async def maintenance_records_page(
         "page_name": "maintenance",
         "current_store": store,
         "store_list": store_list,
-        "room_list": current_store_rooms,
         "customer_map": customer_map,
-        "room_map": room_map,
         "record_list": page_record_list,
         "selected_year": year,
         "selected_month": month,
@@ -12254,12 +12434,12 @@ async def maintenance_records_page(
 @app.post("/maintenance-records/add")
 async def add_maintenance_record(
         store_name: str = Form(...),
-        room_name: str = Form(...),
+        room_name: str = Form(""),
         customer_id: int = Form(...),
         gift_name: str = Form(...),
         amount: float = Form(...),
-        payment_account: str = Form(...),
-        reason: str = Form(...),
+        payment_account: str = Form(""),
+        reason: str = Form(""),
         record_date: date = Form(...),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
@@ -12274,13 +12454,6 @@ async def add_maintenance_record(
             status_code=303
         )
 
-    # 校验包间属于所选门店
-    if not check_room_belongs_to_store(session, store_name, room_name):
-        return RedirectResponse(
-            url=f"/maintenance-records?store={store_name}&year={record_date.year}&month={record_date.month}&error=所选包间不属于当前门店",
-            status_code=303
-        )
-
     # 校验顾客属于所选门店
     if not check_customer_belongs_to_store(session, customer_id, store_name):
         return RedirectResponse(
@@ -12290,14 +12463,14 @@ async def add_maintenance_record(
 
     new_record = MaintenanceRecord(
         store_name=store_name,
-        room_name=room_name,
+        room_name="",
         record_date=record_date,
         customer_id=customer_id,
         operator_name=user.display_name,
         gift_name=gift_name.strip(),
         amount=amount,
-        payment_account=payment_account.strip(),
-        reason=reason.strip(),
+        payment_account=(payment_account or "").strip(),
+        reason=(reason or "").strip(),
         is_deleted=False,
         created_at=datetime.now(),
         updated_at=datetime.now()
@@ -12328,37 +12501,29 @@ async def get_maintenance_record_detail(
     if not cust:
         return {"error": "顾客不存在"}
 
-    # 当前门店的包间列表（详情编辑时可切换包间）
-    rooms = session.exec(
-        select(Room).where(Room.store_name == rec.store_name).order_by(Room.name)
-    ).all()
-
     return {
         "id": rec.id,
         "store_name": rec.store_name,
-        "room_name": rec.room_name,
         "record_date": str(rec.record_date),
         "customer_id": rec.customer_id,
         "customer_name": cust.nickname,
         "customer_wechat": cust.wechat_id,
         "gift_name": rec.gift_name,
         "amount": rec.amount,
-        "payment_account": rec.payment_account,
         "reason": rec.reason,
-        "operator_name": rec.operator_name,
-        "room_options": [{"id": r.id, "name": r.name} for r in rooms]
+        "operator_name": rec.operator_name
     }
 
 
 @app.post("/maintenance-record/{record_id}/update")
 async def update_maintenance_record(
         record_id: int,
-        room_name: str = Form(...),
+        room_name: str = Form(""),
         record_date: date = Form(...),
         gift_name: str = Form(...),
         amount: float = Form(...),
-        payment_account: str = Form(...),
-        reason: str = Form(...),
+        payment_account: str = Form(""),
+        reason: str = Form(""),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -12376,20 +12541,13 @@ async def update_maintenance_record(
             status_code=303
         )
 
-    # 包间必须属于原门店
-    if not check_room_belongs_to_store(session, rec.store_name, room_name):
-        return RedirectResponse(
-            url=f"/maintenance-records?store={rec.store_name}&year={rec.record_date.year}&month={rec.record_date.month}&error=所选包间不属于当前门店",
-            status_code=303
-        )
-
     # 规则：不可修改门店、不可修改维护用户
-    rec.room_name = room_name
+    rec.room_name = ""
     rec.record_date = record_date
     rec.gift_name = gift_name.strip()
     rec.amount = amount
-    rec.payment_account = payment_account.strip()
-    rec.reason = reason.strip()
+    rec.payment_account = (payment_account or "").strip()
+    rec.reason = (reason or "").strip()
     rec.updated_at = datetime.now()
 
     session.add(rec)
