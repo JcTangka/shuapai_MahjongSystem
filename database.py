@@ -227,9 +227,60 @@ class CustomerStoreLink(SQLModel, table=True):
     last_visit_at_store: date = Field(default_factory=date.today)
 
 
+class ContactCustomerFollowup(SQLModel, table=True):
+    """
+    我的接触顾客跟进状态。
+    以微信号全局保存，任一店长勾选后所有店长视图共享状态。
+    """
+    __tablename__ = "contactcustomerfollowup"
+    __table_args__ = (
+        UniqueConstraint("wechat_id", name="uq_contactcustomerfollowup_wechat_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    wechat_id: str = Field(index=True)
+    has_tag: bool = Field(default=False, index=True)
+    in_group_chat: bool = Field(default=False, index=True)
+    remark_updated: bool = Field(default=False, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_by: Optional[str] = Field(default=None, index=True)
+
+
 
 
 # === 黑名单表 ===
+class NewCustomerPullRecord(SQLModel, table=True):
+    """
+    待拉新记录。
+    一条记录对应一个来源牌局里的一个“耍牌万能替身号/ShuaPai24H”占位。
+    """
+    __tablename__ = "newcustomerpullrecord"
+    __table_args__ = (
+        UniqueConstraint("source_game_id", "source_player_index", name="uq_newcustomerpullrecord_source_slot"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    source_game_id: int = Field(index=True)
+    source_player_index: int = Field(index=True)
+
+    pull_employee: str = Field(index=True)
+    store_name: str = Field(index=True)
+    order_start_time: datetime = Field(index=True)
+    room_name: Optional[str] = None
+    game_type: Optional[str] = None
+
+    customer_nickname: Optional[str] = None
+    customer_wechat_id: Optional[str] = Field(default=None, index=True)
+    has_tag: bool = Field(default=False, index=True)
+    in_group_chat: bool = Field(default=False, index=True)
+    remark_updated: bool = Field(default=False, index=True)
+    transferred_to_team: bool = Field(default=False, index=True)
+
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_by: Optional[str] = Field(default=None, index=True)
+
+
 class Blacklist(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
 
@@ -501,6 +552,26 @@ class FormedGameHandoverLink(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.now, index=True)
     # 含义：建立关联的时间
     # 用途：审计留痕；删除待办时也方便排查历史
+
+
+class PublicTrafficLead(SQLModel, table=True):
+    """
+    公域流量池线索。
+    同一微信号可来自多个端口，但同一端口下同一微信号只允许登记一次。
+    转化状态不落表，由已组齐牌局全历史实时推导。
+    """
+    __tablename__ = "publictrafficlead"
+    __table_args__ = (
+        UniqueConstraint("source_port", "wechat_id", name="uq_publictrafficlead_source_wechat"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    source_port: str = Field(index=True)
+    wechat_id: str = Field(index=True)
+
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    created_by: Optional[str] = Field(default=None, index=True)
 
 
 
@@ -1081,9 +1152,12 @@ def create_db_and_tables():
     migrate_store_room_settings_table()
     migrate_user_password_reset_fields()
     migrate_customer_store_link_table()
+    migrate_contact_customer_followup_table()
+    migrate_new_customer_pull_record_table()
     migrate_game_record_table()
     migrate_customer_play_type_stat_table()
     migrate_formed_game_handover_link_table()
+    migrate_public_traffic_lead_table()
     migrate_brand_blacklist_entry_table()
     migrate_user_table()
 
@@ -1100,6 +1174,113 @@ def create_db_and_tables():
 
 def _normalize_migration_text(value: Optional[str]) -> str:
     return (value or "").strip()
+
+def migrate_public_traffic_lead_table():
+    """
+    公域流量池线索表及查询索引。
+    create_all 可创建新表；这里补齐旧库和高频筛选/去重索引。
+    """
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS publictrafficlead (
+                id INTEGER PRIMARY KEY,
+                source_port TEXT NOT NULL,
+                wechat_id TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT,
+                CONSTRAINT uq_publictrafficlead_source_wechat UNIQUE (source_port, wechat_id)
+            )
+        """))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ix_publictrafficlead_source_wechat
+            ON publictrafficlead (source_port, wechat_id)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_publictrafficlead_created_at
+            ON publictrafficlead (created_at)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_publictrafficlead_wechat_id
+            ON publictrafficlead (wechat_id)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_publictrafficlead_source_port
+            ON publictrafficlead (source_port)
+        """))
+
+def migrate_contact_customer_followup_table():
+    """
+    我的接触顾客跟进状态表，按微信号全局共享。
+    """
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS contactcustomerfollowup (
+                id INTEGER PRIMARY KEY,
+                wechat_id TEXT NOT NULL,
+                has_tag BOOLEAN NOT NULL DEFAULT 0,
+                in_group_chat BOOLEAN NOT NULL DEFAULT 0,
+                remark_updated BOOLEAN NOT NULL DEFAULT 0,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_by TEXT,
+                CONSTRAINT uq_contactcustomerfollowup_wechat_id UNIQUE (wechat_id)
+            )
+        """))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ix_contactcustomerfollowup_wechat_id
+            ON contactcustomerfollowup (wechat_id)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_contactcustomerfollowup_updated_at
+            ON contactcustomerfollowup (updated_at)
+        """))
+
+def migrate_new_customer_pull_record_table():
+    """
+    待拉新记录表。
+    以来源牌局+玩家位去重，支持同一来源牌局多个替身号生成多条记录。
+    """
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS newcustomerpullrecord (
+                id INTEGER PRIMARY KEY,
+                source_game_id INTEGER NOT NULL,
+                source_player_index INTEGER NOT NULL,
+                pull_employee TEXT NOT NULL,
+                store_name TEXT NOT NULL,
+                order_start_time DATETIME NOT NULL,
+                room_name TEXT,
+                game_type TEXT,
+                customer_nickname TEXT,
+                customer_wechat_id TEXT,
+                has_tag BOOLEAN NOT NULL DEFAULT 0,
+                in_group_chat BOOLEAN NOT NULL DEFAULT 0,
+                remark_updated BOOLEAN NOT NULL DEFAULT 0,
+                transferred_to_team BOOLEAN NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_by TEXT,
+                CONSTRAINT uq_newcustomerpullrecord_source_slot UNIQUE (source_game_id, source_player_index)
+            )
+        """))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ix_newcustomerpullrecord_source_slot
+            ON newcustomerpullrecord (source_game_id, source_player_index)
+        """))
+        for col_name in [
+            "source_game_id",
+            "pull_employee",
+            "store_name",
+            "order_start_time",
+            "customer_wechat_id",
+            "has_tag",
+            "in_group_chat",
+            "remark_updated",
+            "transferred_to_team",
+        ]:
+            conn.execute(text(f"""
+                CREATE INDEX IF NOT EXISTS ix_newcustomerpullrecord_{col_name}
+                ON newcustomerpullrecord ({col_name})
+            """))
 
 def _migration_game_play_label(game: GameRecord) -> str:
     stakes = _normalize_migration_text(game.stakes)

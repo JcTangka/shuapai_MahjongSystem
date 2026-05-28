@@ -25,6 +25,7 @@ from database import (GameRecord,Store, Room, User,
                       ShiftSchedule, MaintenanceRecord, upsert_shift, get_month_shifts_map, get_month_date_range,
                       get_manager_performance_stats, get_shift_performance_stats,
                       HandoverTodo, HandoverTodoCustomerLink, FormedGameHandoverLink,SelfArrivalRecord,
+                      PublicTrafficLead, ContactCustomerFollowup, NewCustomerPullRecord,
                         # V3 员工管理 / 请假 / 考勤 / 工资流水 / 团队管理
                       EmployeeProfile,
                       EmployeeLeaveRequest,
@@ -2295,6 +2296,7 @@ FORMED_SOURCE_OPTIONS = {
 
 FORMED_GAMES_PAGE_SIZE = 40
 LIST_PAGE_SIZE = 40
+PUBLIC_TRAFFIC_SOURCE_PORTS = ("小红书", "抖音")
 
 OVERFLOW_PAYMENT_METHOD = "溢出收款"
 
@@ -2468,6 +2470,42 @@ def _check_brand_blacklist_for_slots(session: Session, slots: List[dict]) -> Tup
             return False, f"参与人【{display_name} / {display_wx}】已被加入品牌黑名单，原因：{reason}，无法创建/修改本牌局"
 
     return True, ""
+
+
+PLACEHOLDER_PLAYER_NAME = "耍牌万能替身号"
+PLACEHOLDER_PLAYER_WECHAT = "ShuaPai24H"
+CONFIRM_DUPLICATE_PLAYER_MESSAGE = "当前桌有两个相同参与人，请修改为耍牌万能替身号"
+
+
+def _is_pull_placeholder_player(name: Optional[str], wechat: Optional[str]) -> bool:
+    return (
+        _normalize_text(name) == PLACEHOLDER_PLAYER_NAME
+        and _normalize_text(wechat) == PLACEHOLDER_PLAYER_WECHAT
+    )
+
+
+def _has_duplicate_real_player_for_confirm(game: GameRecord) -> bool:
+    """
+    组齐前校验：
+    同一桌内存在两个及以上相同昵称+微信号的真实顾客时禁止组齐；
+    指定的万能替身号允许重复。
+    """
+    seen = set()
+    for idx in range(1, 5):
+        name = _normalize_text(getattr(game, f"player_{idx}", None))
+        wechat = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+
+        if not name or not wechat:
+            continue
+        if name == PLACEHOLDER_PLAYER_NAME and wechat == PLACEHOLDER_PLAYER_WECHAT:
+            continue
+
+        key = (name, wechat)
+        if key in seen:
+            return True
+        seen.add(key)
+
+    return False
 
 
 def _validate_players_and_customer_binding_detailed(
@@ -2673,6 +2711,118 @@ def _game_effective_order_dt(game: GameRecord) -> datetime:
         if len(st) >= 11 and "-" in st and ":" in st:
             dt_str = f"{game.record_date.year}-{st}"
             return datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+    except Exception:
+        pass
+
+    return datetime.combine(game.record_date, datetime.min.time())
+
+def _parse_order_start_dt(value: Optional[str]) -> Optional[datetime]:
+    raw = _normalize_text(value)
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def _new_customer_pull_source_label(record: NewCustomerPullRecord) -> str:
+    order_text = record.order_start_time.strftime("%Y-%m-%d %H:%M") if record.order_start_time else ""
+    room_text = _normalize_text(record.room_name) or "-"
+    game_type_text = _normalize_text(record.game_type) or "-"
+    return f"{order_text} / {room_text} / {game_type_text}"
+
+
+def _new_customer_pull_is_success(record: NewCustomerPullRecord) -> bool:
+    return bool(
+        _normalize_text(record.customer_nickname)
+        and _normalize_text(record.customer_wechat_id)
+        and record.has_tag
+        and record.in_group_chat
+        and record.remark_updated
+    )
+
+
+def _new_customer_pull_duplicate_key(
+    record: NewCustomerPullRecord,
+    nickname: Optional[str] = None,
+    wechat_id: Optional[str] = None,
+):
+    clean_nickname = _normalize_text(nickname if nickname is not None else record.customer_nickname)
+    clean_wechat = _normalize_text(wechat_id if wechat_id is not None else record.customer_wechat_id)
+    if not clean_nickname or not clean_wechat:
+        return None
+    return (clean_nickname, clean_wechat)
+
+
+def _sync_new_customer_pull_records_for_game(session: Session, game: GameRecord):
+    if not game or not game.id:
+        return
+
+    existing_rows = session.exec(
+        select(NewCustomerPullRecord).where(NewCustomerPullRecord.source_game_id == game.id)
+    ).all()
+    existing_by_slot = {row.source_player_index: row for row in existing_rows}
+
+    order_dt = _parse_order_start_dt(game.order_start_time)
+    source = _normalize_text(game.record_source) or FORMED_SOURCE_NORMAL
+    is_valid_source = (
+        _normalize_text(game.status) == "formed"
+        and source in FORMED_SOURCE_OPTIONS
+        and order_dt is not None
+    )
+
+    active_slots = set()
+    if is_valid_source:
+        for idx in range(1, 5):
+            if not _is_pull_placeholder_player(
+                getattr(game, f"player_{idx}", None),
+                getattr(game, f"player_{idx}_wechat", None),
+            ):
+                continue
+
+            active_slots.add(idx)
+            row = existing_by_slot.get(idx)
+            if not row:
+                row = NewCustomerPullRecord(
+                    source_game_id=game.id,
+                    source_player_index=idx,
+                    customer_nickname="",
+                    customer_wechat_id="",
+                    created_at=datetime.now(),
+                )
+
+            row.pull_employee = _normalize_text(game.who_did) or _normalize_text(game.updated_by) or ""
+            row.store_name = _normalize_text(game.store_name)
+            row.order_start_time = order_dt
+            row.room_name = _normalize_text(game.room_name) or None
+            row.game_type = _normalize_text(game.game_type) or None
+            row.updated_at = datetime.now()
+            session.add(row)
+
+    for row in existing_rows:
+        if row.source_player_index not in active_slots and not row.transferred_to_team:
+            session.delete(row)
+
+
+def _sync_new_customer_pull_records_for_games(session: Session, games: List[GameRecord]):
+    for game in games:
+        _sync_new_customer_pull_records_for_game(session, game)
+
+def _game_reservation_dt(game: GameRecord) -> datetime:
+    """
+    牌局预约时间：用于“我的接触顾客”的时间筛选和新老客判断。
+    不使用 order_start_time，避免已组齐后的订单开始时间改变预约口径。
+    """
+    try:
+        st = _normalize_text(game.start_time)
+        if len(st) >= 11 and "-" in st and ":" in st:
+            return datetime.strptime(f"{game.record_date.year}-{st}", "%Y-%m-%d %H:%M")
+        if ":" in st:
+            hh, mm = st.split(":", 1)
+            return datetime.combine(game.record_date, time(int(hh), int(mm[:2])))
     except Exception:
         pass
 
@@ -3013,6 +3163,79 @@ def _parse_export_date_range(
         except Exception:
             raise HTTPException(status_code=400, detail="自定义导出时间格式不正确")
 
+        if start_d > end_d:
+            start_d, end_d = end_d, start_d
+        return start_d, end_d
+
+    return today, today
+
+
+def _parse_public_traffic_date_range(
+    date_filter: str,
+    start_date: Optional[str],
+    end_date: Optional[str]
+) -> Tuple[date, date]:
+    today = date.today()
+    date_filter = date_filter or "today"
+
+    if date_filter == "today":
+        return today, today
+    if date_filter == "last2days":
+        return today - timedelta(days=1), today
+    if date_filter == "this_week":
+        return today - timedelta(days=today.weekday()), today
+    if date_filter == "this_month":
+        return today.replace(day=1), today
+    if date_filter == "last_month":
+        if today.month == 1:
+            y, m = today.year - 1, 12
+        else:
+            y, m = today.year, today.month - 1
+        return date(y, m, 1), date(y, m, calendar.monthrange(y, m)[1])
+    if date_filter == "custom":
+        try:
+            start_d = datetime.strptime((start_date or "").strip(), "%Y-%m-%d").date()
+            end_d = datetime.strptime((end_date or "").strip(), "%Y-%m-%d").date()
+        except Exception:
+            return today, today
+        if start_d > end_d:
+            start_d, end_d = end_d, start_d
+        return start_d, end_d
+
+    return today, today
+
+
+def _parse_contact_customer_date_range(
+    date_filter: str,
+    start_date: Optional[str],
+    end_date: Optional[str]
+) -> Tuple[date, date]:
+    today = date.today()
+    date_filter = date_filter or "today"
+
+    if date_filter == "today":
+        return today, today
+    if date_filter == "yesterday":
+        d = today - timedelta(days=1)
+        return d, d
+    if date_filter == "last2days":
+        return today - timedelta(days=1), today
+    if date_filter == "this_week":
+        return today - timedelta(days=today.weekday()), today
+    if date_filter == "this_month":
+        return today.replace(day=1), today
+    if date_filter == "last_month":
+        if today.month == 1:
+            y, m = today.year - 1, 12
+        else:
+            y, m = today.year, today.month - 1
+        return date(y, m, 1), date(y, m, calendar.monthrange(y, m)[1])
+    if date_filter == "custom":
+        try:
+            start_d = datetime.strptime((start_date or "").strip(), "%Y-%m-%d").date()
+            end_d = datetime.strptime((end_date or "").strip(), "%Y-%m-%d").date()
+        except Exception:
+            return today, today
         if start_d > end_d:
             start_d, end_d = end_d, start_d
         return start_d, end_d
@@ -8328,6 +8551,15 @@ async def update_game_status(
 
     # ===== 1) 组齐 =====
     if action == "confirm":
+        if _has_duplicate_real_player_for_confirm(game):
+            return RedirectResponse(
+                url="/?" + urlencode({
+                    "store": store,
+                    "error": CONFIRM_DUPLICATE_PLAYER_MESSAGE,
+                }),
+                status_code=303
+            )
+
         game.status = "formed"
 
         # V2：谁点击“组齐”，who_did 就覆盖为谁
@@ -8338,6 +8570,7 @@ async def update_game_status(
 
         session.add(game)
         session.flush()
+        _sync_new_customer_pull_records_for_game(session, game)
         sync_customer_play_type_stats_for_changed_games(session, game)
         session.commit()
         return RedirectResponse(
@@ -8358,6 +8591,7 @@ async def update_game_status(
 
         session.add(game)
         session.flush()
+        _sync_new_customer_pull_records_for_game(session, game)
         sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
         session.commit()
         return RedirectResponse(
@@ -8399,6 +8633,11 @@ async def update_game_status(
                     status_code=303
                 )
 
+        pull_rows = session.exec(
+            select(NewCustomerPullRecord).where(NewCustomerPullRecord.source_game_id == game.id)
+        ).all()
+        for row in pull_rows:
+            session.delete(row)
         session.delete(game)
         session.flush()
         sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot)
@@ -8541,6 +8780,7 @@ async def update_game(
 
     session.add(game)
     session.flush()
+    _sync_new_customer_pull_records_for_game(session, game)
     sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
     session.commit()
 
@@ -9204,6 +9444,7 @@ async def add_self_arrival_game(
         operator=user,
         old_noted_players_snapshot=[]
     )
+    _sync_new_customer_pull_records_for_game(session, new_game)
 
     duplicate_warning_message = ""
     duplicate_hit = _find_possible_duplicate_formed_game(
@@ -9538,6 +9779,7 @@ async def update_self_arrival_game(
         operator=user,
         old_noted_players_snapshot=old_noted_players_snapshot
     )
+    _sync_new_customer_pull_records_for_game(session, game)
     duplicate_warning_message = ""
     duplicate_hit = _find_possible_duplicate_formed_game(
         session=session,
@@ -9627,6 +9869,11 @@ async def delete_self_arrival_game(
             status_code=303
         )
 
+    pull_rows = session.exec(
+        select(NewCustomerPullRecord).where(NewCustomerPullRecord.source_game_id == game.id)
+    ).all()
+    for row in pull_rows:
+        session.delete(row)
     session.delete(game)
     session.commit()
 
@@ -9844,6 +10091,7 @@ async def add_overflow_game(
         operator=user,
         old_noted_players_snapshot=[]
     )
+    _sync_new_customer_pull_records_for_game(session, new_game)
     sync_customer_play_type_stats_for_changed_games(session, new_game)
 
     duplicate_warning_message = ""
@@ -10132,6 +10380,7 @@ async def update_overflow_game(
         operator=user,
         old_noted_players_snapshot=old_noted_players_snapshot
     )
+    _sync_new_customer_pull_records_for_game(session, game)
     sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
 
     duplicate_warning_message = ""
@@ -10226,6 +10475,11 @@ async def delete_overflow_game(
             status_code=303
         )
 
+    pull_rows = session.exec(
+        select(NewCustomerPullRecord).where(NewCustomerPullRecord.source_game_id == game.id)
+    ).all()
+    for row in pull_rows:
+        session.delete(row)
     session.delete(game)
     session.flush()
     sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot)
@@ -10919,6 +11173,7 @@ async def update_formed_game(
         operator=user,
         old_noted_players_snapshot=old_noted_players_snapshot
     )
+    _sync_new_customer_pull_records_for_game(session, game)
     sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
 
     duplicate_warning_message = ""
@@ -11056,12 +11311,104 @@ async def get_game_detail(
 
 
 # === 顾客管理页面接口 (GET) ===
+def _build_public_traffic_conversion_map(session: Session, wechat_ids: List[str]) -> dict:
+    """
+    批量查询一批微信号的全历史首次已组齐牌局。
+    返回：{wechat_id: {"converted": True, "first_store": "...", "first_dt": datetime}}
+    """
+    unique_ids = []
+    seen = set()
+    for wx in wechat_ids:
+        clean = _normalize_text(wx)
+        if clean and clean not in seen:
+            seen.add(clean)
+            unique_ids.append(clean)
+
+    result = {}
+    if not unique_ids:
+        return result
+
+    for start in range(0, len(unique_ids), 400):
+        chunk = unique_ids[start:start + 400]
+        games = session.exec(
+            select(GameRecord).where(
+                GameRecord.status == "formed",
+                GameRecord.record_source != "self_arrival",
+                or_(
+                    GameRecord.player_1_wechat.in_(chunk),
+                    GameRecord.player_2_wechat.in_(chunk),
+                    GameRecord.player_3_wechat.in_(chunk),
+                    GameRecord.player_4_wechat.in_(chunk),
+                )
+            )
+        ).all()
+
+        for game in games:
+            game_dt = _game_effective_order_dt(game)
+            for wx in [
+                game.player_1_wechat,
+                game.player_2_wechat,
+                game.player_3_wechat,
+                game.player_4_wechat,
+            ]:
+                clean = _normalize_text(wx)
+                if clean not in chunk:
+                    continue
+                existing = result.get(clean)
+                if not existing or game_dt < existing["first_dt"]:
+                    result[clean] = {
+                        "converted": True,
+                        "first_store": game.store_name or "",
+                        "first_dt": game_dt,
+                    }
+
+    return result
+
+
+def _customer_is_old_before_contact(
+    customer: Optional[Customer],
+    links_by_customer_id: dict,
+    contact_dt: datetime
+) -> bool:
+    if not customer:
+        return False
+
+    links = links_by_customer_id.get(customer.id, [])
+    if not links:
+        return False
+
+    contact_d = contact_dt.date()
+    for link in links:
+        link_created = getattr(link, "created_at", None)
+        if not link_created:
+            return True
+        if link_created < contact_d:
+            return True
+
+    return False
+
+
 @app.get("/customers")
 async def read_customers(
         request: Request,
         store: str = "牛王庙店",
+        tab: str = "store_customers",
         search_query: str = "",
         sort_by: str = "default",
+        public_date_filter: str = "today",
+        public_start_date: str = "",
+        public_end_date: str = "",
+        public_source_port: str = "all",
+        contact_date_filter: str = "today",
+        contact_start_date: str = "",
+        contact_end_date: str = "",
+        contact_employee: str = "all",
+        pull_date_filter: str = "today",
+        pull_start_date: str = "",
+        pull_end_date: str = "",
+        pull_employee: str = "all",
+        success: str = "",
+        error: str = "",
         list_offset: int = 0,
         list_limit: int = LIST_PAGE_SIZE,
         session: Session = Depends(get_session),
@@ -11078,11 +11425,335 @@ async def read_customers(
         store = store_list[0]
 
     keyword = (search_query or "").strip()
+    tab = tab if tab in {
+        "store_customers",
+        "public_traffic",
+        "contact_customers",
+        "my_new_customer_pull",
+        "team_new_customer_pull",
+    } else "store_customers"
     sort_by = sort_by if sort_by in {"default", "last_visit_desc", "store_visit_count_desc"} else "default"
     list_offset = max(0, int(list_offset or 0))
     list_limit = min(max(1, int(list_limit or LIST_PAGE_SIZE)), 1000)
 
+    common_context = {
+        "request": request,
+        "page_name": "customers",
+        "tab": tab,
+        "current_store": store,
+        "store_list": store_list,
+        "current_user": user,
+        "success": success,
+        "error": error,
+        "source_ports": PUBLIC_TRAFFIC_SOURCE_PORTS,
+    }
+
+    if tab == "public_traffic":
+        public_date_filter = public_date_filter if public_date_filter in {
+            "today", "last2days", "this_week", "this_month", "last_month", "custom"
+        } else "today"
+        public_source_port = (
+            public_source_port
+            if public_source_port in {"all", *PUBLIC_TRAFFIC_SOURCE_PORTS}
+            else "all"
+        )
+        range_start, range_end = _parse_public_traffic_date_range(
+            public_date_filter,
+            public_start_date,
+            public_end_date
+        )
+        start_dt = datetime.combine(range_start, time.min)
+        end_dt_exclusive = datetime.combine(range_end + timedelta(days=1), time.min)
+
+        lead_filters = [
+            PublicTrafficLead.created_at >= start_dt,
+            PublicTrafficLead.created_at < end_dt_exclusive,
+        ]
+        if public_source_port != "all":
+            lead_filters.append(PublicTrafficLead.source_port == public_source_port)
+
+        lead_stmt = (
+            select(PublicTrafficLead)
+            .where(*lead_filters)
+            .order_by(PublicTrafficLead.created_at.desc(), PublicTrafficLead.id.desc())
+        )
+        all_leads = session.exec(lead_stmt).all()
+        conversion_map = _build_public_traffic_conversion_map(
+            session,
+            [lead.wechat_id for lead in all_leads]
+        )
+
+        unique_public_wechat_ids = {
+            _normalize_text(lead.wechat_id)
+            for lead in all_leads
+            if _normalize_text(lead.wechat_id)
+        }
+        total_public_lead_count = len(unique_public_wechat_ids)
+        converted_public_lead_count = len([
+            wx for wx in unique_public_wechat_ids if wx in conversion_map
+        ])
+        conversion_rate = (
+            round(converted_public_lead_count * 100 / total_public_lead_count, 2)
+            if total_public_lead_count else 0
+        )
+
+        page_leads = all_leads[list_offset:list_offset + list_limit]
+        public_lead_list = []
+        for lead in page_leads:
+            conversion = conversion_map.get(_normalize_text(lead.wechat_id))
+            public_lead_list.append({
+                "id": lead.id,
+                "created_at": lead.created_at.strftime("%Y-%m-%d") if lead.created_at else "",
+                "source_port": lead.source_port,
+                "wechat_id": lead.wechat_id,
+                "is_converted": bool(conversion),
+                "first_store": conversion["first_store"] if conversion else "",
+            })
+
+        return templates.TemplateResponse("customers.html", {
+            **common_context,
+            "public_date_filter": public_date_filter,
+            "public_source_port": public_source_port,
+            "public_start_date": range_start.strftime("%Y-%m-%d"),
+            "public_end_date": range_end.strftime("%Y-%m-%d"),
+            "public_lead_list": public_lead_list,
+            "total_public_lead_count": total_public_lead_count,
+            "converted_public_lead_count": converted_public_lead_count,
+            "public_conversion_rate": conversion_rate,
+            "public_loaded_count": list_offset + len(public_lead_list),
+            "public_total_record_count": len(all_leads),
+            "public_has_more": (list_offset + len(public_lead_list)) < len(all_leads),
+            "list_offset": list_offset,
+            "list_page_size": LIST_PAGE_SIZE,
+        })
+
+    if tab == "contact_customers":
+        contact_date_filter = contact_date_filter if contact_date_filter in {
+            "today", "yesterday", "last2days", "this_week", "this_month", "last_month", "custom"
+        } else "today"
+        range_start, range_end = _parse_contact_customer_date_range(
+            contact_date_filter,
+            contact_start_date,
+            contact_end_date
+        )
+        employee_names = sorted([
+            _normalize_text(u.display_name)
+            for u in session.exec(select(User).order_by(User.display_name)).all()
+            if _normalize_text(u.display_name)
+        ])
+        if user.role != "admin":
+            contact_employee = _normalize_text(user.display_name)
+        else:
+            contact_employee = _normalize_text(contact_employee) or "all"
+            if contact_employee != "all" and contact_employee not in employee_names:
+                contact_employee = "all"
+
+        games = session.exec(
+            select(GameRecord).where(
+                GameRecord.record_source != FORMED_SOURCE_SELF_ARRIVAL,
+                GameRecord.status.in_(["unformed", "formed"]),
+                GameRecord.record_date >= range_start,
+                GameRecord.record_date <= range_end,
+            )
+        ).all()
+
+        contact_map = {}
+        for game in games:
+            employee_name = _normalize_text(game.who_did)
+            if not employee_name:
+                continue
+            if contact_employee != "all" and employee_name != contact_employee:
+                continue
+
+            reservation_dt = _game_reservation_dt(game)
+            if reservation_dt.date() < range_start or reservation_dt.date() > range_end:
+                continue
+
+            for idx in range(1, 5):
+                nickname = _normalize_text(getattr(game, f"player_{idx}", None))
+                wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+                if not nickname or not wechat_id:
+                    continue
+                if nickname == PLACEHOLDER_PLAYER_NAME and wechat_id == PLACEHOLDER_PLAYER_WECHAT:
+                    continue
+
+                key = (employee_name, wechat_id)
+                existing = contact_map.get(key)
+                if not existing or reservation_dt < existing["first_contact_dt"]:
+                    contact_map[key] = {
+                        "employee_name": employee_name,
+                        "nickname": nickname,
+                        "wechat_id": wechat_id,
+                        "first_contact_dt": reservation_dt,
+                    }
+
+        contact_items = sorted(
+            contact_map.values(),
+            key=lambda item: (item["employee_name"], item["first_contact_dt"], item["wechat_id"])
+        )
+        contact_wechat_ids = sorted({item["wechat_id"] for item in contact_items})
+
+        customers_by_wechat = {}
+        links_by_customer_id = {}
+        followup_by_wechat = {}
+        if contact_wechat_ids:
+            customers = session.exec(
+                select(Customer).where(Customer.wechat_id.in_(contact_wechat_ids))
+            ).all()
+            customers_by_wechat = {c.wechat_id: c for c in customers}
+            customer_ids = [c.id for c in customers if c.id is not None]
+            if customer_ids:
+                links = session.exec(
+                    select(CustomerStoreLink).where(CustomerStoreLink.customer_id.in_(customer_ids))
+                ).all()
+                for link in links:
+                    links_by_customer_id.setdefault(link.customer_id, []).append(link)
+
+            followups = session.exec(
+                select(ContactCustomerFollowup).where(ContactCustomerFollowup.wechat_id.in_(contact_wechat_ids))
+            ).all()
+            followup_by_wechat = {f.wechat_id: f for f in followups}
+
+        full_contact_customer_list = []
+        new_contact_count = 0
+        for item in contact_items:
+            customer = customers_by_wechat.get(item["wechat_id"])
+            is_old = _customer_is_old_before_contact(
+                customer,
+                links_by_customer_id,
+                item["first_contact_dt"]
+            )
+            if not is_old:
+                new_contact_count += 1
+
+            followup = followup_by_wechat.get(item["wechat_id"])
+            full_contact_customer_list.append({
+                "employee_name": item["employee_name"],
+                "nickname": item["nickname"],
+                "wechat_id": item["wechat_id"],
+                "is_new": not is_old,
+                "has_tag": bool(followup.has_tag) if followup else False,
+                "in_group_chat": bool(followup.in_group_chat) if followup else False,
+                "remark_updated": bool(followup.remark_updated) if followup else False,
+            })
+
+        full_contact_customer_list.sort(key=lambda item: 0 if item["is_new"] else 1)
+        contact_customer_list = full_contact_customer_list[list_offset:list_offset + list_limit]
+
+        return templates.TemplateResponse("customers.html", {
+            **common_context,
+            "contact_date_filter": contact_date_filter,
+            "contact_start_date": range_start.strftime("%Y-%m-%d"),
+            "contact_end_date": range_end.strftime("%Y-%m-%d"),
+            "contact_employee": contact_employee,
+            "employee_names": employee_names,
+            "contact_customer_list": contact_customer_list,
+            "contact_customer_count": len(full_contact_customer_list),
+            "contact_new_customer_count": new_contact_count,
+            "contact_loaded_count": list_offset + len(contact_customer_list),
+            "contact_has_more": (list_offset + len(contact_customer_list)) < len(full_contact_customer_list),
+            "list_offset": list_offset,
+            "list_page_size": LIST_PAGE_SIZE,
+        })
+
     # 2. 先按关键词查顾客
+    if tab in {"my_new_customer_pull", "team_new_customer_pull"}:
+        pull_date_filter = pull_date_filter if pull_date_filter in {
+            "today", "yesterday", "last2days", "this_week", "this_month", "last_month", "custom"
+        } else "today"
+        range_start, range_end = _parse_contact_customer_date_range(
+            pull_date_filter,
+            pull_start_date,
+            pull_end_date
+        )
+        start_dt = datetime.combine(range_start, time.min)
+        end_dt_exclusive = datetime.combine(range_end + timedelta(days=1), time.min)
+
+        employee_names = sorted([
+            _normalize_text(u.display_name)
+            for u in session.exec(select(User).order_by(User.display_name)).all()
+            if _normalize_text(u.display_name)
+        ])
+        if tab == "my_new_customer_pull":
+            if user.role != "admin":
+                pull_employee = _normalize_text(user.display_name)
+            else:
+                pull_employee = _normalize_text(pull_employee) or "all"
+                if pull_employee != "all" and pull_employee not in employee_names:
+                    pull_employee = "all"
+        else:
+            pull_employee = "all"
+
+        candidate_games = session.exec(
+            select(GameRecord).where(
+                GameRecord.status == "formed",
+                GameRecord.order_start_time.is_not(None),
+            )
+        ).all()
+        sync_games = []
+        for game in candidate_games:
+            order_dt = _parse_order_start_dt(game.order_start_time)
+            if order_dt and start_dt <= order_dt < end_dt_exclusive:
+                sync_games.append(game)
+        _sync_new_customer_pull_records_for_games(session, sync_games)
+        if sync_games:
+            session.commit()
+
+        stmt = select(NewCustomerPullRecord).where(
+            NewCustomerPullRecord.order_start_time >= start_dt,
+            NewCustomerPullRecord.order_start_time < end_dt_exclusive,
+            NewCustomerPullRecord.transferred_to_team == (tab == "team_new_customer_pull"),
+        )
+        if tab == "my_new_customer_pull" and pull_employee != "all":
+            stmt = stmt.where(NewCustomerPullRecord.pull_employee == pull_employee)
+
+        pull_records = session.exec(stmt).all()
+        pull_records.sort(key=lambda row: (
+            1 if _new_customer_pull_is_success(row) else 0,
+            -int(row.order_start_time.timestamp()) if row.order_start_time else 0,
+            row.id or 0,
+        ))
+
+        pending_count = len([
+            row for row in pull_records
+            if not _new_customer_pull_is_success(row)
+        ])
+        success_count = len(pull_records) - pending_count
+
+        page_records = pull_records[list_offset:list_offset + list_limit]
+        pull_record_list = []
+        for row in page_records:
+            is_success = _new_customer_pull_is_success(row)
+            pull_record_list.append({
+                "id": row.id,
+                "pull_employee": row.pull_employee,
+                "store_name": row.store_name,
+                "source_label": _new_customer_pull_source_label(row),
+                "customer_nickname": row.customer_nickname or "",
+                "customer_wechat_id": row.customer_wechat_id or "",
+                "has_tag": bool(row.has_tag),
+                "in_group_chat": bool(row.in_group_chat),
+                "remark_updated": bool(row.remark_updated),
+                "status_text": "成功" if is_success else "待拉新",
+            })
+
+        return templates.TemplateResponse("customers.html", {
+            **common_context,
+            "pull_date_filter": pull_date_filter,
+            "pull_start_date": range_start.strftime("%Y-%m-%d"),
+            "pull_end_date": range_end.strftime("%Y-%m-%d"),
+            "pull_employee": pull_employee,
+            "employee_names": employee_names,
+            "pull_record_list": pull_record_list,
+            "pull_pending_count": pending_count,
+            "pull_success_count": success_count,
+            "pull_loaded_count": list_offset + len(pull_record_list),
+            "pull_total_count": len(pull_records),
+            "pull_has_more": (list_offset + len(pull_record_list)) < len(pull_records),
+            "list_offset": list_offset,
+            "list_page_size": LIST_PAGE_SIZE,
+        })
+
     query = select(Customer)
     if keyword:
         query = query.where(or_(
@@ -11196,10 +11867,7 @@ async def read_customers(
         ])
 
     return templates.TemplateResponse("customers.html", {
-        "request": request,
-        "page_name": "customers",
-        "current_store": store,
-        "store_list": store_list,
+        **common_context,
         "customer_list": page_customer_list,
         "search_query": search_query,
         "sort_by": sort_by,
@@ -11208,11 +11876,95 @@ async def read_customers(
         "total_customer_count": total_customer_count,
         "loaded_customer_count": list_offset + len(page_customer_list),
         "has_more_customers": (list_offset + len(page_customer_list)) < total_customer_count,
-        "current_user": user
     })
 
 
 # === 新增顾客接口 (POST) ===
+def _build_customers_url(store: str, success: str = "", error: str = "") -> str:
+    params = {
+        "store": store or "牛王庙店",
+        "tab": "store_customers",
+    }
+    if success:
+        params["success"] = success
+    if error:
+        params["error"] = error
+    return "/customers?" + urlencode(params)
+
+
+def _build_public_traffic_url(
+    store: str,
+    date_filter: str = "today",
+    start_date: str = "",
+    end_date: str = "",
+    source_port: str = "all",
+    success: str = "",
+    error: str = "",
+) -> str:
+    params = {
+        "store": store or "牛王庙店",
+        "tab": "public_traffic",
+        "public_date_filter": date_filter or "today",
+        "public_start_date": start_date or "",
+        "public_end_date": end_date or "",
+        "public_source_port": source_port or "all",
+    }
+    if success:
+        params["success"] = success
+    if error:
+        params["error"] = error
+    return "/customers?" + urlencode(params)
+
+
+def _build_contact_customers_url(
+    store: str,
+    date_filter: str = "today",
+    start_date: str = "",
+    end_date: str = "",
+    employee: str = "all",
+    success: str = "",
+    error: str = "",
+) -> str:
+    params = {
+        "store": store or "牛王庙店",
+        "tab": "contact_customers",
+        "contact_date_filter": date_filter or "today",
+        "contact_start_date": start_date or "",
+        "contact_end_date": end_date or "",
+        "contact_employee": employee or "all",
+    }
+    if success:
+        params["success"] = success
+    if error:
+        params["error"] = error
+    return "/customers?" + urlencode(params)
+
+
+def _build_new_customer_pull_url(
+    store: str,
+    tab: str = "my_new_customer_pull",
+    date_filter: str = "today",
+    start_date: str = "",
+    end_date: str = "",
+    employee: str = "all",
+    success: str = "",
+    error: str = "",
+) -> str:
+    params = {
+        "store": store or "牛王庙店",
+        "tab": tab if tab in {"my_new_customer_pull", "team_new_customer_pull"} else "my_new_customer_pull",
+        "pull_date_filter": date_filter or "today",
+        "pull_start_date": start_date or "",
+        "pull_end_date": end_date or "",
+        "pull_employee": employee or "all",
+    }
+    if success:
+        params["success"] = success
+    if error:
+        params["error"] = error
+    return "/customers?" + urlencode(params)
+
+
 @app.post("/add-customer")
 async def add_customer(
         nickname: str = Form(...),
@@ -11234,7 +11986,7 @@ async def add_customer(
 
     if existing_cust:
         return RedirectResponse(
-            url=f"/customers?store={store_name}&error=该微信号已存在",
+            url=_build_customers_url(store_name, error="该微信号已存在"),
             status_code=303
         )
 
@@ -11264,11 +12016,292 @@ async def add_customer(
     session.add(new_link)
     session.commit()
 
-    return RedirectResponse(url=f"/customers?store={store_name}", status_code=303)
+    return RedirectResponse(url=_build_customers_url(store_name), status_code=303)
+
+
+@app.post("/public-traffic-leads/add")
+async def add_public_traffic_lead(
+        source_port: str = Form(...),
+        wechat_id: str = Form(...),
+        store: str = Form("牛王庙店"),
+        public_date_filter: str = Form("today"),
+        public_start_date: str = Form(""),
+        public_end_date: str = Form(""),
+        public_source_port: str = Form("all"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    source_port = _normalize_text(source_port)
+    wechat_id = _normalize_text(wechat_id)
+
+    if source_port not in PUBLIC_TRAFFIC_SOURCE_PORTS:
+        return RedirectResponse(
+            url=_build_public_traffic_url(
+                store,
+                public_date_filter,
+                public_start_date,
+                public_end_date,
+                public_source_port,
+                error="引流端口不合法"
+            ),
+            status_code=303
+        )
+
+    if not wechat_id:
+        return RedirectResponse(
+            url=_build_public_traffic_url(
+                store,
+                public_date_filter,
+                public_start_date,
+                public_end_date,
+                public_source_port,
+                error="微信号不能为空"
+            ),
+            status_code=303
+        )
+
+    existing = session.exec(
+        select(PublicTrafficLead).where(
+            PublicTrafficLead.source_port == source_port,
+            PublicTrafficLead.wechat_id == wechat_id
+        )
+    ).first()
+    if existing:
+        return RedirectResponse(
+            url=_build_public_traffic_url(
+                store,
+                public_date_filter,
+                public_start_date,
+                public_end_date,
+                public_source_port,
+                error="该端口，该微信号顾客已登记过，请勿重复登记"
+            ),
+            status_code=303
+        )
+
+    session.add(PublicTrafficLead(
+        source_port=source_port,
+        wechat_id=wechat_id,
+        created_at=datetime.now(),
+        created_by=user.display_name
+    ))
+    session.commit()
+
+    return RedirectResponse(
+        url=_build_public_traffic_url(
+            store,
+            public_date_filter,
+            public_start_date,
+            public_end_date,
+            public_source_port,
+            success="公域流量顾客登记成功"
+        ),
+        status_code=303
+    )
+
+
+@app.post("/contact-customers/followup/save")
+async def save_contact_customer_followup(
+        request: Request,
+        store: str = Form("牛王庙店"),
+        contact_date_filter: str = Form("today"),
+        contact_start_date: str = Form(""),
+        contact_end_date: str = Form(""),
+        contact_employee: str = Form("all"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    form = await request.form()
+    wechat_ids = form.getlist("wechat_id")
+    now = datetime.now()
+
+    for idx, raw_wechat in enumerate(wechat_ids):
+        wechat_id = _normalize_text(raw_wechat)
+        if not wechat_id:
+            continue
+
+        followup = session.exec(
+            select(ContactCustomerFollowup).where(ContactCustomerFollowup.wechat_id == wechat_id)
+        ).first()
+        if not followup:
+            followup = ContactCustomerFollowup(wechat_id=wechat_id)
+
+        followup.has_tag = form.get(f"has_tag_{idx}") == "1"
+        followup.in_group_chat = form.get(f"in_group_chat_{idx}") == "1"
+        followup.remark_updated = form.get(f"remark_updated_{idx}") == "1"
+        followup.updated_at = now
+        followup.updated_by = user.display_name
+        session.add(followup)
+
+    session.commit()
+
+    return RedirectResponse(
+        url=_build_contact_customers_url(
+            store,
+            contact_date_filter,
+            contact_start_date,
+            contact_end_date,
+            contact_employee if user.role == "admin" else _normalize_text(user.display_name),
+            success="接触顾客跟进状态已保存"
+        ),
+        status_code=303
+    )
 
 
 
 # === 获取顾客详情 ===
+@app.post("/new-customer-pull/save")
+async def save_new_customer_pull_records(
+        request: Request,
+        store: str = Form("牛王庙店"),
+        source_tab: str = Form("my_new_customer_pull"),
+        pull_date_filter: str = Form("today"),
+        pull_start_date: str = Form(""),
+        pull_end_date: str = Form(""),
+        pull_employee: str = Form("all"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    source_tab = source_tab if source_tab in {"my_new_customer_pull", "team_new_customer_pull"} else "my_new_customer_pull"
+    form = await request.form()
+    record_ids = []
+    for raw_id in form.getlist("record_id"):
+        try:
+            record_ids.append(int(raw_id))
+        except Exception:
+            continue
+
+    duplicate_stmt = select(NewCustomerPullRecord)
+    seen_pull_keys = {}
+    for row in session.exec(duplicate_stmt).all():
+        posted_nickname = form.get(f"customer_nickname_{row.id}") if row.id in record_ids else None
+        posted_wechat = form.get(f"customer_wechat_id_{row.id}") if row.id in record_ids else None
+        dup_key = _new_customer_pull_duplicate_key(row, posted_nickname, posted_wechat)
+        if not dup_key:
+            continue
+        if dup_key in seen_pull_keys:
+            return RedirectResponse(
+                url=_build_new_customer_pull_url(
+                    store,
+                    source_tab,
+                    pull_date_filter,
+                    pull_start_date,
+                    pull_end_date,
+                    pull_employee if user.role == "admin" else _normalize_text(user.display_name),
+                    error="存在重复拉新：用户昵称、用户微信号相同，请检查后再保存"
+                ),
+                status_code=303
+            )
+        seen_pull_keys[dup_key] = row.id
+
+    now = datetime.now()
+    for record_id in record_ids:
+        row = session.get(NewCustomerPullRecord, record_id)
+        if not row:
+            continue
+        if source_tab == "my_new_customer_pull" and user.role != "admin" and row.pull_employee != user.display_name:
+            continue
+        if source_tab == "my_new_customer_pull" and row.transferred_to_team:
+            continue
+        if source_tab == "team_new_customer_pull" and not row.transferred_to_team:
+            continue
+
+        row.customer_nickname = _normalize_text(form.get(f"customer_nickname_{record_id}")) or ""
+        row.customer_wechat_id = _normalize_text(form.get(f"customer_wechat_id_{record_id}")) or ""
+        row.has_tag = form.get(f"has_tag_{record_id}") == "1"
+        row.in_group_chat = form.get(f"in_group_chat_{record_id}") == "1"
+        row.remark_updated = form.get(f"remark_updated_{record_id}") == "1"
+        row.updated_at = now
+        row.updated_by = user.display_name
+        session.add(row)
+
+    session.commit()
+    return RedirectResponse(
+        url=_build_new_customer_pull_url(
+            store,
+            source_tab,
+            pull_date_filter,
+            pull_start_date,
+            pull_end_date,
+            pull_employee if user.role == "admin" else _normalize_text(user.display_name),
+            success="待拉新记录已保存"
+        ),
+        status_code=303
+    )
+
+
+@app.post("/new-customer-pull/transfer/{record_id}")
+async def transfer_new_customer_pull_record(
+        record_id: int,
+        store: str = Form("牛王庙店"),
+        pull_date_filter: str = Form("today"),
+        pull_start_date: str = Form(""),
+        pull_end_date: str = Form(""),
+        pull_employee: str = Form("all"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    row = session.get(NewCustomerPullRecord, record_id)
+    if not row:
+        return RedirectResponse(
+            url=_build_new_customer_pull_url(
+                store,
+                "my_new_customer_pull",
+                pull_date_filter,
+                pull_start_date,
+                pull_end_date,
+                pull_employee,
+                error="待拉新记录不存在"
+            ),
+            status_code=303
+        )
+
+    if user.role != "admin" and row.pull_employee != user.display_name:
+        return RedirectResponse(
+            url=_build_new_customer_pull_url(
+                store,
+                "my_new_customer_pull",
+                pull_date_filter,
+                pull_start_date,
+                pull_end_date,
+                pull_employee,
+                error="无权转入该记录"
+            ),
+            status_code=303
+        )
+
+    row.transferred_to_team = True
+    row.updated_at = datetime.now()
+    row.updated_by = user.display_name
+    session.add(row)
+    session.commit()
+
+    return RedirectResponse(
+        url=_build_new_customer_pull_url(
+            store,
+            "my_new_customer_pull",
+            pull_date_filter,
+            pull_start_date,
+            pull_end_date,
+            pull_employee if user.role == "admin" else _normalize_text(user.display_name),
+            success="已转入团队待拉新"
+        ),
+        status_code=303
+    )
+
+
 @app.get("/customer/{customer_id}")
 async def get_customer_details(
         customer_id: int,
@@ -11407,14 +12440,14 @@ async def add_customer_store_link(
     store_name = (store_name or "").strip()
     if not store_name:
         return RedirectResponse(
-            url=f"/customers?store={current_store or '牛王庙店'}&error=门店不能为空",
+            url=_build_customers_url(current_store or "牛王庙店", error="门店不能为空"),
             status_code=303
         )
 
     active_store_names = get_active_store_name_list(session)
     if store_name not in active_store_names:
         return RedirectResponse(
-            url=f"/customers?store={current_store or '牛王庙店'}&error=所选门店不存在或未启用",
+            url=_build_customers_url(current_store or "牛王庙店", error="所选门店不存在或未启用"),
             status_code=303
         )
 
@@ -11427,7 +12460,7 @@ async def add_customer_store_link(
 
     if exists:
         return RedirectResponse(
-            url=f"/customers?store={current_store or store_name}&error=该顾客已绑定此门店",
+            url=_build_customers_url(current_store or store_name, error="该顾客已绑定此门店"),
             status_code=303
         )
 
@@ -11441,7 +12474,7 @@ async def add_customer_store_link(
     session.commit()
 
     return RedirectResponse(
-        url=f"/customers?store={current_store or store_name}&success=顾客门店绑定新增成功",
+        url=_build_customers_url(current_store or store_name, success="顾客门店绑定新增成功"),
         status_code=303
     )
 
@@ -11470,14 +12503,14 @@ async def update_customer_store_link(
     new_store_name = (new_store_name or "").strip()
     if not new_store_name:
         return RedirectResponse(
-            url=f"/customers?store={current_store or '牛王庙店'}&error=新门店不能为空",
+            url=_build_customers_url(current_store or "牛王庙店", error="新门店不能为空"),
             status_code=303
         )
 
     active_store_names = get_active_store_name_list(session)
     if new_store_name not in active_store_names:
         return RedirectResponse(
-            url=f"/customers?store={current_store or '牛王庙店'}&error=目标门店不存在或未启用",
+            url=_build_customers_url(current_store or "牛王庙店", error="目标门店不存在或未启用"),
             status_code=303
         )
 
@@ -11492,7 +12525,7 @@ async def update_customer_store_link(
 
     if duplicate:
         return RedirectResponse(
-            url=f"/customers?store={current_store or new_store_name}&error=该顾客已绑定目标门店，不能重复修改",
+            url=_build_customers_url(current_store or new_store_name, error="该顾客已绑定目标门店，不能重复修改"),
             status_code=303
         )
 
@@ -11501,7 +12534,7 @@ async def update_customer_store_link(
     session.commit()
 
     return RedirectResponse(
-        url=f"/customers?store={current_store or new_store_name}&success=顾客门店绑定修改成功",
+        url=_build_customers_url(current_store or new_store_name, success="顾客门店绑定修改成功"),
         status_code=303
     )
 
@@ -11532,7 +12565,7 @@ async def delete_customer_store_link(
 
     if len(all_links) <= 1:
         return RedirectResponse(
-            url=f"/customers?store={current_store or link.store_name}&error=该顾客至少要保留一个绑定门店，不能撤销最后一个",
+            url=_build_customers_url(current_store or link.store_name, error="该顾客至少要保留一个绑定门店，不能撤销最后一个"),
             status_code=303
         )
 
@@ -11540,7 +12573,7 @@ async def delete_customer_store_link(
     session.commit()
 
     return RedirectResponse(
-        url=f"/customers?store={current_store or link.store_name}&success=顾客门店绑定已撤销",
+        url=_build_customers_url(current_store or link.store_name, success="顾客门店绑定已撤销"),
         status_code=303
     )
 
@@ -11565,7 +12598,7 @@ async def update_customer(
 
     session.add(cust)
     session.commit()
-    return RedirectResponse(url=f"/customers?store={store_name}", status_code=303)
+    return RedirectResponse(url=_build_customers_url(store_name), status_code=303)
 
 
 # === 添加黑名单接口 (POST) ===

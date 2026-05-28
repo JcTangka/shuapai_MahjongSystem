@@ -3,10 +3,158 @@
 {% block title %}顾客管理 - 耍牌系统{% endblock %}
 
 {% block breadcrumb %}
-<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 顾客管理
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 顾客管理 <span class="mx-2">/</span> {% if tab == 'public_traffic' %}公域流量池{% elif tab == 'contact_customers' %}我的接触顾客{% elif tab == 'my_new_customer_pull' %}我的待拉新{% elif tab == 'team_new_customer_pull' %}团队待拉新{% else %}门店顾客{% endif %}
 {% endblock %}
 
 {% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+    <div class="d-flex align-items-center gap-3">
+        <div class="rounded-3 bg-primary bg-opacity-10 text-primary d-flex align-items-center justify-content-center"
+             style="width: 48px; height: 48px;">
+            <i class="bi bi-people fs-4"></i>
+        </div>
+        <div>
+            <div class="h4 mb-1 fw-bold">顾客管理</div>
+            <div class="text-secondary">
+                {% if tab == 'public_traffic' %}
+                    记录公域端口引流顾客，并按全历史已组齐牌局自动识别转化。
+                {% elif tab == 'contact_customers' %}
+                    按接待店长统计周期内接触过的顾客，并维护标签、群聊和备注跟进状态。
+                {% elif tab == 'my_new_customer_pull' %}
+                    个人查看目前耍牌万能替身号占位符，并跟进实际拉新。
+                {% elif tab == 'team_new_customer_pull' %}
+                    团队查看目前耍牌万能替身号占位符，并跟进实际拉新。
+                {% else %}
+                    维护各门店顾客资料、门店绑定、押金和同场记录。
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    {% if tab == 'public_traffic' %}
+    <button class="btn btn-primary text-white rounded-pill px-4" data-bs-toggle="modal" data-bs-target="#addPublicTrafficLeadModal">
+        <i class="bi bi-person-plus-fill me-1"></i>登记公域流量顾客
+    </button>
+    {% elif tab in ['contact_customers', 'my_new_customer_pull', 'team_new_customer_pull'] %}
+    {% else %}
+    <button class="btn btn-primary text-white rounded-pill px-4" data-bs-toggle="modal" data-bs-target="#addCustomerModal">
+        <i class="bi bi-person-plus-fill me-1"></i>新增顾客
+    </button>
+    {% endif %}
+</div>
+
+{% if success %}
+<div class="alert alert-success alert-dismissible fade show rounded-4 shadow-sm border-0 mb-4" role="alert">
+    <i class="bi bi-check-circle-fill me-2"></i>{{ success }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+
+{% if tab in ['my_new_customer_pull', 'team_new_customer_pull'] %}
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body">
+        <form method="get" action="/customers" class="row g-3 align-items-end">
+            <input type="hidden" name="store" value="{{ current_store }}">
+            <input type="hidden" name="tab" value="{{ tab }}">
+            <div class="col-lg-2 col-md-6">
+                <label class="form-label fw-bold text-secondary">日期范围</label>
+                <select class="form-select" name="pull_date_filter" id="pullDateFilter" onchange="togglePullCustomDateRange()">
+                    <option value="today" {% if pull_date_filter == 'today' %}selected{% endif %}>今天</option>
+                    <option value="yesterday" {% if pull_date_filter == 'yesterday' %}selected{% endif %}>昨天</option>
+                    <option value="last2days" {% if pull_date_filter == 'last2days' %}selected{% endif %}>近两日</option>
+                    <option value="this_week" {% if pull_date_filter == 'this_week' %}selected{% endif %}>本周</option>
+                    <option value="this_month" {% if pull_date_filter == 'this_month' %}selected{% endif %}>本月</option>
+                    <option value="last_month" {% if pull_date_filter == 'last_month' %}selected{% endif %}>上月</option>
+                    <option value="custom" {% if pull_date_filter == 'custom' %}selected{% endif %}>自定义</option>
+                </select>
+            </div>
+            <div class="col-lg-3 col-md-6 pull-custom-date d-none">
+                <label class="form-label fw-bold text-secondary">开始日期</label>
+                <input type="date" class="form-control" name="pull_start_date" value="{{ pull_start_date or '' }}">
+            </div>
+            <div class="col-lg-3 col-md-6 pull-custom-date d-none">
+                <label class="form-label fw-bold text-secondary">结束日期</label>
+                <input type="date" class="form-control" name="pull_end_date" value="{{ pull_end_date or '' }}">
+            </div>
+            {% if tab == 'my_new_customer_pull' and current_user.role == 'admin' %}
+            <div class="col-lg-3 col-md-6">
+                <label class="form-label fw-bold text-secondary">拉新店长</label>
+                <select class="form-select" name="pull_employee">
+                    <option value="all" {% if pull_employee == 'all' %}selected{% endif %}>全部店长</option>
+                    {% for employee_name in employee_names %}
+                    <option value="{{ employee_name }}" {% if pull_employee == employee_name %}selected{% endif %}>{{ employee_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endif %}
+            <div class="col-lg-3 col-md-6">
+                <button type="submit" class="btn btn-primary rounded-pill px-4 me-2"><i class="bi bi-search me-1"></i>查询</button>
+                <a href="/customers?store={{ current_store }}&tab={{ tab }}" class="btn btn-outline-secondary rounded-pill px-4"><i class="bi bi-arrow-clockwise me-1"></i>重置</a>
+            </div>
+        </form>
+    </div>
+</div>
+<div class="row g-3 mb-4">
+    <div class="col-md-6"><div class="card border-0 shadow-sm h-100"><div class="card-body"><div class="text-secondary small mb-1">待拉新数量</div><div class="h3 fw-bold mb-0">{{ pull_pending_count or 0 }}</div></div></div></div>
+    <div class="col-md-6"><div class="card border-0 shadow-sm h-100"><div class="card-body"><div class="text-secondary small mb-1">已拉新数量</div><div class="h3 fw-bold text-success mb-0">{{ pull_success_count or 0 }}</div></div></div></div>
+</div>
+<form action="/new-customer-pull/save" method="post" id="newCustomerPullForm">
+    <input type="hidden" name="store" value="{{ current_store }}">
+    <input type="hidden" name="source_tab" value="{{ tab }}">
+    <input type="hidden" name="pull_date_filter" value="{{ pull_date_filter or 'today' }}">
+    <input type="hidden" name="pull_start_date" value="{{ pull_start_date or '' }}">
+    <input type="hidden" name="pull_end_date" value="{{ pull_end_date or '' }}">
+    <input type="hidden" name="pull_employee" value="{{ pull_employee or 'all' }}">
+    {% if pull_record_list %}
+    <div class="text-end mb-3"><button type="submit" class="btn btn-primary rounded-pill px-4"><i class="bi bi-save me-1"></i>批量保存</button></div>
+    {% endif %}
+    <div class="card border-0 shadow-sm"><div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light"><tr>
+                <th>序号</th><th>拉新店长</th><th>门店</th><th>来源牌局</th><th style="min-width: 140px;">用户昵称</th><th style="min-width: 160px;">用户微信号</th><th>是否添加标签</th><th>是否拉群</th><th>是否修改备注</th><th>是否拉新成功</th>{% if tab == 'my_new_customer_pull' %}<th>是否转入团队待拉新</th>{% endif %}
+            </tr></thead>
+            <tbody>
+            {% for item in pull_record_list %}
+                <tr id="pull-record-row-{{ item.id }}">
+                    <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
+                    <td>{{ item.pull_employee }}</td>
+                    <td>{{ item.store_name }}</td>
+                    <td class="small text-muted">{{ item.source_label }}</td>
+                    <td><input type="hidden" name="record_id" value="{{ item.id }}"><input type="text" class="form-control form-control-sm pull-status-text" name="customer_nickname_{{ item.id }}" value="{{ item.customer_nickname }}" data-row-id="{{ item.id }}"></td>
+                    <td><input type="text" class="form-control form-control-sm pull-status-text" name="customer_wechat_id_{{ item.id }}" value="{{ item.customer_wechat_id }}" data-row-id="{{ item.id }}"></td>
+                    <td><input class="form-check-input pull-status-checkbox" type="checkbox" name="has_tag_{{ item.id }}" value="1" data-row-id="{{ item.id }}" {% if item.has_tag %}checked{% endif %}></td>
+                    <td><input class="form-check-input pull-status-checkbox" type="checkbox" name="in_group_chat_{{ item.id }}" value="1" data-row-id="{{ item.id }}" {% if item.in_group_chat %}checked{% endif %}></td>
+                    <td><input class="form-check-input pull-status-checkbox" type="checkbox" name="remark_updated_{{ item.id }}" value="1" data-row-id="{{ item.id }}" {% if item.remark_updated %}checked{% endif %}></td>
+                    <td><span class="badge pull-status-badge {% if item.status_text == '成功' %}bg-success{% else %}bg-warning text-dark{% endif %}" data-row-id="{{ item.id }}">{{ item.status_text }}</span></td>
+                    {% if tab == 'my_new_customer_pull' %}
+                    <td><button type="submit" class="btn btn-sm btn-outline-primary" formaction="/new-customer-pull/transfer/{{ item.id }}">转入团队</button></td>
+                    {% endif %}
+                </tr>
+            {% else %}
+                <tr><td colspan="{% if tab == 'my_new_customer_pull' %}11{% else %}10{% endif %}" class="text-muted py-5"><i class="bi bi-person-plus fs-1 d-block mb-3"></i>当前时间范围暂无待拉新记录。</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div></div>
+</form>
+<div id="pullRecordInfiniteLoader" class="text-center text-muted py-3" data-loaded="{{ pull_loaded_count or 0 }}" data-total="{{ pull_total_count or 0 }}" data-page-size="{{ list_page_size or 40 }}" data-has-more="{{ 'true' if pull_has_more else 'false' }}">
+    {% if pull_has_more %}
+        <span class="spinner-border spinner-border-sm me-2 d-none" id="pullRecordLoadSpinner"></span>
+        <span id="pullRecordLoadText">已显示 {{ pull_loaded_count or 0 }} / {{ pull_total_count or 0 }} 条，滚动到底部继续加载</span>
+    {% elif pull_total_count %}
+        已显示全部 {{ pull_total_count or 0 }} 条
+    {% endif %}
+</div>
+{% endif %}
+
+{% if error %}
+<div class="alert alert-danger alert-dismissible fade show rounded-4 shadow-sm border-0 mb-4" role="alert">
+    <i class="bi bi-exclamation-triangle-fill me-2"></i>{{ error }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+
+{% if tab == 'store_customers' %}
 <div class="d-flex justify-content-between align-items-center mb-4">
     <div class="d-flex align-items-center">
         <label class="me-2 fw-bold text-secondary">当前门店：</label>
@@ -18,7 +166,7 @@
                 {% for store_name in store_list %}
                 <li>
                     <a class="dropdown-item {% if store_name == current_store %}active{% endif %}"
-                       href="/customers?store={{ store_name }}">
+                       href="/customers?store={{ store_name }}&tab=store_customers">
                        {{ store_name }}
                     </a>
                 </li>
@@ -30,6 +178,7 @@
     <div class="d-flex gap-2">
         <form action="/customers" method="get" class="d-flex gap-2">
             <input type="hidden" name="store" value="{{ current_store }}">
+            <input type="hidden" name="tab" value="store_customers">
             <select name="sort_by" class="form-select" style="width: 190px;">
                 <option value="default" {% if sort_by == 'default' %}selected{% endif %}>默认排序</option>
                 <option value="last_visit_desc" {% if sort_by == 'last_visit_desc' %}selected{% endif %}>最后到店降序</option>
@@ -38,10 +187,6 @@
             <input type="text" name="search_query" class="form-control" placeholder="搜索昵称或微信号..." value="{{ search_query }}">
             <button type="submit" class="btn btn-outline-primary"><i class="bi bi-search"></i></button>
         </form>
-
-        <button class="btn btn-primary text-white" data-bs-toggle="modal" data-bs-target="#addCustomerModal">
-            <i class="bi bi-person-plus-fill me-1"></i> 新增顾客
-        </button>
     </div>
 </div>
 
@@ -153,6 +298,336 @@
     {% elif total_customer_count %}
         已显示全部 {{ total_customer_count or 0 }} 条
     {% endif %}
+</div>
+{% elif tab == 'public_traffic' %}
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body">
+        <form method="get" action="/customers" class="row g-3 align-items-end">
+            <input type="hidden" name="store" value="{{ current_store }}">
+            <input type="hidden" name="tab" value="public_traffic">
+
+            <div class="col-lg-2 col-md-6">
+                <label class="form-label fw-bold text-secondary">日期范围</label>
+                <select class="form-select" name="public_date_filter" id="publicDateFilter" onchange="togglePublicCustomDateRange()">
+                    <option value="today" {% if public_date_filter == 'today' %}selected{% endif %}>今天</option>
+                    <option value="last2days" {% if public_date_filter == 'last2days' %}selected{% endif %}>近两日</option>
+                    <option value="this_week" {% if public_date_filter == 'this_week' %}selected{% endif %}>本周</option>
+                    <option value="this_month" {% if public_date_filter == 'this_month' %}selected{% endif %}>本月</option>
+                    <option value="last_month" {% if public_date_filter == 'last_month' %}selected{% endif %}>上月</option>
+                    <option value="custom" {% if public_date_filter == 'custom' %}selected{% endif %}>自定义</option>
+                </select>
+            </div>
+
+            <div class="col-lg-2 col-md-6">
+                <label class="form-label fw-bold text-secondary">端口筛选</label>
+                <select class="form-select" name="public_source_port">
+                    <option value="all" {% if public_source_port == 'all' %}selected{% endif %}>全部</option>
+                    {% for source_port in source_ports %}
+                    <option value="{{ source_port }}" {% if public_source_port == source_port %}selected{% endif %}>{{ source_port }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-lg-3 col-md-6 public-custom-date d-none">
+                <label class="form-label fw-bold text-secondary">开始日期</label>
+                <input type="date" class="form-control" name="public_start_date" value="{{ public_start_date or '' }}">
+            </div>
+            <div class="col-lg-3 col-md-6 public-custom-date d-none">
+                <label class="form-label fw-bold text-secondary">结束日期</label>
+                <input type="date" class="form-control" name="public_end_date" value="{{ public_end_date or '' }}">
+            </div>
+
+            <div class="col-lg-3 col-md-6">
+                <button type="submit" class="btn btn-primary rounded-pill px-4 me-2">
+                    <i class="bi bi-search me-1"></i>查询
+                </button>
+                <a href="/customers?store={{ current_store }}&tab=public_traffic" class="btn btn-outline-secondary rounded-pill px-4">
+                    <i class="bi bi-arrow-clockwise me-1"></i>重置
+                </a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-md-4">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="text-secondary small mb-1">当前周期引流人数</div>
+                <div class="h3 fw-bold mb-0">{{ total_public_lead_count or 0 }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="text-secondary small mb-1">转化人数</div>
+                <div class="h3 fw-bold text-success mb-0">{{ converted_public_lead_count or 0 }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="text-secondary small mb-1">转化率</div>
+                <div class="h3 fw-bold text-primary mb-0">{{ public_conversion_rate or 0 }}%</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+    <div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th>录入日期</th>
+                    <th>引流端口</th>
+                    <th>微信号</th>
+                    <th>是否转化</th>
+                    <th>转化门店</th>
+                </tr>
+            </thead>
+            <tbody id="publicTrafficLeadTbody">
+                {% for lead in public_lead_list %}
+                <tr id="public-lead-row-{{ lead.id }}">
+                    <td class="text-secondary">{{ lead.created_at }}</td>
+                    <td>
+                        <span class="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25">
+                            {{ lead.source_port }}
+                        </span>
+                    </td>
+                    <td class="fw-bold">{{ lead.wechat_id }}</td>
+                    <td>
+                        {% if lead.is_converted %}
+                            <span class="badge bg-success">已转化</span>
+                        {% else %}
+                            <span class="badge bg-secondary">未转化</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ lead.first_store or '-' }}</td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="5" class="text-muted py-5">
+                        <i class="bi bi-broadcast-pin fs-1 d-block mb-3"></i>
+                        当前日期范围暂无公域流量顾客。
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div id="publicTrafficInfiniteLoader"
+     class="text-center text-muted py-3"
+     data-loaded="{{ public_loaded_count or 0 }}"
+     data-total="{{ public_total_record_count or 0 }}"
+     data-page-size="{{ list_page_size or 40 }}"
+     data-has-more="{{ 'true' if public_has_more else 'false' }}">
+    {% if public_has_more %}
+        <span class="spinner-border spinner-border-sm me-2 d-none" id="publicTrafficLoadSpinner"></span>
+        <span id="publicTrafficLoadText">已显示 {{ public_loaded_count or 0 }} / {{ public_total_record_count or 0 }} 条，滚动到底部继续加载</span>
+    {% elif public_total_record_count %}
+        已显示全部 {{ public_total_record_count or 0 }} 条
+    {% endif %}
+</div>
+
+{% elif tab == 'contact_customers' %}
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body">
+        <form method="get" action="/customers" class="row g-3 align-items-end">
+            <input type="hidden" name="store" value="{{ current_store }}">
+            <input type="hidden" name="tab" value="contact_customers">
+
+            <div class="col-lg-3 col-md-6">
+                <label class="form-label fw-bold text-secondary">时间范围</label>
+                <select class="form-select" name="contact_date_filter" id="contactDateFilter" onchange="toggleContactCustomDateRange()">
+                    <option value="today" {% if contact_date_filter == 'today' %}selected{% endif %}>今天</option>
+                    <option value="yesterday" {% if contact_date_filter == 'yesterday' %}selected{% endif %}>昨天</option>
+                    <option value="last2days" {% if contact_date_filter == 'last2days' %}selected{% endif %}>近两日</option>
+                    <option value="this_week" {% if contact_date_filter == 'this_week' %}selected{% endif %}>本周</option>
+                    <option value="this_month" {% if contact_date_filter == 'this_month' %}selected{% endif %}>本月</option>
+                    <option value="last_month" {% if contact_date_filter == 'last_month' %}selected{% endif %}>上月</option>
+                    <option value="custom" {% if contact_date_filter == 'custom' %}selected{% endif %}>自定义</option>
+                </select>
+            </div>
+
+            <div class="col-lg-3 col-md-6 contact-custom-date d-none">
+                <label class="form-label fw-bold text-secondary">开始日期</label>
+                <input type="date" class="form-control" name="contact_start_date" value="{{ contact_start_date or '' }}">
+            </div>
+            <div class="col-lg-3 col-md-6 contact-custom-date d-none">
+                <label class="form-label fw-bold text-secondary">结束日期</label>
+                <input type="date" class="form-control" name="contact_end_date" value="{{ contact_end_date or '' }}">
+            </div>
+
+            {% if current_user.role == 'admin' %}
+            <div class="col-lg-3 col-md-6">
+                <label class="form-label fw-bold text-secondary">员工筛选</label>
+                <select class="form-select" name="contact_employee">
+                    <option value="all" {% if contact_employee == 'all' %}selected{% endif %}>全部店长</option>
+                    {% for employee_name in employee_names %}
+                    <option value="{{ employee_name }}" {% if contact_employee == employee_name %}selected{% endif %}>{{ employee_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endif %}
+
+            <div class="col-lg-3 col-md-6">
+                <button type="submit" class="btn btn-primary rounded-pill px-4 me-2">
+                    <i class="bi bi-search me-1"></i>查询
+                </button>
+                <a href="/customers?store={{ current_store }}&tab=contact_customers" class="btn btn-outline-secondary rounded-pill px-4">
+                    <i class="bi bi-arrow-clockwise me-1"></i>重置
+                </a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-md-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="text-secondary small mb-1">当前周期接触顾客数</div>
+                <div class="h3 fw-bold mb-0">{{ contact_customer_count or 0 }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="text-secondary small mb-1">当前周期接触新客数量</div>
+                <div class="h3 fw-bold text-success mb-0">{{ contact_new_customer_count or 0 }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<form action="/contact-customers/followup/save" method="post">
+    <input type="hidden" name="store" value="{{ current_store }}">
+    <input type="hidden" name="contact_date_filter" value="{{ contact_date_filter or 'today' }}">
+    <input type="hidden" name="contact_start_date" value="{{ contact_start_date or '' }}">
+    <input type="hidden" name="contact_end_date" value="{{ contact_end_date or '' }}">
+    <input type="hidden" name="contact_employee" value="{{ contact_employee or 'all' }}">
+
+    {% if contact_customer_list %}
+    <div class="text-end mb-3">
+        <button type="submit" class="btn btn-primary rounded-pill px-4">
+            <i class="bi bi-save me-1"></i>批量保存
+        </button>
+    </div>
+    {% endif %}
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-body p-0">
+            <table class="table table-hover align-middle mb-0 text-center">
+                <thead class="table-light">
+                    <tr>
+                        <th>序号</th>
+                        <th>接待店长</th>
+                        <th>昵称</th>
+                        <th>微信号</th>
+                        <th>是否添加标签</th>
+                        <th>是否拉进群聊</th>
+                        <th>是否修改备注</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in contact_customer_list %}
+                    {% set row_index = (list_offset or 0) + loop.index0 %}
+                    <tr id="contact-customer-row-{{ list_offset + loop.index }}">
+                        <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
+                        <td>{{ item.employee_name }}</td>
+                        <td>
+                            <div class="fw-bold">{{ item.nickname }}</div>
+                            {% if item.is_new %}
+                                <span class="badge bg-success bg-opacity-10 text-success border border-success border-opacity-25">新客</span>
+                            {% else %}
+                                <span class="badge bg-secondary bg-opacity-10 text-secondary border border-secondary border-opacity-25">老客</span>
+                            {% endif %}
+                        </td>
+                        <td class="fw-bold">{{ item.wechat_id }}</td>
+                        <td>
+                            <input type="hidden" name="wechat_id" value="{{ item.wechat_id }}">
+                            <input class="form-check-input contact-followup-checkbox" type="checkbox" name="has_tag_{{ row_index }}" value="1"
+                                   data-wechat="{{ item.wechat_id }}" data-field="has_tag" {% if item.has_tag %}checked{% endif %}>
+                        </td>
+                        <td>
+                            <input class="form-check-input contact-followup-checkbox" type="checkbox" name="in_group_chat_{{ row_index }}" value="1"
+                                   data-wechat="{{ item.wechat_id }}" data-field="in_group_chat" {% if item.in_group_chat %}checked{% endif %}>
+                        </td>
+                        <td>
+                            <input class="form-check-input contact-followup-checkbox" type="checkbox" name="remark_updated_{{ row_index }}" value="1"
+                                   data-wechat="{{ item.wechat_id }}" data-field="remark_updated" {% if item.remark_updated %}checked{% endif %}>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="7" class="text-muted py-5">
+                            <i class="bi bi-person-lines-fill fs-1 d-block mb-3"></i>
+                            当前时间范围暂无接触顾客。
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</form>
+
+<div id="contactCustomerInfiniteLoader"
+     class="text-center text-muted py-3"
+     data-loaded="{{ contact_loaded_count or 0 }}"
+     data-total="{{ contact_customer_count or 0 }}"
+     data-page-size="{{ list_page_size or 40 }}"
+     data-has-more="{{ 'true' if contact_has_more else 'false' }}">
+    {% if contact_has_more %}
+        <span class="spinner-border spinner-border-sm me-2 d-none" id="contactCustomerLoadSpinner"></span>
+        <span id="contactCustomerLoadText">已显示 {{ contact_loaded_count or 0 }} / {{ contact_customer_count or 0 }} 条，滚动到底部继续加载</span>
+    {% elif contact_customer_count %}
+        已显示全部 {{ contact_customer_count or 0 }} 条
+    {% endif %}
+</div>
+{% endif %}
+
+<div class="modal fade" id="addPublicTrafficLeadModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-broadcast-pin me-2"></i>登记公域流量顾客</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form action="/public-traffic-leads/add" method="post">
+                <input type="hidden" name="store" value="{{ current_store }}">
+                <input type="hidden" name="public_date_filter" value="{{ public_date_filter or 'today' }}">
+                <input type="hidden" name="public_start_date" value="{{ public_start_date or '' }}">
+                <input type="hidden" name="public_end_date" value="{{ public_end_date or '' }}">
+                <input type="hidden" name="public_source_port" value="{{ public_source_port or 'all' }}">
+
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">选择引流端口</label>
+                        <select class="form-select" name="source_port" required>
+                            {% for source_port in source_ports %}
+                            <option value="{{ source_port }}">{{ source_port }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">微信号</label>
+                        <input type="text" name="wechat_id" class="form-control" required>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary px-4">确定登记</button>
+                </div>
+            </form>
+        </div>
+    </div>
 </div>
 
 <div class="modal fade" id="addCustomerModal" tabindex="-1">
@@ -795,6 +1270,281 @@
         customerInfiniteObserver.observe(loader);
     }
 
+    let publicTrafficInfiniteObserver = null;
+    let publicTrafficLoadingMore = false;
+
+    function togglePublicCustomDateRange() {
+        const select = document.getElementById('publicDateFilter');
+        const isCustom = select && select.value === 'custom';
+        document.querySelectorAll('.public-custom-date').forEach(el => {
+            el.classList.toggle('d-none', !isCustom);
+        });
+    }
+
+    function toggleContactCustomDateRange() {
+        const select = document.getElementById('contactDateFilter');
+        const isCustom = select && select.value === 'custom';
+        document.querySelectorAll('.contact-custom-date').forEach(el => {
+            el.classList.toggle('d-none', !isCustom);
+        });
+    }
+
+    function togglePullCustomDateRange() {
+        const select = document.getElementById('pullDateFilter');
+        const isCustom = select && select.value === 'custom';
+        document.querySelectorAll('.pull-custom-date').forEach(el => {
+            el.classList.toggle('d-none', !isCustom);
+        });
+    }
+
+    async function loadMorePublicTrafficLeads() {
+        const loader = document.getElementById('publicTrafficInfiniteLoader');
+        const tbody = document.getElementById('publicTrafficLeadTbody');
+        if (!loader || !tbody || publicTrafficLoadingMore || loader.dataset.hasMore !== 'true') return;
+
+        publicTrafficLoadingMore = true;
+        const spinner = document.getElementById('publicTrafficLoadSpinner');
+        const text = document.getElementById('publicTrafficLoadText');
+        if (spinner) spinner.classList.remove('d-none');
+        if (text) text.textContent = '正在加载更多...';
+
+        const loaded = parseInt(loader.dataset.loaded || '0', 10) || 0;
+        const pageSize = parseInt(loader.dataset.pageSize || '40', 10) || 40;
+        const url = new URL(window.location.href);
+        url.searchParams.set('list_offset', String(loaded));
+        url.searchParams.set('list_limit', String(pageSize));
+
+        try {
+            const resp = await fetch(url.toString(), { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            if (!resp.ok) throw new Error('加载失败');
+            const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+            doc.querySelectorAll('tr[id^="public-lead-row-"]').forEach(row => {
+                if (!document.getElementById(row.id)) tbody.appendChild(document.importNode(row, true));
+            });
+            const newLoader = doc.getElementById('publicTrafficInfiniteLoader');
+            if (newLoader) {
+                loader.dataset.loaded = newLoader.dataset.loaded || loader.dataset.loaded;
+                loader.dataset.total = newLoader.dataset.total || loader.dataset.total;
+                loader.dataset.hasMore = newLoader.dataset.hasMore || 'false';
+                loader.innerHTML = newLoader.innerHTML;
+            }
+        } catch (err) {
+            console.error(err);
+            loader.innerHTML = '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadMorePublicTrafficLeads()">加载失败，点击重试</button>';
+            loader.dataset.hasMore = 'true';
+        } finally {
+            publicTrafficLoadingMore = false;
+            setupPublicTrafficInfiniteScroll();
+        }
+    }
+
+    function setupPublicTrafficInfiniteScroll() {
+        const loader = document.getElementById('publicTrafficInfiniteLoader');
+        if (publicTrafficInfiniteObserver) publicTrafficInfiniteObserver.disconnect();
+        if (!loader || loader.dataset.hasMore !== 'true') return;
+        publicTrafficInfiniteObserver = new IntersectionObserver(entries => {
+            if (entries.some(entry => entry.isIntersecting)) loadMorePublicTrafficLeads();
+        }, { rootMargin: '240px 0px', threshold: 0.01 });
+        publicTrafficInfiniteObserver.observe(loader);
+    }
+
+    function setupContactFollowupSync() {
+        document.querySelectorAll('.contact-followup-checkbox').forEach(checkbox => {
+            if (checkbox.dataset.syncBound === '1') return;
+            checkbox.dataset.syncBound = '1';
+            checkbox.addEventListener('change', function() {
+                const wechat = this.dataset.wechat || '';
+                const field = this.dataset.field || '';
+                document.querySelectorAll(`.contact-followup-checkbox[data-wechat="${CSS.escape(wechat)}"][data-field="${CSS.escape(field)}"]`).forEach(peer => {
+                    peer.checked = this.checked;
+                });
+            });
+        });
+    }
+
+    let contactCustomerInfiniteObserver = null;
+    let contactCustomerLoadingMore = false;
+
+    async function loadMoreContactCustomers() {
+        const loader = document.getElementById('contactCustomerInfiniteLoader');
+        const tbody = document.querySelector('tr[id^="contact-customer-row-"]')?.closest('tbody');
+        if (!loader || !tbody || contactCustomerLoadingMore || loader.dataset.hasMore !== 'true') return;
+
+        contactCustomerLoadingMore = true;
+        const spinner = document.getElementById('contactCustomerLoadSpinner');
+        const text = document.getElementById('contactCustomerLoadText');
+        if (spinner) spinner.classList.remove('d-none');
+        if (text) text.textContent = '正在加载更多...';
+
+        const loaded = parseInt(loader.dataset.loaded || '0', 10) || 0;
+        const pageSize = parseInt(loader.dataset.pageSize || '40', 10) || 40;
+        const url = new URL(window.location.href);
+        url.searchParams.set('list_offset', String(loaded));
+        url.searchParams.set('list_limit', String(pageSize));
+
+        try {
+            const resp = await fetch(url.toString(), { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            if (!resp.ok) throw new Error('加载失败');
+            const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+            doc.querySelectorAll('tr[id^="contact-customer-row-"]').forEach(row => {
+                if (!document.getElementById(row.id)) tbody.appendChild(document.importNode(row, true));
+            });
+            const newLoader = doc.getElementById('contactCustomerInfiniteLoader');
+            if (newLoader) {
+                loader.dataset.loaded = newLoader.dataset.loaded || loader.dataset.loaded;
+                loader.dataset.total = newLoader.dataset.total || loader.dataset.total;
+                loader.dataset.hasMore = newLoader.dataset.hasMore || 'false';
+                loader.innerHTML = newLoader.innerHTML;
+            }
+            setupContactFollowupSync();
+        } catch (err) {
+            console.error(err);
+            loader.innerHTML = '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadMoreContactCustomers()">加载失败，点击重试</button>';
+            loader.dataset.hasMore = 'true';
+        } finally {
+            contactCustomerLoadingMore = false;
+            setupContactCustomerInfiniteScroll();
+        }
+    }
+
+    function setupContactCustomerInfiniteScroll() {
+        const loader = document.getElementById('contactCustomerInfiniteLoader');
+        if (contactCustomerInfiniteObserver) contactCustomerInfiniteObserver.disconnect();
+        if (!loader || loader.dataset.hasMore !== 'true') return;
+        contactCustomerInfiniteObserver = new IntersectionObserver(entries => {
+            if (entries.some(entry => entry.isIntersecting)) loadMoreContactCustomers();
+        }, { rootMargin: '240px 0px', threshold: 0.01 });
+        contactCustomerInfiniteObserver.observe(loader);
+    }
+
+    function updatePullStatusBadge(rowId) {
+        const checks = document.querySelectorAll(`.pull-status-checkbox[data-row-id="${CSS.escape(String(rowId))}"]`);
+        if (!checks.length) return;
+        const texts = document.querySelectorAll(`.pull-status-text[data-row-id="${CSS.escape(String(rowId))}"]`);
+        const hasRequiredText = Array.from(texts).every(input => (input.value || '').trim() !== '');
+        const ok = hasRequiredText && Array.from(checks).every(input => input.checked);
+        const badge = document.querySelector(`.pull-status-badge[data-row-id="${CSS.escape(String(rowId))}"]`);
+        if (!badge) return;
+        badge.textContent = ok ? '成功' : '待拉新';
+        badge.classList.toggle('bg-success', ok);
+        badge.classList.toggle('bg-warning', !ok);
+        badge.classList.toggle('text-dark', !ok);
+    }
+
+    function setupPullStatusSync() {
+        document.querySelectorAll('.pull-status-checkbox').forEach(checkbox => {
+            if (checkbox.dataset.syncBound === '1') return;
+            checkbox.dataset.syncBound = '1';
+            checkbox.addEventListener('change', function() {
+                updatePullStatusBadge(this.dataset.rowId || '');
+            });
+            updatePullStatusBadge(checkbox.dataset.rowId || '');
+        });
+        document.querySelectorAll('.pull-status-text').forEach(input => {
+            if (input.dataset.syncBound === '1') return;
+            input.dataset.syncBound = '1';
+            input.addEventListener('input', function() {
+                updatePullStatusBadge(this.dataset.rowId || '');
+            });
+            updatePullStatusBadge(input.dataset.rowId || '');
+        });
+    }
+
+    function setupPullDuplicateGuard() {
+        const form = document.getElementById('newCustomerPullForm');
+        if (!form || form.dataset.duplicateGuardBound === '1') return;
+        form.dataset.duplicateGuardBound = '1';
+        form.addEventListener('submit', function(event) {
+            const submitter = event.submitter;
+            if (submitter && (submitter.getAttribute('formaction') || '').includes('/transfer/')) return;
+
+            const seen = new Set();
+            let hasDuplicate = false;
+            document.querySelectorAll('tr[id^="pull-record-row-"]').forEach(row => {
+                const nickname = (row.querySelector('input[name^="customer_nickname_"]')?.value || '').trim();
+                const wechat = (row.querySelector('input[name^="customer_wechat_id_"]')?.value || '').trim();
+                if (!nickname || !wechat) return;
+                const key = `${nickname}||${wechat}`;
+                if (seen.has(key)) {
+                    hasDuplicate = true;
+                    return;
+                }
+                seen.add(key);
+            });
+
+            if (hasDuplicate) {
+                event.preventDefault();
+                alert('存在重复拉新：用户昵称、用户微信号相同，请检查后再保存');
+            }
+        });
+    }
+
+    let pullRecordInfiniteObserver = null;
+    let pullRecordLoadingMore = false;
+
+    async function loadMorePullRecords() {
+        const loader = document.getElementById('pullRecordInfiniteLoader');
+        const tbody = document.querySelector('tr[id^="pull-record-row-"]')?.closest('tbody');
+        if (!loader || !tbody || pullRecordLoadingMore || loader.dataset.hasMore !== 'true') return;
+
+        pullRecordLoadingMore = true;
+        const spinner = document.getElementById('pullRecordLoadSpinner');
+        const text = document.getElementById('pullRecordLoadText');
+        if (spinner) spinner.classList.remove('d-none');
+        if (text) text.textContent = '正在加载更多...';
+
+        const loaded = parseInt(loader.dataset.loaded || '0', 10) || 0;
+        const pageSize = parseInt(loader.dataset.pageSize || '40', 10) || 40;
+        const url = new URL(window.location.href);
+        url.searchParams.set('list_offset', String(loaded));
+        url.searchParams.set('list_limit', String(pageSize));
+
+        try {
+            const resp = await fetch(url.toString(), { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            if (!resp.ok) throw new Error('加载失败');
+            const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+            doc.querySelectorAll('tr[id^="pull-record-row-"]').forEach(row => {
+                if (!document.getElementById(row.id)) tbody.appendChild(document.importNode(row, true));
+            });
+            const newLoader = doc.getElementById('pullRecordInfiniteLoader');
+            if (newLoader) {
+                loader.dataset.loaded = newLoader.dataset.loaded || loader.dataset.loaded;
+                loader.dataset.total = newLoader.dataset.total || loader.dataset.total;
+                loader.dataset.hasMore = newLoader.dataset.hasMore || 'false';
+                loader.innerHTML = newLoader.innerHTML;
+            }
+            setupPullStatusSync();
+        } catch (err) {
+            console.error(err);
+            loader.innerHTML = '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadMorePullRecords()">加载失败，点击重试</button>';
+            loader.dataset.hasMore = 'true';
+        } finally {
+            pullRecordLoadingMore = false;
+            setupPullRecordInfiniteScroll();
+        }
+    }
+
+    function setupPullRecordInfiniteScroll() {
+        const loader = document.getElementById('pullRecordInfiniteLoader');
+        if (pullRecordInfiniteObserver) pullRecordInfiniteObserver.disconnect();
+        if (!loader || loader.dataset.hasMore !== 'true') return;
+        pullRecordInfiniteObserver = new IntersectionObserver(entries => {
+            if (entries.some(entry => entry.isIntersecting)) loadMorePullRecords();
+        }, { rootMargin: '240px 0px', threshold: 0.01 });
+        pullRecordInfiniteObserver.observe(loader);
+    }
+
     document.addEventListener('DOMContentLoaded', setupCustomerInfiniteScroll);
+    document.addEventListener('DOMContentLoaded', function() {
+        togglePublicCustomDateRange();
+        toggleContactCustomDateRange();
+        togglePullCustomDateRange();
+        setupPublicTrafficInfiniteScroll();
+        setupContactFollowupSync();
+        setupContactCustomerInfiniteScroll();
+        setupPullStatusSync();
+        setupPullDuplicateGuard();
+        setupPullRecordInfiniteScroll();
+    });
 </script>
 {% endblock %}
