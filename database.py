@@ -72,6 +72,8 @@ class GameRecord(SQLModel, table=True):
 
     # V2：实际订单开始时间（兼容旧数据，允许为空）
     order_start_time: Optional[str] = None  # 例如 "19:30"
+    order_end_time: Optional[str] = None
+    order_end_time_manually_set: bool = Field(default=False)
 
     # =========================
     # 六、状态控制
@@ -193,6 +195,23 @@ class User(SQLModel, table=True):
     password_reset_at: Optional[datetime] = Field(default=None, index=True)
     password_reset_by_user_id: Optional[int] = Field(default=None, index=True)
     password_reset_by_name: Optional[str] = None
+
+
+class EmployeeDutySession(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    user_id: int = Field(index=True)
+    employee_name: str = Field(index=True)
+
+    action_type: str = Field(index=True)  # store_duty / review_info
+    store_names_json: Optional[str] = None
+
+    started_at: Optional[datetime] = Field(default=None, index=True)
+    reviewed_at: Optional[datetime] = Field(default=None, index=True)
+    ended_at: Optional[datetime] = Field(default=None, index=True)
+
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
 
 # === 顾客主表 ===
 class Customer(SQLModel, table=True):
@@ -1697,6 +1716,8 @@ def migrate_game_record_table():
             "updated_by",
             "record_source",
             "external_store_name",
+            "order_end_time",
+            "order_end_time_manually_set",
         ]
 
         need_rebuild = False
@@ -1737,6 +1758,22 @@ def migrate_game_record_table():
                     WHERE record_source IS NULL OR TRIM(record_source) = ''
                 """))
 
+            if "order_end_time" in col_map and "order_start_time" in col_map:
+                conn.execute(text("""
+                    UPDATE gamerecord
+                    SET order_end_time = strftime('%Y-%m-%d %H:%M', datetime(order_start_time, '+4 hours'))
+                    WHERE order_start_time IS NOT NULL
+                      AND TRIM(order_start_time) != ''
+                      AND (order_end_time IS NULL OR TRIM(order_end_time) = '')
+                """))
+
+            if "order_end_time_manually_set" in col_map:
+                conn.execute(text("""
+                    UPDATE gamerecord
+                    SET order_end_time_manually_set = 0
+                    WHERE order_end_time_manually_set IS NULL
+                """))
+
             # external_store_name 若列已存在，无需额外回填；保持 NULL 即可
             print("GameRecord 表结构已是目标结构，无需重建，仅完成空值回填。")
             return
@@ -1751,6 +1788,8 @@ def migrate_game_record_table():
         has_old_table_note = "table_note" in col_map
 
         has_old_order_start_time = "order_start_time" in col_map
+        has_old_order_end_time = "order_end_time" in col_map
+        has_old_order_end_time_manually_set = "order_end_time_manually_set" in col_map
         has_old_created_at = "created_at" in col_map
         has_old_updated_at = "updated_at" in col_map
         has_old_updated_by = "updated_by" in col_map
@@ -1798,6 +1837,8 @@ def migrate_game_record_table():
                 room_fee REAL NOT NULL DEFAULT 0,
 
                 order_start_time TEXT,
+                order_end_time TEXT,
+                order_end_time_manually_set INTEGER NOT NULL DEFAULT 0,
 
                 status TEXT NOT NULL DEFAULT 'unformed',
                 record_source TEXT NOT NULL DEFAULT 'normal',
@@ -1845,6 +1886,8 @@ def migrate_game_record_table():
                 COALESCE(room_fee, 0) AS room_fee,
 
                 {"order_start_time" if has_old_order_start_time else "NULL"} AS order_start_time,
+                {"order_end_time" if has_old_order_end_time else ("strftime('%Y-%m-%d %H:%M', datetime(order_start_time, '+4 hours'))" if has_old_order_start_time else "NULL")} AS order_end_time,
+                {"COALESCE(order_end_time_manually_set, 0)" if has_old_order_end_time_manually_set else "0"} AS order_end_time_manually_set,
 
                 COALESCE(status, 'unformed') AS status,
                 {"COALESCE(record_source, 'normal')" if has_old_record_source else "'normal'"} AS record_source,
@@ -1889,6 +1932,8 @@ def migrate_game_record_table():
                 payment_method,
                 room_fee,
                 order_start_time,
+                order_end_time,
+                order_end_time_manually_set,
                 status,
                 record_source,
                 who_did,

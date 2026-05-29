@@ -613,7 +613,7 @@
                 <tr>
                     <th>序号</th>
                     <th>预约时间</th>
-                    <th>订单开始时间</th>
+                    <th>订单开始/结束时间</th>
                     <th>外部门店 / 包间</th>
                     <th>分数 / 玩法</th>
                     <th>参与人</th>
@@ -642,6 +642,9 @@
                     <td>
                         {% if game.order_start_time %}
                             <div class="fw-bold text-dark">{{ game.order_start_time }}</div>
+                            {% if game.order_end_time %}
+                                <div class="small text-muted">{{ game.order_end_time }}</div>
+                            {% endif %}
                         {% else %}
                             <span class="text-muted small">未填写</span>
                         {% endif %}
@@ -742,6 +745,8 @@
                                     data-date="{{ game.record_date }}"
                                     data-time="{{ game.start_time }}"
                                     data-order-start="{{ game.order_start_time or '' }}"
+                                    data-order-end="{{ game.order_end_time or '' }}"
+                                    data-order-end-manual="{{ '1' if game.order_end_time_manually_set else '0' }}"
                                     data-external-store="{{ game.external_store_name or '' }}"
                                     data-room="{{ game.room_name or '' }}"
                                     data-stakes="{{ game.stakes }}"
@@ -790,7 +795,7 @@
             <thead class="table-light">
                 <tr>
                     <th>序号</th>
-                    <th>订单开始时间</th>
+                    <th>订单开始/结束时间</th>
                     <th>预约包间</th>
                     <th>下单用户</th>
                     <th>下单方式</th>
@@ -814,6 +819,9 @@
                     <td>
                         {% if game.order_start_time %}
                             <div class="fw-bold text-dark">{{ game.order_start_time }}</div>
+                            {% if game.order_end_time %}
+                                <div class="small text-muted">{{ game.order_end_time }}</div>
+                            {% endif %}
                         {% else %}
                             <span class="text-muted small">未填写</span>
                         {% endif %}
@@ -914,6 +922,8 @@
                                     data-id="{{ game.id }}"
                                     data-room="{{ game.room_name or '' }}"
                                     data-order-start="{{ game.order_start_time or '' }}"
+                                    data-order-end="{{ game.order_end_time or '' }}"
+                                    data-order-end-manual="{{ '1' if game.order_end_time_manually_set else '0' }}"
                                     data-payment="{{ game.payment_method or '' }}"
                                     data-fee="{{ game.room_fee or 0 }}"
                                     data-note-added="{{ game.tags or '否' }}"
@@ -958,7 +968,7 @@
                 <tr>
                     <th>序号</th>
                     <th>预约时间</th>
-                    <th>订单开始时间</th>
+                    <th>订单开始/结束时间</th>
                     <th>包间</th>
                     <th>分数/玩法</th>
                     <th>参与人</th>
@@ -981,6 +991,9 @@
                     <td>
                         {% if game.order_start_time %}
                             <div class="fw-bold text-dark">{{ game.order_start_time }}</div>
+                            {% if game.order_end_time %}
+                                <div class="small text-muted">{{ game.order_end_time }}</div>
+                            {% endif %}
                         {% else %}
                             <span class="text-muted small">未填写</span>
                         {% endif %}
@@ -1087,6 +1100,8 @@
                                     data-date="{{ game.record_date }}"
                                     data-time="{{ game.start_time }}"
                                     data-order-start="{{ game.order_start_time or '' }}"
+                                    data-order-end="{{ game.order_end_time or '' }}"
+                                    data-order-end-manual="{{ '1' if game.order_end_time_manually_set else '0' }}"
                                     data-room="{{ game.room_name or '' }}"
                                     data-stakes="{{ game.stakes }}"
                                     data-gametype="{{ game.game_type }}"
@@ -1182,6 +1197,15 @@
                         <div class="col-md-6">
                             <label class="form-label fw-bold">订单开始时间 <span class="text-danger">*</span></label>
                             <input type="datetime-local" class="form-control" name="order_start_time_full" id="self_arrival_add_order_start_time_full" required>
+                            <input type="hidden" name="order_end_time_full" id="self_arrival_add_order_end_time_full">
+                            <input type="hidden" name="order_end_time_manually_set" id="self_arrival_add_order_end_time_manually_set" value="0">
+                            <div class="btn-group btn-group-sm mt-2" role="group">
+                                <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('self_arrival_add', 4)">+4h</button>
+                                <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('self_arrival_add', 5)">+5h</button>
+                                <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('self_arrival_add', 6)">+6h</button>
+                                <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('self_arrival_add', 8)">+8h</button>
+                            </div>
+                            <div class="small text-muted mt-1" id="self_arrival_add_order_end_time_label"></div>
                         </div>
 
                         <div class="col-md-6">
@@ -1281,6 +1305,8 @@
                         <div class="col-md-6">
                             <label class="form-label fw-bold">订单开始时间</label>
                             <input type="hidden" name="order_start_time_full" id="self_arrival_edit_order_start_time_full">
+                            <input type="hidden" name="order_end_time_full" id="self_arrival_edit_order_end_time_full">
+                            <input type="hidden" name="order_end_time_manually_set" id="self_arrival_edit_order_end_time_manually_set" value="0">
                             <div class="row g-2">
                                 <div class="col-7">
                                     <input type="date" class="form-control" id="self_arrival_edit_order_start_date" required>
@@ -1289,6 +1315,13 @@
                                     <input type="time" class="form-control" id="self_arrival_edit_order_start_time">
                                 </div>
                             </div>
+                            <div class="btn-group btn-group-sm mt-2" role="group">
+                                <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('self_arrival_edit', 4)">+4h</button>
+                                <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('self_arrival_edit', 5)">+5h</button>
+                                <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('self_arrival_edit', 6)">+6h</button>
+                                <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('self_arrival_edit', 8)">+8h</button>
+                            </div>
+                            <div class="small text-muted mt-1" id="self_arrival_edit_order_end_time_label"></div>
                         </div>
 
                         <div class="col-md-6">
@@ -1410,6 +1443,15 @@
                                                class="form-control"
                                                name="order_start_time_full"
                                                id="overflow_add_order_start_time_full">
+                                        <input type="hidden" name="order_end_time_full" id="overflow_add_order_end_time_full">
+                                        <input type="hidden" name="order_end_time_manually_set" id="overflow_add_order_end_time_manually_set" value="0">
+                                        <div class="btn-group btn-group-sm mt-2" role="group">
+                                            <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('overflow_add', 4)">+4h</button>
+                                            <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('overflow_add', 5)">+5h</button>
+                                            <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('overflow_add', 6)">+6h</button>
+                                            <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('overflow_add', 8)">+8h</button>
+                                        </div>
+                                        <div class="small text-muted mt-1" id="overflow_add_order_end_time_label"></div>
                                     </div>
 
                                     <div class="col-md-6">
@@ -1614,6 +1656,8 @@
                                     <div class="col-md-6">
                                         <label class="form-label fw-bold">订单开始时间 </label>
                                         <input type="hidden" name="order_start_time_full" id="overflow_edit_order_start_time_full">
+                                        <input type="hidden" name="order_end_time_full" id="overflow_edit_order_end_time_full">
+                                        <input type="hidden" name="order_end_time_manually_set" id="overflow_edit_order_end_time_manually_set" value="0">
                                         <div class="row g-2">
                                             <div class="col-7">
                                                 <input type="date" class="form-control" id="overflow_edit_order_start_date" required>
@@ -1622,6 +1666,13 @@
                                                 <input type="time" class="form-control" id="overflow_edit_order_start_time">
                                             </div>
                                         </div>
+                                        <div class="btn-group btn-group-sm mt-2" role="group">
+                                            <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('overflow_edit', 4)">+4h</button>
+                                            <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('overflow_edit', 5)">+5h</button>
+                                            <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('overflow_edit', 6)">+6h</button>
+                                            <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('overflow_edit', 8)">+8h</button>
+                                        </div>
+                                        <div class="small text-muted mt-1" id="overflow_edit_order_end_time_label"></div>
                                     </div>
                                     <div class="col-md-6">
                                         <label class="form-label fw-bold">外部包间 </label>
@@ -1830,6 +1881,8 @@
                         <div class="col-md-6">
                             <label class="form-label fw-bold">订单开始时间</label>
                             <input type="hidden" name="order_start_time_full" id="edit_order_start_time_full">
+                            <input type="hidden" name="order_end_time_full" id="edit_order_end_time_full">
+                            <input type="hidden" name="order_end_time_manually_set" id="edit_order_end_time_manually_set" value="0">
                             <div class="row g-2">
                                 <div class="col-7">
                                     <input type="date" class="form-control" id="edit_order_start_date" required>
@@ -1838,6 +1891,13 @@
                                     <input type="time" class="form-control" id="edit_order_start_time">
                                 </div>
                             </div>
+                            <div class="btn-group btn-group-sm mt-2" role="group">
+                                <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('edit', 4)">+4h</button>
+                                <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('edit', 5)">+5h</button>
+                                <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('edit', 6)">+6h</button>
+                                <button type="button" class="btn btn-outline-secondary" onclick="setOrderEndByHours('edit', 8)">+8h</button>
+                            </div>
+                            <div class="small text-muted mt-1" id="edit_order_end_time_label"></div>
                         </div>
 
                         <div class="col-md-4">
@@ -2297,12 +2357,95 @@
         const dateVal = (dateInput.value || getTodayDateValue()).trim();
         const timeVal = (timeInput.value || '').trim();
         hiddenInput.value = timeVal ? `${dateVal}T${timeVal}` : '';
+        maybeAutoOrderEnd(prefix);
+    }
+
+    function formatOrderEndLabel(value) {
+        return value ? `End: ${String(value).replace('T', ' ')}` : '';
+    }
+
+    function getOrderStartValue(prefix) {
+        if (prefix === 'self_arrival_add' || prefix === 'overflow_add') {
+            return document.getElementById(`${prefix}_order_start_time_full`)?.value || '';
+        }
+        syncEditOrderStartPartsNoEnd(prefix);
+        return document.getElementById(`${prefix}_order_start_time_full`)?.value || '';
+    }
+
+    function syncEditOrderStartPartsNoEnd(prefix) {
+        const hiddenInput = document.getElementById(`${prefix}_order_start_time_full`);
+        const dateInput = document.getElementById(`${prefix}_order_start_date`);
+        const timeInput = document.getElementById(`${prefix}_order_start_time`);
+        if (!hiddenInput || !dateInput || !timeInput) return;
+        const dateVal = (dateInput.value || getTodayDateValue()).trim();
+        const timeVal = (timeInput.value || '').trim();
+        hiddenInput.value = timeVal ? `${dateVal}T${timeVal}` : '';
+    }
+
+    function writeOrderEnd(prefix, value, manuallySet) {
+        const endInput = document.getElementById(`${prefix}_order_end_time_full`);
+        const manualInput = document.getElementById(`${prefix}_order_end_time_manually_set`);
+        const label = document.getElementById(`${prefix}_order_end_time_label`);
+        if (endInput) endInput.value = value || '';
+        if (manualInput) manualInput.value = manuallySet ? '1' : '0';
+        if (label) label.textContent = formatOrderEndLabel(value);
+    }
+
+    function calculateOrderEndValue(startValue, hours) {
+        if (!startValue) return '';
+        const dateObj = new Date(startValue);
+        if (Number.isNaN(dateObj.getTime())) return '';
+        dateObj.setHours(dateObj.getHours() + hours);
+        const year = dateObj.getFullYear();
+        const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+        const day = String(dateObj.getDate()).padStart(2, '0');
+        const hour = String(dateObj.getHours()).padStart(2, '0');
+        const minute = String(dateObj.getMinutes()).padStart(2, '0');
+        return `${year}-${month}-${day}T${hour}:${minute}`;
+    }
+
+    function maybeAutoOrderEnd(prefix) {
+        const manualInput = document.getElementById(`${prefix}_order_end_time_manually_set`);
+        if (manualInput && manualInput.value === '1') return;
+        const startValue = document.getElementById(`${prefix}_order_start_time_full`)?.value || '';
+        writeOrderEnd(prefix, calculateOrderEndValue(startValue, 4), false);
+    }
+
+    function setOrderEndByHours(prefix, hours) {
+        const startValue = getOrderStartValue(prefix);
+        if (!startValue) {
+            alert('请先设置订单开始时间');
+            return;
+        }
+        writeOrderEnd(prefix, calculateOrderEndValue(startValue, hours), true);
+    }
+
+    function setOrderEndInitial(prefix, rawEnd, manualFlag) {
+        const normalized = normalizeOrderStartToDatetimeLocal(rawEnd || '');
+        writeOrderEnd(prefix, normalized, manualFlag === '1' || manualFlag === 'true');
+        if (!normalized) {
+            maybeAutoOrderEnd(prefix);
+        }
+    }
+
+    function bindOrderEndAuto(prefix) {
+        const directStart = document.getElementById(`${prefix}_order_start_time_full`);
+        if (directStart && (prefix === 'self_arrival_add' || prefix === 'overflow_add')) {
+            directStart.addEventListener('change', () => maybeAutoOrderEnd(prefix));
+            directStart.addEventListener('input', () => maybeAutoOrderEnd(prefix));
+        }
+        const dateInput = document.getElementById(`${prefix}_order_start_date`);
+        const timeInput = document.getElementById(`${prefix}_order_start_time`);
+        if (dateInput) dateInput.addEventListener('change', () => syncEditOrderStartParts(prefix));
+        if (timeInput) timeInput.addEventListener('change', () => syncEditOrderStartParts(prefix));
     }
 
     function validateSelfArrivalFields(mode) {
         const form = document.getElementById(`selfArrival${mode === 'add' ? 'Add' : 'Edit'}Form`);
         if (mode === 'edit') {
             syncEditOrderStartParts('self_arrival_edit');
+        } else {
+            maybeAutoOrderEnd('self_arrival_add');
         }
         if (form && !form.reportValidity()) {
             return false;
@@ -2360,6 +2503,7 @@
 
     function validateOverflowFields(mode) {
         clearOverflowPlayerWarningStyle(mode);
+        maybeAutoOrderEnd(`overflow_${mode}`);
 
         const externalStoreInput = document.getElementById(`overflow_${mode}_external_store_name`);
         const roomInput = document.getElementById(`overflow_${mode}_room_name`);
@@ -2641,6 +2785,7 @@
             normalizeToDatetimeLocal(btn.dataset.date || '', btn.dataset.time || '');
 
         setEditOrderStartParts('edit', btn.dataset.orderStart || '');
+        setOrderEndInitial('edit', btn.dataset.orderEnd || '', btn.dataset.orderEndManual || '0');
 
         document.getElementById('edit_room_name').value = btn.dataset.room || '';
         document.getElementById('edit_game_type').value = btn.dataset.gametype || '';
@@ -2672,6 +2817,7 @@
         document.getElementById('selfArrivalEditForm').action = `/formed-games/self-arrival/update/${gameId}`;
         document.getElementById('self_arrival_edit_room_name').value = btn.dataset.room || '';
         setEditOrderStartParts('self_arrival_edit', btn.dataset.orderStart || '');
+        setOrderEndInitial('self_arrival_edit', btn.dataset.orderEnd || '', btn.dataset.orderEndManual || '0');
         document.getElementById('self_arrival_edit_player_1').value = btn.dataset.p1 || '';
         document.getElementById('self_arrival_edit_player_1_wechat').value = btn.dataset.p1Wx || '';
         document.getElementById('self_arrival_edit_payment_method').value = btn.dataset.payment || '';
@@ -2689,6 +2835,7 @@
         const orderStartEl = document.getElementById('overflow_add_order_start_time_full');
         if (reservationEl) reservationEl.value = '';
         if (orderStartEl) orderStartEl.value = '';
+        writeOrderEnd('overflow_add', '', false);
 
         const feeEl = document.getElementById('overflow_add_room_fee');
         if (feeEl) feeEl.value = 0;
@@ -2711,6 +2858,7 @@
         document.getElementById('overflow_edit_start_time_full').value =
             normalizeToDatetimeLocal(btn.dataset.date || '', btn.dataset.time || '');
         setEditOrderStartParts('overflow_edit', btn.dataset.orderStart || '');
+        setOrderEndInitial('overflow_edit', btn.dataset.orderEnd || '', btn.dataset.orderEndManual || '0');
 
         document.getElementById('overflow_edit_external_store_name').value = btn.dataset.externalStore || '';
         document.getElementById('overflow_edit_room_name').value = btn.dataset.room || '';
@@ -3350,6 +3498,9 @@
         toggleSelfArrivalRoomFee('edit');
         toggleOverflowCustomStakes('add');
         toggleOverflowCustomStakes('edit');
+        ['self_arrival_add', 'self_arrival_edit', 'overflow_add', 'overflow_edit', 'edit'].forEach(bindOrderEndAuto);
+        maybeAutoOrderEnd('self_arrival_add');
+        maybeAutoOrderEnd('overflow_add');
         initTooltips();
         setupFormedGamesInfiniteScroll();
 

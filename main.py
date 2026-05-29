@@ -26,6 +26,7 @@ from database import (GameRecord,Store, Room, User,
                       get_manager_performance_stats, get_shift_performance_stats,
                       HandoverTodo, HandoverTodoCustomerLink, FormedGameHandoverLink,SelfArrivalRecord,
                       PublicTrafficLead, ContactCustomerFollowup, NewCustomerPullRecord,
+                      EmployeeDutySession,
                         # V3 员工管理 / 请假 / 考勤 / 工资流水 / 团队管理
                       EmployeeProfile,
                       EmployeeLeaveRequest,
@@ -2683,6 +2684,45 @@ def _parse_optional_order_start_time(order_start_time_full: Optional[str]) -> Op
             return raw
 
 
+def _parse_optional_order_end_time(order_end_time_full: Optional[str]) -> Optional[str]:
+    return _parse_optional_order_start_time(order_end_time_full)
+
+
+def _add_hours_to_order_time(order_time: Optional[str], hours: int = 4) -> Optional[str]:
+    order_dt = _parse_order_start_dt(order_time)
+    if not order_dt:
+        return None
+    return (order_dt + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M")
+
+
+def _normalize_order_end_manual_flag(value: Optional[str]) -> bool:
+    raw = _normalize_text(value).lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _resolve_order_end_time(
+        order_start_time: Optional[str],
+        order_end_time_full: Optional[str],
+        manually_set: bool
+) -> Tuple[Optional[str], bool]:
+    if not order_start_time:
+        return None, False
+
+    order_end_time = _parse_optional_order_end_time(order_end_time_full)
+    if manually_set and order_end_time:
+        return order_end_time, True
+
+    return _add_hours_to_order_time(order_start_time, 4), False
+
+
+def _validate_order_end_after_start(order_start_time: Optional[str], order_end_time: Optional[str]) -> bool:
+    start_dt = _parse_order_start_dt(order_start_time)
+    end_dt = _parse_order_start_dt(order_end_time)
+    if not start_dt or not end_dt:
+        return True
+    return end_dt > start_dt
+
+
 def _player_changed(old_name: Optional[str], old_wechat: Optional[str],
                     new_name: Optional[str], new_wechat: Optional[str]) -> bool:
     """
@@ -2720,7 +2760,7 @@ def _parse_order_start_dt(value: Optional[str]) -> Optional[datetime]:
     raw = _normalize_text(value)
     if not raw:
         return None
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S"):
         try:
             return datetime.strptime(raw, fmt)
         except ValueError:
@@ -3265,6 +3305,7 @@ def _build_formed_games_excel_xml(records: List[GameRecord], store_name: str, st
         "预约日期",
         "预约时间",
         "订单开始时间",
+        "订单结束时间",
         "包间",
         "分数",
         "玩法",
@@ -3319,6 +3360,7 @@ def _build_formed_games_excel_xml(records: List[GameRecord], store_name: str, st
             str(g.record_date) if g.record_date else "",
             g.start_time or "",
             g.order_start_time or "",
+            g.order_end_time or "",
             g.room_name or "",
             g.stakes or "",
             g.game_type or "",
@@ -4516,6 +4558,93 @@ async def get_current_user(
     return user
 
 
+DUTY_ACTION_STORE = "store_duty"
+DUTY_ACTION_REVIEW = "review_info"
+
+
+def _encode_duty_store_names(store_names: List[str]) -> str:
+    clean = []
+    seen = set()
+    for item in store_names or []:
+        name = _normalize_text(item)
+        if name and name not in seen:
+            clean.append(name)
+            seen.add(name)
+    return json.dumps(clean, ensure_ascii=False)
+
+
+def _decode_duty_store_names(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [_normalize_text(str(x)) for x in data if _normalize_text(str(x))]
+    except Exception:
+        pass
+    return [_normalize_text(x) for x in raw.split(",") if _normalize_text(x)]
+
+
+def _active_store_duty_session(session: Session, user_id: int) -> Optional[EmployeeDutySession]:
+    return session.exec(
+        select(EmployeeDutySession).where(
+            EmployeeDutySession.user_id == user_id,
+            EmployeeDutySession.action_type == DUTY_ACTION_STORE,
+            EmployeeDutySession.ended_at.is_(None)
+        ).order_by(EmployeeDutySession.started_at.desc(), EmployeeDutySession.id.desc())
+    ).first()
+
+
+def _today_review_session(session: Session, user_id: int) -> Optional[EmployeeDutySession]:
+    today_start = datetime.combine(date.today(), time.min)
+    tomorrow_start = today_start + timedelta(days=1)
+    return session.exec(
+        select(EmployeeDutySession).where(
+            EmployeeDutySession.user_id == user_id,
+            EmployeeDutySession.action_type == DUTY_ACTION_REVIEW,
+            EmployeeDutySession.reviewed_at >= today_start,
+            EmployeeDutySession.reviewed_at < tomorrow_start
+        ).order_by(EmployeeDutySession.reviewed_at.desc(), EmployeeDutySession.id.desc())
+    ).first()
+
+
+def _build_employee_duty_status(session: Session, user: Optional[User]) -> dict:
+    active_stores = session.exec(
+        select(Store).where(Store.is_active == True).order_by(Store.sort_order, Store.id)
+    ).all()
+
+    status = {
+        "requires_release": False,
+        "is_released": True,
+        "has_active_store_duty": False,
+        "active_store_names": [],
+        "active_started_at": None,
+        "active_session_id": None,
+        "store_options": [s.name for s in active_stores],
+    }
+
+    if not user or user.role == "admin":
+        return status
+
+    status["requires_release"] = True
+    store_session = _active_store_duty_session(session, user.id)
+    review_session = _today_review_session(session, user.id)
+
+    if store_session:
+        status["is_released"] = True
+        status["has_active_store_duty"] = True
+        status["active_store_names"] = _decode_duty_store_names(store_session.store_names_json)
+        status["active_started_at"] = store_session.started_at
+        status["active_session_id"] = store_session.id
+    elif review_session:
+        status["is_released"] = True
+        status["active_session_id"] = review_session.id
+    else:
+        status["is_released"] = False
+
+    return status
+
+
 @app.middleware("http")
 async def enforce_password_change(request: Request, call_next):
     allowed_prefixes = ("/static",)
@@ -4541,6 +4670,59 @@ async def enforce_password_change(request: Request, call_next):
                     and getattr(user, "must_change_password", False)
                 ):
                     return RedirectResponse(url="/change-password", status_code=303)
+
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def enforce_employee_duty_release(request: Request, call_next):
+    path = request.url.path
+    allowed_prefixes = ("/static",)
+    allowed_paths = {
+        "/login",
+        "/logout",
+        "/change-password",
+        "/register",
+        "/employee-duty/start",
+        "/employee-duty/review",
+        "/employee-duty/end",
+    }
+
+    if path in allowed_paths or any(path.startswith(prefix) for prefix in allowed_prefixes):
+        return await call_next(request)
+
+    user_id = request.cookies.get("user_id")
+    if not user_id:
+        return await call_next(request)
+
+    try:
+        user_id_int = int(user_id)
+    except Exception:
+        return await call_next(request)
+
+    with Session(engine) as session:
+        user = session.get(User, user_id_int)
+        if not user or not getattr(user, "is_active", True):
+            return await call_next(request)
+        if getattr(user, "must_change_password", False):
+            return await call_next(request)
+
+        duty_status = _build_employee_duty_status(session, user)
+        request.state.duty_status = duty_status
+
+        if (
+            user.role != "admin"
+            and not duty_status.get("is_released")
+            and path != "/"
+        ):
+            return RedirectResponse(url="/?error=请先点击开始带店或复查补信息", status_code=303)
+
+        if (
+            user.role != "admin"
+            and not duty_status.get("is_released")
+            and request.method not in {"GET", "HEAD", "OPTIONS"}
+        ):
+            return RedirectResponse(url="/?error=请先点击开始带店或复查补信息", status_code=303)
 
     return await call_next(request)
 
@@ -4696,6 +4878,114 @@ async def logout():
     return response
 
 
+@app.post("/employee-duty/start")
+async def start_employee_store_duty(
+        store_names: Optional[List[str]] = Form(None),
+        current_store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    if user.role == "admin":
+        return RedirectResponse(url=f"/?store={current_store}", status_code=303)
+
+    active_store_names = {
+        s.name for s in session.exec(select(Store).where(Store.is_active == True)).all()
+    }
+    clean_store_names = []
+    for name in store_names or []:
+        clean = _normalize_text(name)
+        if clean and clean in active_store_names and clean not in clean_store_names:
+            clean_store_names.append(clean)
+
+    if not clean_store_names:
+        return RedirectResponse(
+            url=f"/?store={current_store}&error=请选择至少一个带店门店",
+            status_code=303
+        )
+
+    existing = _active_store_duty_session(session, user.id)
+    if existing:
+        return RedirectResponse(url=f"/?store={current_store}", status_code=303)
+
+    now = datetime.now()
+    duty = EmployeeDutySession(
+        user_id=user.id,
+        employee_name=user.display_name,
+        action_type=DUTY_ACTION_STORE,
+        store_names_json=_encode_duty_store_names(clean_store_names),
+        started_at=now,
+        reviewed_at=None,
+        ended_at=None,
+        created_at=now,
+        updated_at=now
+    )
+    session.add(duty)
+    session.commit()
+
+    return RedirectResponse(
+        url=f"/?store={clean_store_names[0]}&success=已开始带店",
+        status_code=303
+    )
+
+
+@app.post("/employee-duty/review")
+async def record_employee_review_info(
+        current_store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    if user.role == "admin":
+        return RedirectResponse(url=f"/?store={current_store}", status_code=303)
+
+    today_review = _today_review_session(session, user.id)
+    if not today_review:
+        now = datetime.now()
+        session.add(EmployeeDutySession(
+            user_id=user.id,
+            employee_name=user.display_name,
+            action_type=DUTY_ACTION_REVIEW,
+            store_names_json=None,
+            started_at=None,
+            reviewed_at=now,
+            ended_at=None,
+            created_at=now,
+            updated_at=now
+        ))
+        session.commit()
+
+    return RedirectResponse(
+        url=f"/?store={current_store}&success=已记录复查补信息",
+        status_code=303
+    )
+
+
+@app.post("/employee-duty/end")
+async def end_employee_store_duty(
+        current_store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    active = _active_store_duty_session(session, user.id)
+    if active:
+        active.ended_at = datetime.now()
+        active.updated_at = active.ended_at
+        session.add(active)
+        session.commit()
+
+    response = RedirectResponse(url="/login?success=已结束带店", status_code=303)
+    response.delete_cookie("user_id")
+    return response
+
+
 @app.get("/change-password")
 async def change_password_page(
         request: Request,
@@ -4766,6 +5056,12 @@ async def employees_page(
         # 不传时默认结算当前月份。
         settlement_year: Optional[int] = None,
         settlement_month: Optional[int] = None,
+        duty_date_filter: str = "today",
+        duty_start_date: str = "",
+        duty_end_date: str = "",
+        duty_employee: str = "all",
+        duty_action_type: str = "all",
+        duty_status: str = "all",
 
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
@@ -4801,6 +5097,7 @@ async def employees_page(
         "whiteboard",
         "salary_settlement",
         "team_assessment",
+        "duty_sessions",
     ]
 
     employee_tabs = [
@@ -4869,6 +5166,16 @@ async def employees_page(
 
     # ===== 8. 团队管理与团队考核数据 =====
     team_management_data = None
+    duty_session_rows = []
+    current_duty_rows = []
+    duty_filters = {
+        "date_filter": duty_date_filter,
+        "start_date": duty_start_date,
+        "end_date": duty_end_date,
+        "employee": duty_employee,
+        "action_type": duty_action_type,
+        "status": duty_status,
+    }
 
     if tab == "my_leave":
         my_leave_requests = session.exec(
@@ -4993,6 +5300,119 @@ async def employees_page(
             month=today.month
         )
 
+    if tab == "duty_sessions" and user.role == "admin":
+        now = datetime.now()
+        for emp in active_employees:
+            if emp.role == "admin":
+                continue
+            store_session = _active_store_duty_session(session, emp.id)
+            review_session = _today_review_session(session, emp.id)
+            if store_session:
+                total_minutes = max(int((now - store_session.started_at).total_seconds() // 60), 0) if store_session.started_at else 0
+                current_duty_rows.append({
+                    "employee": emp,
+                    "status_label": "上班中",
+                    "action_label": "开始带店",
+                    "store_names": "、".join(_decode_duty_store_names(store_session.store_names_json)) or "-",
+                    "action_time": store_session.started_at,
+                    "duration_text": f"{total_minutes // 60}小时{total_minutes % 60}分钟" if store_session.started_at else "-",
+                })
+            elif review_session:
+                current_duty_rows.append({
+                    "employee": emp,
+                    "status_label": "已放行",
+                    "action_label": "复查补信息",
+                    "store_names": "-",
+                    "action_time": review_session.reviewed_at,
+                    "duration_text": "无需下班",
+                })
+            else:
+                current_duty_rows.append({
+                    "employee": emp,
+                    "status_label": "未上班",
+                    "action_label": "-",
+                    "store_names": "-",
+                    "action_time": None,
+                    "duration_text": "-",
+                })
+
+        today = date.today()
+        if duty_date_filter == "yesterday":
+            filter_start_date = today - timedelta(days=1)
+            filter_end_date = today - timedelta(days=1)
+        elif duty_date_filter == "this_month":
+            filter_start_date = today.replace(day=1)
+            filter_end_date = today
+        elif duty_date_filter == "custom":
+            try:
+                filter_start_date = datetime.strptime(duty_start_date, "%Y-%m-%d").date()
+            except Exception:
+                filter_start_date = today
+            try:
+                filter_end_date = datetime.strptime(duty_end_date, "%Y-%m-%d").date()
+            except Exception:
+                filter_end_date = filter_start_date
+            if filter_end_date < filter_start_date:
+                filter_end_date = filter_start_date
+        else:
+            duty_date_filter = "today"
+            duty_filters["date_filter"] = duty_date_filter
+            filter_start_date = today
+            filter_end_date = today
+
+        duty_records = session.exec(
+            select(EmployeeDutySession).order_by(
+                EmployeeDutySession.created_at.desc(),
+                EmployeeDutySession.id.desc()
+            )
+        ).all()
+        for item in duty_records:
+            action_time = item.started_at if item.action_type == DUTY_ACTION_STORE else item.reviewed_at
+            action_date = action_time.date() if action_time else None
+            if action_date and not (filter_start_date <= action_date <= filter_end_date):
+                continue
+            if duty_employee != "all" and str(item.user_id) != str(duty_employee):
+                continue
+            if duty_action_type != "all" and item.action_type != duty_action_type:
+                continue
+            item_status = (
+                "active" if item.action_type == DUTY_ACTION_STORE and not item.ended_at
+                else "ended" if item.action_type == DUTY_ACTION_STORE
+                else "review"
+            )
+            if duty_status != "all" and item_status != duty_status:
+                continue
+
+            end_time = item.ended_at
+            duration_text = "-"
+            if item.action_type == DUTY_ACTION_STORE and action_time:
+                end_for_calc = end_time or now
+                total_minutes = max(int((end_for_calc - action_time).total_seconds() // 60), 0)
+                duration_text = f"{total_minutes // 60}小时{total_minutes % 60}分钟"
+
+            duty_session_rows.append({
+                "record": item,
+                "action_label": "开始带店" if item.action_type == DUTY_ACTION_STORE else "复查补信息",
+                "status_label": (
+                    "上班中" if item.action_type == DUTY_ACTION_STORE and not item.ended_at
+                    else "已下班" if item.action_type == DUTY_ACTION_STORE
+                    else "无需下班"
+                ),
+                "store_names": "、".join(_decode_duty_store_names(item.store_names_json)) or "-",
+                "action_time": action_time,
+                "end_time": end_time,
+                "duration_text": duration_text,
+            })
+
+        duty_filters.update({
+            "date_filter": duty_date_filter,
+            "start_date": filter_start_date.strftime("%Y-%m-%d"),
+            "end_date": filter_end_date.strftime("%Y-%m-%d"),
+            "employee": duty_employee,
+            "action_type": duty_action_type,
+            "status": duty_status,
+        })
+
     tomorrow = date.today() + timedelta(days=1)
 
     return templates.TemplateResponse("employees.html", {
@@ -5052,6 +5472,9 @@ async def employees_page(
 
         # 团队管理与团队考核模块数据
         "team_management_data": team_management_data,
+        "duty_session_rows": duty_session_rows,
+        "current_duty_rows": current_duty_rows,
+        "duty_filters": duty_filters,
     })
 
 
@@ -8585,6 +9008,8 @@ async def update_game_status(
         # 但玩家备注、整桌备注、room_fee 不清空
         game.status = "unformed"
         game.order_start_time = None
+        game.order_end_time = None
+        game.order_end_time_manually_set = False
 
         game.updated_at = datetime.now()
         game.updated_by = user.display_name
@@ -9211,6 +9636,8 @@ async def add_self_arrival_game(
         store_name: str = Form(...),
         room_name: str = Form(...),
         order_start_time_full: str = Form(...),
+        order_end_time_full: Optional[str] = Form(""),
+        order_end_time_manually_set: Optional[str] = Form("0"),
         player_1: str = Form(...),
         player_1_wechat: str = Form(...),
         payment_method: str = Form(...),
@@ -9310,6 +9737,26 @@ async def add_self_arrival_game(
                 end_date=end_date,
                 payment_method_filter=payment_method_filter,
                 error=str(e)
+            ),
+            status_code=303
+        )
+
+    order_end_time, order_end_manual = _resolve_order_end_time(
+        order_start_time,
+        order_end_time_full,
+        _normalize_order_end_manual_flag(order_end_time_manually_set)
+    )
+    if not _validate_order_end_after_start(order_start_time, order_end_time):
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_SELF_ARRIVAL,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error="订单结束时间必须晚于订单开始时间"
             ),
             status_code=303
         )
@@ -9421,6 +9868,8 @@ async def add_self_arrival_game(
         room_fee=final_room_fee,
 
         order_start_time=order_start_time,
+        order_end_time=order_end_time,
+        order_end_time_manually_set=order_end_manual,
 
         status="formed",
         record_source=FORMED_SOURCE_SELF_ARRIVAL,
@@ -9514,6 +9963,8 @@ async def update_self_arrival_game(
         store_name: str = Form(...),
         room_name: str = Form(...),
         order_start_time_full: str = Form(""),
+        order_end_time_full: Optional[str] = Form(""),
+        order_end_time_manually_set: Optional[str] = Form("0"),
         player_1: str = Form(...),
         player_1_wechat: str = Form(...),
         payment_method: str = Form(...),
@@ -9642,6 +10093,26 @@ async def update_self_arrival_game(
         order_date = date.today()
         order_start_time = None
 
+    order_end_time, order_end_manual = _resolve_order_end_time(
+        order_start_time,
+        order_end_time_full,
+        _normalize_order_end_manual_flag(order_end_time_manually_set)
+    )
+    if not _validate_order_end_after_start(order_start_time, order_end_time):
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_SELF_ARRIVAL,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error="订单结束时间必须晚于订单开始时间"
+            ),
+            status_code=303
+        )
+
     payment_method = _normalize_text(payment_method)
     if payment_method not in SELF_ARRIVAL_PAYMENT_METHODS:
         return RedirectResponse(
@@ -9738,6 +10209,8 @@ async def update_self_arrival_game(
     game.record_date = order_date
     game.start_time = "自主到店"
     game.order_start_time = order_start_time
+    game.order_end_time = order_end_time
+    game.order_end_time_manually_set = order_end_manual
 
     game.room_name = room_name
     game.payment_method = payment_method
@@ -9895,6 +10368,8 @@ async def add_overflow_game(
         store_name: str = Form(...),
         start_time_full: str = Form(""),
         order_start_time_full: str = Form(""),
+        order_end_time_full: Optional[str] = Form(""),
+        order_end_time_manually_set: Optional[str] = Form("0"),
 
         external_store_name: str = Form(...),
         room_name: str = Form(""),
@@ -9972,6 +10447,25 @@ async def add_overflow_game(
 
     # 订单开始时间：允许为空
     order_start_time = _parse_optional_order_start_time(order_start_time_full)
+    order_end_time, order_end_manual = _resolve_order_end_time(
+        order_start_time,
+        order_end_time_full,
+        _normalize_order_end_manual_flag(order_end_time_manually_set)
+    )
+    if not _validate_order_end_after_start(order_start_time, order_end_time):
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_OVERFLOW,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error="order_end_time must be later than order_start_time"
+            ),
+            status_code=303
+        )
 
     room_name = _normalize_text(room_name)
 
@@ -10041,6 +10535,8 @@ async def add_overflow_game(
         start_time=new_start_time_str,
 
         order_start_time=order_start_time,
+        order_end_time=order_end_time,
+        order_end_time_manually_set=order_end_manual,
         external_store_name=external_store_name,
         room_name=room_name or None,
 
@@ -10130,6 +10626,8 @@ async def update_overflow_game(
         store_name: str = Form(...),
         start_time_full: str = Form(""),
         order_start_time_full: str = Form(""),
+        order_end_time_full: Optional[str] = Form(""),
+        order_end_time_manually_set: Optional[str] = Form("0"),
 
         external_store_name: str = Form(...),
         room_name: str = Form(""),
@@ -10252,6 +10750,25 @@ async def update_overflow_game(
         new_start_time_str = _normalize_text(game.start_time)
 
     order_start_time = _parse_optional_order_start_time(order_start_time_full)
+    order_end_time, order_end_manual = _resolve_order_end_time(
+        order_start_time,
+        order_end_time_full,
+        _normalize_order_end_manual_flag(order_end_time_manually_set)
+    )
+    if not _validate_order_end_after_start(order_start_time, order_end_time):
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_OVERFLOW,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error="order_end_time must be later than order_start_time"
+            ),
+            status_code=303
+        )
     room_name = _normalize_text(room_name)
 
     final_stakes = _normalize_text(stakes_custom) if _normalize_text(stakes_select) == "其他" else _normalize_text(stakes_select)
@@ -10338,6 +10855,8 @@ async def update_overflow_game(
     game.record_date = new_record_date
     game.start_time = new_start_time_str
     game.order_start_time = order_start_time
+    game.order_end_time = order_end_time
+    game.order_end_time_manually_set = order_end_manual
 
     game.external_store_name = external_store_name
     game.room_name = room_name or None
@@ -10854,6 +11373,8 @@ async def update_formed_game(
         store_name: str = Form(...),
         start_time_full: str = Form(...),
         order_start_time_full: Optional[str] = Form(""),
+        order_end_time_full: Optional[str] = Form(""),
+        order_end_time_manually_set: Optional[str] = Form("0"),
 
         stakes_select: str = Form(...),
         stakes_custom: Optional[str] = Form(None),
@@ -11134,7 +11655,32 @@ async def update_formed_game(
     game.record_date = new_record_date
     game.start_time = new_start_time_str
 
-    game.order_start_time = _parse_optional_order_start_time(order_start_time_full)
+    order_start_time = _parse_optional_order_start_time(order_start_time_full)
+    order_end_time, order_end_manual = _resolve_order_end_time(
+        order_start_time,
+        order_end_time_full,
+        _normalize_order_end_manual_flag(order_end_time_manually_set)
+    )
+    if not _validate_order_end_after_start(order_start_time, order_end_time):
+        msg = "order_end_time must be later than order_start_time"
+        return _ajax_or_redirect_error(
+            request,
+            message=msg,
+            redirect_url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_NORMAL,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=msg
+            )
+        )
+
+    game.order_start_time = order_start_time
+    game.order_end_time = order_end_time
+    game.order_end_time_manually_set = order_end_manual
 
     game.room_name = room_name
     game.payment_method = final_payment_method
@@ -11279,6 +11825,7 @@ async def get_game_detail(
         "reservation_date": str(game.record_date) if game.record_date else "",
         "reservation_time": game.start_time or "",
         "order_start_time": game.order_start_time or "",
+        "order_end_time": game.order_end_time or "",
 
         "room_name": game.room_name or "",
         "stakes": game.stakes or "",

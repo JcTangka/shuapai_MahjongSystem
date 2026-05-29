@@ -457,6 +457,10 @@
                    href="/employees?store={{ current_store }}&tab=team_assessment">
                     <i class="bi bi-diagram-3"></i>团队考核
                 </a>
+                <a class="employee-tab-link {% if active_tab == 'duty_sessions' %}active{% endif %}"
+                   href="/employees?store={{ current_store }}&tab=duty_sessions">
+                    <i class="bi bi-clock-history"></i>员工上班情况
+                </a>
             {% else %}
                 <a class="employee-tab-link {% if active_tab == 'my_salary' %}active{% endif %}"
                    href="/employees?store={{ current_store }}&tab=my_salary">
@@ -491,7 +495,169 @@
      页签内容区
 ========================= -->
 
-{% if active_tab == 'employee_list' %}
+{% if active_tab == 'duty_sessions' %}
+<div class="card employee-module-card">
+    <div class="card-header bg-white py-3">
+        <div class="fw-bold"><i class="bi bi-clock-history me-1 text-primary"></i>员工上班情况</div>
+        <div class="employee-page-subtitle mt-1">展示开始带店、复查补信息、下班时间和负责门店。</div>
+    </div>
+    <div class="card-body">
+        <form method="get" action="/employees" class="row g-3 align-items-end mb-4">
+            <input type="hidden" name="store" value="{{ current_store }}">
+            <input type="hidden" name="tab" value="duty_sessions">
+
+            <div class="col-md-2">
+                <label class="form-label fw-bold">日期</label>
+                <select class="form-select" name="duty_date_filter" id="dutyDateFilter" onchange="toggleDutyCustomDateRange()">
+                    <option value="today" {% if duty_filters.date_filter == 'today' %}selected{% endif %}>今天</option>
+                    <option value="yesterday" {% if duty_filters.date_filter == 'yesterday' %}selected{% endif %}>昨天</option>
+                    <option value="this_month" {% if duty_filters.date_filter == 'this_month' %}selected{% endif %}>本月</option>
+                    <option value="custom" {% if duty_filters.date_filter == 'custom' %}selected{% endif %}>自定义</option>
+                </select>
+            </div>
+
+            <div class="col-md-2 duty-custom-date">
+                <label class="form-label fw-bold">开始日期</label>
+                <input type="date" class="form-control" name="duty_start_date" value="{{ duty_filters.start_date }}">
+            </div>
+
+            <div class="col-md-2 duty-custom-date">
+                <label class="form-label fw-bold">结束日期</label>
+                <input type="date" class="form-control" name="duty_end_date" value="{{ duty_filters.end_date }}">
+            </div>
+
+            <div class="col-md-2">
+                <label class="form-label fw-bold">员工</label>
+                <select class="form-select" name="duty_employee">
+                    <option value="all">全部员工</option>
+                    {% for emp in active_employees %}
+                        {% if emp.role != 'admin' %}
+                        <option value="{{ emp.id }}" {% if duty_filters.employee|string == emp.id|string %}selected{% endif %}>{{ emp.display_name }}</option>
+                        {% endif %}
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-md-2">
+                <label class="form-label fw-bold">类型</label>
+                <select class="form-select" name="duty_action_type">
+                    <option value="all" {% if duty_filters.action_type == 'all' %}selected{% endif %}>全部类型</option>
+                    <option value="store_duty" {% if duty_filters.action_type == 'store_duty' %}selected{% endif %}>开始带店</option>
+                    <option value="review_info" {% if duty_filters.action_type == 'review_info' %}selected{% endif %}>复查补信息</option>
+                </select>
+            </div>
+
+            <div class="col-md-2">
+                <label class="form-label fw-bold">状态</label>
+                <select class="form-select" name="duty_status">
+                    <option value="all" {% if duty_filters.status == 'all' %}selected{% endif %}>全部状态</option>
+                    <option value="active" {% if duty_filters.status == 'active' %}selected{% endif %}>上班中</option>
+                    <option value="ended" {% if duty_filters.status == 'ended' %}selected{% endif %}>已下班</option>
+                    <option value="review" {% if duty_filters.status == 'review' %}selected{% endif %}>复查补信息</option>
+                </select>
+            </div>
+
+            <div class="col-md-12 d-flex gap-2">
+                <button type="submit" class="btn btn-primary">
+                    <i class="bi bi-search me-1"></i>筛选
+                </button>
+                <a href="/employees?store={{ current_store }}&tab=duty_sessions" class="btn btn-outline-secondary">
+                    重置
+                </a>
+            </div>
+        </form>
+
+        <div class="fw-bold mb-3">当前状态</div>
+        <div class="table-responsive mb-4">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>员工</th>
+                        <th>状态</th>
+                        <th>放行方式</th>
+                        <th>负责门店</th>
+                        <th>开始/复查时间</th>
+                        <th>持续时长</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in current_duty_rows %}
+                    <tr>
+                        <td class="fw-bold">{{ row.employee.display_name }}</td>
+                        <td>
+                            {% if row.status_label == '上班中' %}
+                                <span class="badge bg-success">{{ row.status_label }}</span>
+                            {% elif row.status_label == '已放行' %}
+                                <span class="badge bg-info text-dark">{{ row.status_label }}</span>
+                            {% else %}
+                                <span class="badge bg-secondary">{{ row.status_label }}</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ row.action_label }}</td>
+                        <td>{{ row.store_names }}</td>
+                        <td>{{ row.action_time.strftime('%Y-%m-%d %H:%M') if row.action_time else '-' }}</td>
+                        <td>{{ row.duration_text }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="6" class="text-center text-muted py-4">暂无在职普通员工</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="fw-bold mb-3">历史记录</div>
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>员工</th>
+                        <th>类型</th>
+                        <th>状态</th>
+                        <th>负责门店</th>
+                        <th>上班/复查时间</th>
+                        <th>下班时间</th>
+                        <th>持续时长</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in duty_session_rows %}
+                    <tr>
+                        <td class="fw-bold">{{ row.record.employee_name }}</td>
+                        <td>{{ row.action_label }}</td>
+                        <td>
+                            {% if row.status_label == '上班中' %}
+                                <span class="badge bg-success">{{ row.status_label }}</span>
+                            {% elif row.status_label == '已下班' %}
+                                <span class="badge bg-secondary">{{ row.status_label }}</span>
+                            {% else %}
+                                <span class="badge bg-info text-dark">{{ row.status_label }}</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ row.store_names }}</td>
+                        <td>{{ row.action_time.strftime('%Y-%m-%d %H:%M') if row.action_time else '-' }}</td>
+                        <td>
+                            {% if row.record.action_type == 'review_info' %}
+                                无需下班
+                            {% else %}
+                                {{ row.end_time.strftime('%Y-%m-%d %H:%M') if row.end_time else '-' }}
+                            {% endif %}
+                        </td>
+                        <td>{{ row.duration_text }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="7" class="text-center text-muted py-5">暂无员工上班记录</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% elif active_tab == 'employee_list' %}
 <!-- =========================
      管理员：员工列表
      说明：
@@ -3511,6 +3677,16 @@
 
 {% block scripts %}
 <script>
+function toggleDutyCustomDateRange() {
+    const select = document.getElementById('dutyDateFilter');
+    const show = select && select.value === 'custom';
+    document.querySelectorAll('.duty-custom-date').forEach(el => {
+        el.style.display = show ? '' : 'none';
+    });
+}
+
+document.addEventListener('DOMContentLoaded', toggleDutyCustomDateRange);
+
 /**
  * V3 员工管理：AJAX 局部刷新
  *
