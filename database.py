@@ -1163,6 +1163,68 @@ class EmployeeNotification(SQLModel, table=True):
 
     created_at: datetime = Field(default_factory=datetime.now, index=True)
 
+
+# ===================== 当天门店工作内容 =====================
+class DailyStoreWorkItem(SQLModel, table=True):
+    """
+    管理员按门店派发的当天工作内容。
+    """
+    __tablename__ = "dailystoreworkitem"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    store_name: str = Field(index=True)
+    content: str
+
+    # pending / completed
+    status: str = Field(default="pending", index=True)
+
+    assigned_by_user_id: int = Field(foreign_key="user.id", index=True)
+    assigned_by_name: str = Field(index=True)
+    assigned_at: datetime = Field(default_factory=datetime.now, index=True)
+
+    completed_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    completed_by_name: Optional[str] = Field(default=None, index=True)
+    completed_at: Optional[datetime] = Field(default=None, index=True)
+
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+
+
+# ===================== 常见问题如何处理 =====================
+class CommonIssue(SQLModel, table=True):
+    """
+    常见问题主表。
+    """
+    __tablename__ = "commonissue"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    question: str = Field(index=True)
+
+    created_by_user_id: int = Field(foreign_key="user.id", index=True)
+    created_by_name: str = Field(index=True)
+
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+
+
+class CommonIssueReasonSolution(SQLModel, table=True):
+    """
+    常见问题的原因-解决方法明细。
+    """
+    __tablename__ = "commonissuereasonsolution"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    issue_id: int = Field(foreign_key="commonissue.id", index=True)
+    reason: str
+    solution: str
+    sort_order: int = Field(default=0, index=True)
+
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+
 # =========== 函数定义 =============
 
 def create_db_and_tables():
@@ -1190,6 +1252,8 @@ def create_db_and_tables():
     migrate_employee_leave_request_table()
     migrate_employee_attendance_record_table()
     migrate_monthly_salary_settlement_table()
+    migrate_daily_store_work_item_table()
+    migrate_common_issue_tables()
 
 def _normalize_migration_text(value: Optional[str]) -> str:
     return (value or "").strip()
@@ -2048,6 +2112,102 @@ def migrate_user_table():
             """))
 
         conn.commit()
+
+
+def migrate_daily_store_work_item_table():
+    """
+    当天门店工作内容表。
+    """
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS dailystoreworkitem (
+                id INTEGER PRIMARY KEY,
+                store_name VARCHAR NOT NULL,
+                content VARCHAR NOT NULL,
+                status VARCHAR NOT NULL DEFAULT 'pending',
+                assigned_by_user_id INTEGER NOT NULL,
+                assigned_by_name VARCHAR NOT NULL,
+                assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_by_user_id INTEGER,
+                completed_by_name VARCHAR,
+                completed_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (assigned_by_user_id) REFERENCES user (id),
+                FOREIGN KEY (completed_by_user_id) REFERENCES user (id)
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_dailystoreworkitem_store_name
+            ON dailystoreworkitem (store_name)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_dailystoreworkitem_status
+            ON dailystoreworkitem (status)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_dailystoreworkitem_assigned_at
+            ON dailystoreworkitem (assigned_at)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_dailystoreworkitem_assigned_by_user_id
+            ON dailystoreworkitem (assigned_by_user_id)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_dailystoreworkitem_completed_by_user_id
+            ON dailystoreworkitem (completed_by_user_id)
+        """))
+
+
+def migrate_common_issue_tables():
+    """
+    常见问题如何处理：问题主表和原因-解决方法明细表。
+    """
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS commonissue (
+                id INTEGER PRIMARY KEY,
+                question VARCHAR NOT NULL,
+                created_by_user_id INTEGER NOT NULL,
+                created_by_name VARCHAR NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (created_by_user_id) REFERENCES user (id)
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_commonissue_question
+            ON commonissue (question)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_commonissue_created_by_user_id
+            ON commonissue (created_by_user_id)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_commonissue_updated_at
+            ON commonissue (updated_at)
+        """))
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS commonissuereasonsolution (
+                id INTEGER PRIMARY KEY,
+                issue_id INTEGER NOT NULL,
+                reason VARCHAR NOT NULL,
+                solution VARCHAR NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (issue_id) REFERENCES commonissue (id)
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_commonissuereasonsolution_issue_id
+            ON commonissuereasonsolution (issue_id)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_commonissuereasonsolution_sort_order
+            ON commonissuereasonsolution (sort_order)
+        """))
 
 def migrate_employee_leave_request_table():
     """

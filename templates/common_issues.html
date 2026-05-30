@@ -1,0 +1,268 @@
+{% extends "base.html" %}
+
+{% block title %}常见问题如何处理{% endblock %}
+
+{% block breadcrumb %}
+<i class="bi bi-question-circle"></i> 常见问题如何处理
+{% endblock %}
+
+{% block content %}
+<style>
+    .issue-card {
+        border-left: 5px solid #0d6efd;
+    }
+    .issue-title {
+        font-size: 1.15rem;
+        font-weight: 800;
+        color: #0b2e63;
+    }
+    .reason-solution-pair {
+        border: 1px solid #d7e3f5;
+        border-left: 4px solid #0d6efd;
+        border-radius: 8px;
+        background: #f8fbff;
+        padding: 14px;
+    }
+    .pair-label {
+        font-weight: 700;
+        color: #495057;
+        margin-bottom: 4px;
+    }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <h4 class="fw-bold mb-1">常见问题如何处理</h4>
+        <div class="text-muted small">沉淀问题、原因和对应处理方法</div>
+    </div>
+    {% if current_user.role == 'admin' %}
+    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addIssueModal">
+        <i class="bi bi-plus-circle me-1"></i>创建问题及解决
+    </button>
+    {% endif %}
+</div>
+
+{% if request.query_params.get('success') %}
+<div class="alert alert-success py-2">{{ request.query_params.get('success') }}</div>
+{% endif %}
+
+<form method="get" action="/common-issues" class="row g-3 align-items-end bg-light border rounded-3 p-3 mb-3">
+    <div class="col-md-8">
+        <label class="form-label fw-bold">关键词搜索</label>
+        <input type="text" name="keyword" class="form-control" value="{{ keyword }}" placeholder="搜索问题、可能的原因、解决方法">
+    </div>
+    <div class="col-md-2">
+        <button type="submit" class="btn btn-primary w-100">
+            <i class="bi bi-search me-1"></i>搜索
+        </button>
+    </div>
+    <div class="col-md-2">
+        <a href="/common-issues" class="btn btn-outline-secondary w-100">重置</a>
+    </div>
+</form>
+
+<div class="d-flex flex-column gap-3">
+    {% for issue in issue_cards %}
+    <div class="card issue-card shadow-sm">
+        <div class="card-body">
+            <div class="d-flex justify-content-between gap-3">
+                <div class="flex-grow-1">
+                    <div class="issue-title">{{ issue.question }}</div>
+                    <div class="text-muted small mt-2">
+                        更新：{{ issue.updated_at_str }}
+                        {% if current_user.role == 'admin' %}
+                        <span class="ms-2">创建人：{{ issue.created_by_name }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="d-flex flex-wrap gap-2 align-items-start">
+                    <button class="btn btn-sm btn-outline-primary"
+                            data-bs-toggle="modal"
+                            data-bs-target="#issueDetailModal{{ issue.id }}">
+                        查看详情
+                    </button>
+                    {% if current_user.role == 'admin' %}
+                    <button class="btn btn-sm btn-outline-secondary"
+                            data-bs-toggle="modal"
+                            data-bs-target="#editIssueModal{{ issue.id }}">
+                        编辑
+                    </button>
+                    <form method="post" action="/common-issues/{{ issue.id }}/delete" class="mb-0"
+                          onsubmit="return confirm('确定硬删除这个常见问题及所有原因解决方法吗？');">
+                        <input type="hidden" name="keyword" value="{{ keyword }}">
+                        <button type="submit" class="btn btn-sm btn-outline-danger">删除</button>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="issueDetailModal{{ issue.id }}" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title">问题详情</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="issue-title mb-3">{{ issue.question }}</div>
+                    <div class="d-flex flex-column gap-3">
+                        {% for pair in issue.pairs %}
+                        <div class="reason-solution-pair">
+                            <div class="pair-label"><i class="bi bi-search me-1"></i>可能的原因 {{ loop.index }}</div>
+                            <div class="mb-3" style="white-space: pre-line;">{{ pair.reason }}</div>
+                            <div class="pair-label"><i class="bi bi-tools me-1"></i>对应解决方法</div>
+                            <div style="white-space: pre-line;">{{ pair.solution }}</div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% if current_user.role == 'admin' %}
+    <div class="modal fade" id="editIssueModal{{ issue.id }}" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
+            <div class="modal-content">
+                <form method="post" action="/common-issues/{{ issue.id }}/update" data-issue-form>
+                    <input type="hidden" name="keyword" value="{{ keyword }}">
+                    <div class="modal-header bg-primary text-white">
+                        <h5 class="modal-title">编辑常见问题</h5>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <label class="form-label fw-bold">问题</label>
+                        <textarea name="question" class="form-control mb-3" rows="2" required>{{ issue.question }}</textarea>
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <label class="form-label fw-bold mb-0">可能原因及解决方法</label>
+                            <button type="button" class="btn btn-sm btn-outline-primary" data-add-pair>添加一对</button>
+                        </div>
+                        <div class="d-flex flex-column gap-3" data-pair-list>
+                            {% for pair in issue.pairs %}
+                            <div class="reason-solution-pair" data-pair>
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <strong>原因及解决方法 {{ loop.index }}</strong>
+                                    <button type="button" class="btn btn-sm btn-outline-danger" data-remove-pair>删除此对</button>
+                                </div>
+                                <label class="form-label">可能的原因</label>
+                                <textarea name="reasons" class="form-control mb-2" rows="2" required>{{ pair.reason }}</textarea>
+                                <label class="form-label">对应解决方法</label>
+                                <textarea name="solutions" class="form-control" rows="3" required>{{ pair.solution }}</textarea>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                        <button type="submit" class="btn btn-primary">保存</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="text-center text-muted py-5 bg-white border rounded-3">
+        暂无常见问题
+    </div>
+    {% endfor %}
+</div>
+
+{% if current_user.role == 'admin' %}
+<div class="modal fade" id="addIssueModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <form method="post" action="/common-issues/add" data-issue-form>
+                <input type="hidden" name="keyword" value="{{ keyword }}">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title">创建问题及解决</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <label class="form-label fw-bold">问题</label>
+                    <textarea name="question" class="form-control mb-3" rows="2" required></textarea>
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <label class="form-label fw-bold mb-0">可能原因及解决方法</label>
+                        <button type="button" class="btn btn-sm btn-outline-primary" data-add-pair>添加一对</button>
+                    </div>
+                    <div class="d-flex flex-column gap-3" data-pair-list>
+                        <div class="reason-solution-pair" data-pair>
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <strong>原因及解决方法 1</strong>
+                                <button type="button" class="btn btn-sm btn-outline-danger" data-remove-pair>删除此对</button>
+                            </div>
+                            <label class="form-label">可能的原因</label>
+                            <textarea name="reasons" class="form-control mb-2" rows="2" required></textarea>
+                            <label class="form-label">对应解决方法</label>
+                            <textarea name="solutions" class="form-control" rows="3" required></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if current_user.role == 'admin' %}
+<script>
+function renumberPairs(list) {
+    list.querySelectorAll('[data-pair]').forEach((pair, idx) => {
+        const title = pair.querySelector('strong');
+        if (title) title.textContent = `原因及解决方法 ${idx + 1}`;
+    });
+}
+
+function createPairElement() {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'reason-solution-pair';
+    wrapper.setAttribute('data-pair', '');
+    wrapper.innerHTML = `
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <strong>原因及解决方法</strong>
+            <button type="button" class="btn btn-sm btn-outline-danger" data-remove-pair>删除此对</button>
+        </div>
+        <label class="form-label">可能的原因</label>
+        <textarea name="reasons" class="form-control mb-2" rows="2" required></textarea>
+        <label class="form-label">对应解决方法</label>
+        <textarea name="solutions" class="form-control" rows="3" required></textarea>
+    `;
+    return wrapper;
+}
+
+document.addEventListener('click', function(event) {
+    const addBtn = event.target.closest('[data-add-pair]');
+    if (addBtn) {
+        const form = addBtn.closest('[data-issue-form]');
+        const list = form.querySelector('[data-pair-list]');
+        list.appendChild(createPairElement());
+        renumberPairs(list);
+        return;
+    }
+
+    const removeBtn = event.target.closest('[data-remove-pair]');
+    if (removeBtn) {
+        const list = removeBtn.closest('[data-pair-list]');
+        const pairs = list.querySelectorAll('[data-pair]');
+        if (pairs.length <= 1) {
+            alert('至少保留一对原因及解决方法');
+            return;
+        }
+        removeBtn.closest('[data-pair]').remove();
+        renumberPairs(list);
+    }
+});
+</script>
+{% endif %}
+{% endblock %}

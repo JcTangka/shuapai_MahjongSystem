@@ -202,6 +202,11 @@
                         <i class="bi bi-person-badge"></i> 员工管理
                     </a>
                 </li>
+                <li>
+                    <a href="/daily-store-work" class="nav-link {% if page_name == 'daily_store_work' %}active{% endif %}">
+                        <i class="bi bi-clipboard2-check"></i> 当天门店工作内容
+                    </a>
+                </li>
 
 <!--                <li>-->
 <!--                    <a href="#" class="nav-link {% if page_name == 'complaints' %}active{% endif %}">-->
@@ -215,6 +220,11 @@
                         <a href="#" class="nav-link"><i class="bi bi-database-lock"></i> 数据库</a>
                     </li>
                  {% endif %}
+                    <li>
+                        <a href="/common-issues" class="nav-link {% if page_name == 'common_issues' %}active{% endif %}">
+                            <i class="bi bi-question-circle"></i> 常见问题如何处理
+                        </a>
+                    </li>
                     <li class="nav-item">
                         <a class="nav-link" data-bs-toggle="collapse" href="#settingsMenu">
                             <i class="bi bi-gear me-2"></i>设置
@@ -323,9 +333,48 @@
                     <h5 class="modal-title"><i class="bi bi-exclamation-triangle-fill me-2"></i>提示</h5>
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
-                <div class="modal-body text-center py-4 fs-5" id="globalErrorMsg"></div>
+                <div class="modal-body text-start py-4 fs-5" id="globalErrorMsg" style="white-space: pre-line;"></div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary w-100" data-bs-dismiss="modal">知道了</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="dutySelfCheckWarningModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-warning text-dark">
+                    <h5 class="modal-title">结束带店自检提醒</h5>
+                </div>
+                <div class="modal-body text-start py-4 fs-5" id="dutySelfCheckWarningMsg" style="white-space: pre-line;"></div>
+                <div class="modal-footer">
+                    <form action="/employee-duty/end" method="post" class="w-100 mb-0">
+                        <input type="hidden" name="current_store" value="{{ current_store or '' }}">
+                        <input type="hidden" name="acknowledge_self_check" value="order_followup_warning">
+                        <input type="hidden" name="self_check_clicked_at" id="dutySelfCheckClickedAt" value="">
+                        <button type="submit" class="btn btn-warning w-100 fw-bold">我已知晓</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="dutyHandoverNoticeModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-info text-dark">
+                    <h5 class="modal-title" id="dutyHandoverNoticeTitle">待办及信息同步提示</h5>
+                </div>
+                <div class="modal-body text-start py-4 fs-5" id="dutyHandoverNoticeMsg" style="white-space: pre-line;"></div>
+                <div class="modal-footer d-flex gap-2">
+                    <button type="button" class="btn btn-outline-secondary flex-fill" data-bs-dismiss="modal">取消</button>
+                    <form action="/employee-duty/end" method="post" class="flex-fill mb-0">
+                        <input type="hidden" name="current_store" value="{{ current_store or '' }}">
+                        <input type="hidden" name="acknowledge_self_check" id="dutyNoticeAckValue" value="handover_sync_notice">
+                        <input type="hidden" name="self_check_clicked_at" id="dutyHandoverClickedAt" value="">
+                        <button type="submit" class="btn btn-info w-100 fw-bold">我已知晓</button>
+                    </form>
                 </div>
             </div>
         </div>
@@ -337,6 +386,11 @@
             // 1. 抓取 URL 中的 error 参数
             const urlParams = new URLSearchParams(window.location.search);
             const error = urlParams.get('error');
+            const dutySelfCheckWarning = urlParams.get('duty_self_check_warning');
+            const dutyHandoverNotice = urlParams.get('duty_handover_notice');
+            const dutyNoticeTitle = urlParams.get('duty_notice_title');
+            const dutyNoticeAckValue = urlParams.get('duty_notice_ack_value');
+            const dutySelfCheckClickedAt = urlParams.get('duty_self_check_clicked_at');
 
             // 2. 如果有错误信息，就弹窗
             if (error) {
@@ -347,6 +401,40 @@
                 // 3. 弹窗后清除 URL 里的 error 参数，看着更干净
                 const newUrl = window.location.pathname + window.location.search.replace(/[\?&]error=[^&]+/, '').replace(/^&/, '?');
                 window.history.replaceState({}, document.title, newUrl);
+            }
+
+            if (dutySelfCheckWarning) {
+                document.getElementById('dutySelfCheckWarningMsg').textContent = dutySelfCheckWarning;
+                document.getElementById('dutySelfCheckClickedAt').value = dutySelfCheckClickedAt || '';
+                var warningModal = new bootstrap.Modal(
+                    document.getElementById('dutySelfCheckWarningModal'),
+                    {backdrop: 'static', keyboard: false}
+                );
+                warningModal.show();
+
+                const cleanUrl = new URL(window.location.href);
+                cleanUrl.searchParams.delete('duty_self_check_warning');
+                cleanUrl.searchParams.delete('duty_self_check_clicked_at');
+                window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search);
+            }
+
+            if (dutyHandoverNotice) {
+                document.getElementById('dutyHandoverNoticeTitle').textContent = dutyNoticeTitle || '结束带店自检提示';
+                document.getElementById('dutyHandoverNoticeMsg').textContent = dutyHandoverNotice;
+                document.getElementById('dutyNoticeAckValue').value = dutyNoticeAckValue || 'handover_sync_notice';
+                document.getElementById('dutyHandoverClickedAt').value = dutySelfCheckClickedAt || '';
+                var handoverModal = new bootstrap.Modal(
+                    document.getElementById('dutyHandoverNoticeModal'),
+                    {backdrop: 'static', keyboard: false}
+                );
+                handoverModal.show();
+
+                const cleanUrl = new URL(window.location.href);
+                cleanUrl.searchParams.delete('duty_handover_notice');
+                cleanUrl.searchParams.delete('duty_notice_title');
+                cleanUrl.searchParams.delete('duty_notice_ack_value');
+                cleanUrl.searchParams.delete('duty_self_check_clicked_at');
+                window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search);
             }
         });
     </script>

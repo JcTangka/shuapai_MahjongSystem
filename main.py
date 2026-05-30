@@ -26,7 +26,8 @@ from database import (GameRecord,Store, Room, User,
                       get_manager_performance_stats, get_shift_performance_stats,
                       HandoverTodo, HandoverTodoCustomerLink, FormedGameHandoverLink,SelfArrivalRecord,
                       PublicTrafficLead, ContactCustomerFollowup, NewCustomerPullRecord,
-                      EmployeeDutySession,
+                      EmployeeDutySession, DailyStoreWorkItem,
+                      CommonIssue, CommonIssueReasonSolution,
                         # V3 员工管理 / 请假 / 考勤 / 工资流水 / 团队管理
                       EmployeeProfile,
                       EmployeeLeaveRequest,
@@ -2643,25 +2644,9 @@ def _get_self_arrival_monthly_serial_number(session: Session, store_name: str, o
 def _can_delete_unformed_game(user: User, game: GameRecord) -> bool:
     """
     未组齐撤销规则：
-    - 超管：随时可撤销
-    - 创建人：6小时内可撤销
-    - 任意店长：超过6小时且仍未组齐后可撤销
+    - 所有已登录用户均可撤销未组齐记录
     """
-    if user.role == "admin":
-        return True
-
-    if game.status != "unformed":
-        return False
-
-    now = datetime.now()
-    created_at = game.created_at or now
-    over_6_hours = (now - created_at) >= timedelta(hours=6)
-
-    if over_6_hours:
-        return True
-
-    # 6小时内，只允许创建人撤销
-    return game.who_did == user.display_name
+    return game.status == "unformed"
 
 def _parse_optional_order_start_time(order_start_time_full: Optional[str]) -> Optional[str]:
     """
@@ -4585,6 +4570,23 @@ def _decode_duty_store_names(raw: Optional[str]) -> List[str]:
     return [_normalize_text(x) for x in raw.split(",") if _normalize_text(x)]
 
 
+def _build_root_redirect_url(
+        store: Optional[str] = "",
+        *,
+        error: str = "",
+        success: str = ""
+) -> str:
+    params = {}
+    clean_store = _normalize_text(store)
+    if clean_store:
+        params["store"] = clean_store
+    if error:
+        params["error"] = error
+    if success:
+        params["success"] = success
+    return "/?" + urlencode(params) if params else "/"
+
+
 def _active_store_duty_session(session: Session, user_id: int) -> Optional[EmployeeDutySession]:
     return session.exec(
         select(EmployeeDutySession).where(
@@ -4643,6 +4645,616 @@ def _build_employee_duty_status(session: Session, user: Optional[User]) -> dict:
         status["is_released"] = False
 
     return status
+
+
+STORE_DUTY_SELF_CHECK_ORDER_SOURCES = (
+    FORMED_SOURCE_NORMAL,
+    FORMED_SOURCE_OVERFLOW,
+)
+
+STORE_DUTY_INFO_CHECK_ORDER_SOURCES = (
+    FORMED_SOURCE_NORMAL,
+    FORMED_SOURCE_OVERFLOW,
+    FORMED_SOURCE_SELF_ARRIVAL,
+)
+
+STORE_DUTY_ORDER_SOURCE_LABELS = {
+    FORMED_SOURCE_NORMAL: "常规单",
+    FORMED_SOURCE_OVERFLOW: "溢出单",
+    FORMED_SOURCE_SELF_ARRIVAL: "自主到店单",
+}
+
+STORE_DUTY_ACK_FORM_VALUE = "order_followup_warning"
+STORE_DUTY_HANDOVER_ACK_FORM_VALUE = "handover_sync_notice"
+STORE_DUTY_DEPOSIT_ACK_FORM_VALUE = "deposit_notice"
+STORE_DUTY_SPECIAL_ROOM_FEE_ACK_FORM_VALUE = "special_room_fee_notice"
+STORE_DUTY_GROUP_PIN_ACK_FORM_VALUE = "group_pin_notice"
+STORE_DUTY_PRIVATE_DEPOSIT_PIN_ACK_FORM_VALUE = "private_deposit_pin_notice"
+STORE_DUTY_OFFLINE_CANCEL_ACK_FORM_VALUE = "offline_cancel_notice"
+
+STORE_DUTY_NON_BLOCKING_SELF_CHECKS = (
+    (STORE_DUTY_HANDOVER_ACK_FORM_VALUE, "待办及信息同步提示", None),
+    (
+        STORE_DUTY_DEPOSIT_ACK_FORM_VALUE,
+        "押金备注提示",
+        "当前班次店长是否已正确备注押金情况（支付宝、微信余额）？",
+    ),
+    (
+        STORE_DUTY_SPECIAL_ROOM_FEE_ACK_FORM_VALUE,
+        "特殊包间费提示",
+        "当前班次店长是否已正确备注特殊包间费支付情况（未在群收款体现的包间费避免重复向用户索要）",
+    ),
+    (
+        STORE_DUTY_GROUP_PIN_ACK_FORM_VALUE,
+        "群置顶提示",
+        "是否有已结束的组局、已受理完的用户未取消群置顶",
+    ),
+    (
+        STORE_DUTY_PRIVATE_DEPOSIT_PIN_ACK_FORM_VALUE,
+        "押金私发置顶提示",
+        "押金私发的用户是否全部置顶",
+    ),
+    (
+        STORE_DUTY_OFFLINE_CANCEL_ACK_FORM_VALUE,
+        "线下收款取消提示",
+        "线下收款订单取消后金额是否更改为0是否填写备注",
+    ),
+)
+
+
+def _game_has_any_followup_note(game: GameRecord) -> bool:
+    note_fields = (
+        game.player_1_note,
+        game.player_2_note,
+        game.player_3_note,
+        game.player_4_note,
+        game.table_note,
+    )
+    return any(_normalize_text(note) for note in note_fields)
+
+
+def _collect_game_followup_notes(game: GameRecord) -> str:
+    notes = []
+    player_notes = (
+        (game.player_1, game.player_1_note),
+        (game.player_2, game.player_2_note),
+        (game.player_3, game.player_3_note),
+        (game.player_4, game.player_4_note),
+    )
+    for player_name, note in player_notes:
+        clean_note = _normalize_text(note)
+        if clean_note:
+            clean_name = _normalize_text(player_name) or "参与人"
+            notes.append(f"{clean_name}备注：{clean_note}")
+
+    table_note = _normalize_text(game.table_note)
+    if table_note:
+        notes.append(f"整桌备注：{table_note}")
+
+    return "；".join(notes)
+
+
+def _format_store_duty_order_check_item(game: GameRecord, include_note: bool = False) -> str:
+    source = _normalize_text(game.record_source) or FORMED_SOURCE_NORMAL
+    source_label = STORE_DUTY_ORDER_SOURCE_LABELS.get(source, source)
+    order_label = f"{source_label}：#{game.serial_number or game.id}"
+    detail_parts = []
+
+    if _normalize_text(game.store_name):
+        detail_parts.append(f"门店 {game.store_name}")
+    if _normalize_text(game.room_name):
+        detail_parts.append(f"包间 {game.room_name}")
+    if _normalize_text(game.order_end_time):
+        detail_parts.append(f"结束时间 {game.order_end_time}")
+
+    if detail_parts:
+        order_label = f"{order_label}（{'，'.join(detail_parts)}）"
+
+    if include_note:
+        notes = _collect_game_followup_notes(game)
+        if notes:
+            order_label = f"{order_label} 备注：{notes}"
+
+    return order_label
+
+
+def _parse_store_duty_clicked_at(raw: Optional[str]) -> Optional[datetime]:
+    clean = _normalize_text(raw)
+    if not clean:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(clean, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def _store_duty_order_end_filter_text(clicked_at: datetime) -> str:
+    return clicked_at.strftime("%Y-%m-%d %H:%M")
+
+
+def _store_duty_month_start_filter_text(clicked_at: datetime) -> str:
+    month_start = clicked_at.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return month_start.strftime("%Y-%m-%d %H:%M")
+
+
+def _run_store_duty_payment_self_check(
+        session: Session,
+        duty: EmployeeDutySession,
+        clicked_at: datetime
+) -> dict:
+    store_names = _decode_duty_store_names(duty.store_names_json)
+    result = {
+        "blocking_messages": [],
+        "warning_messages": [],
+    }
+    if not store_names:
+        return result
+
+    clicked_at_text = _store_duty_order_end_filter_text(clicked_at)
+    month_start_text = _store_duty_month_start_filter_text(clicked_at)
+    candidate_games = session.exec(
+        select(GameRecord).where(
+            GameRecord.store_name.in_(store_names),
+            GameRecord.status == "formed",
+            GameRecord.record_source.in_(STORE_DUTY_SELF_CHECK_ORDER_SOURCES),
+            GameRecord.order_end_time.is_not(None),
+            GameRecord.order_end_time != "",
+            GameRecord.order_end_time >= month_start_text,
+            GameRecord.order_end_time <= clicked_at_text,
+            GameRecord.is_payAll == False
+        ).order_by(GameRecord.record_source, GameRecord.store_name, GameRecord.order_end_time, GameRecord.id)
+    ).all()
+
+    unpaid_without_note = []
+    unpaid_with_note = []
+    for game in candidate_games:
+        if _game_has_any_followup_note(game):
+            unpaid_with_note.append(game)
+        else:
+            unpaid_without_note.append(game)
+
+    if unpaid_without_note:
+        items = [_format_store_duty_order_check_item(game) for game in unpaid_without_note]
+        result["blocking_messages"].append(
+            "以下订单尚未结算且无备注，无法结束带店：\n" + "\n".join(items)
+        )
+
+    if unpaid_with_note:
+        items = [_format_store_duty_order_check_item(game, include_note=True) for game in unpaid_with_note]
+        result["warning_messages"].append(
+            "以下订单未收齐但已有备注，请继续跟进：\n" + "\n".join(items)
+        )
+
+    return result
+
+
+def _get_store_duty_info_missing_reasons(game: GameRecord) -> List[str]:
+    source = _normalize_text(game.record_source) or FORMED_SOURCE_NORMAL
+    payment_method = _normalize_text(game.payment_method)
+    room_fee = _safe_float(game.room_fee)
+    reasons = []
+
+    if source == FORMED_SOURCE_SELF_ARRIVAL:
+        if not payment_method:
+            reasons.append("下单方式未指定")
+        elif payment_method == "代客收款" and room_fee == 0:
+            reasons.append("代客收款费用为0")
+        return reasons
+
+    if not _normalize_text(game.order_start_time):
+        reasons.append("订单开始时间为空")
+    if not _normalize_text(game.room_name):
+        reasons.append("包间未指定")
+    if room_fee == 0 and not game.is_payAll:
+        reasons.append("费用为0且支付状态未收齐")
+    if not payment_method:
+        reasons.append("支付方式未指定")
+
+    return reasons
+
+
+def _format_store_duty_info_check_item(game: GameRecord, reasons: List[str]) -> str:
+    item = _format_store_duty_order_check_item(game)
+    return f"{item} 遗漏信息：{'、'.join(reasons)}"
+
+
+def _run_store_duty_info_self_check(
+        session: Session,
+        duty: EmployeeDutySession,
+        clicked_at: datetime
+) -> dict:
+    store_names = _decode_duty_store_names(duty.store_names_json)
+    result = {
+        "blocking_messages": [],
+        "warning_messages": [],
+    }
+    if not store_names:
+        return result
+
+    clicked_at_text = _store_duty_order_end_filter_text(clicked_at)
+    month_start_text = _store_duty_month_start_filter_text(clicked_at)
+    month_start_date = clicked_at.date().replace(day=1)
+    clicked_at_date = clicked_at.date()
+    candidate_games = session.exec(
+        select(GameRecord).where(
+            GameRecord.store_name.in_(store_names),
+            GameRecord.status == "formed",
+            GameRecord.record_source.in_(STORE_DUTY_INFO_CHECK_ORDER_SOURCES),
+            or_(
+                (
+                    (GameRecord.order_end_time.is_not(None)) &
+                    (GameRecord.order_end_time != "") &
+                    (GameRecord.order_end_time >= month_start_text) &
+                    (GameRecord.order_end_time <= clicked_at_text)
+                ),
+                (
+                    ((GameRecord.order_end_time.is_(None)) | (GameRecord.order_end_time == "")) &
+                    (GameRecord.record_date >= month_start_date) &
+                    (GameRecord.record_date <= clicked_at_date)
+                )
+            )
+        ).order_by(GameRecord.record_source, GameRecord.store_name, GameRecord.order_end_time, GameRecord.id)
+    ).all()
+
+    missing_items = []
+    for game in candidate_games:
+        reasons = _get_store_duty_info_missing_reasons(game)
+        if reasons:
+            missing_items.append(_format_store_duty_info_check_item(game, reasons))
+
+    if missing_items:
+        result["blocking_messages"].append(
+            "以下订单存在信息遗漏，无法结束带店：\n" + "\n".join(missing_items)
+        )
+
+    return result
+
+
+def _extract_handover_current_note_detail(detail: Optional[str]) -> str:
+    raw = (detail or "").strip()
+    if not raw:
+        return "暂无详细说明"
+
+    lines = raw.splitlines()
+    start_index = None
+    end_index = len(lines)
+
+    for idx, line in enumerate(lines):
+        if line.strip() == "【当前有备注的参与人】":
+            start_index = idx + 1
+            break
+
+    if start_index is None:
+        return raw
+
+    for idx in range(start_index, len(lines)):
+        if lines[idx].strip().startswith("【系统提示】"):
+            end_index = idx
+            break
+
+    extracted = "\n".join(line.rstrip() for line in lines[start_index:end_index]).strip()
+    return extracted or "暂无当前备注参与人信息"
+
+
+def _build_store_duty_handover_notice(
+        session: Session,
+        duty: EmployeeDutySession,
+        clicked_at: datetime
+) -> str:
+    store_names = _decode_duty_store_names(duty.store_names_json)
+    if not store_names:
+        resolved_todos = []
+    else:
+        month_start = clicked_at.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        resolved_todos = session.exec(
+            select(HandoverTodo).where(
+                HandoverTodo.store_name.in_(store_names),
+                HandoverTodo.status == "resolved",
+                HandoverTodo.updated_at >= month_start,
+                HandoverTodo.updated_at <= clicked_at,
+            ).order_by(HandoverTodo.updated_at, HandoverTodo.id)
+        ).all()
+
+    lines = ["当前班次店长已解决同步信息有："]
+    if resolved_todos:
+        for idx, todo in enumerate(resolved_todos, start=1):
+            detail = _extract_handover_current_note_detail(todo.detail)
+            summary = _normalize_text(todo.summary) or f"待办#{todo.id}"
+            lines.append(f"{idx}.{summary}")
+            lines.append(detail)
+    else:
+        lines.append("本月截至当前暂无已解决的待办及信息同步。")
+
+    lines.append("")
+    lines.append("📣 是否已完成收支群报备")
+    lines.append("🔄 是否已完成微信同步删除/新增备注")
+    return "\n".join(lines).strip()
+
+
+def _get_next_store_duty_non_blocking_self_check(
+        session: Session,
+        duty: EmployeeDutySession,
+        clicked_at: datetime,
+        acknowledged_self_check: str
+) -> Optional[dict]:
+    acknowledged_index = -1
+    for idx, (ack_value, _, _) in enumerate(STORE_DUTY_NON_BLOCKING_SELF_CHECKS):
+        if acknowledged_self_check == ack_value:
+            acknowledged_index = idx
+            break
+
+    next_index = acknowledged_index + 1
+    if next_index >= len(STORE_DUTY_NON_BLOCKING_SELF_CHECKS):
+        return None
+
+    ack_value, title, message = STORE_DUTY_NON_BLOCKING_SELF_CHECKS[next_index]
+    if ack_value == STORE_DUTY_HANDOVER_ACK_FORM_VALUE:
+        message = _build_store_duty_handover_notice(session, duty, clicked_at)
+
+    return {
+        "ack_value": ack_value,
+        "title": title,
+        "message": message or "",
+    }
+
+
+def _run_store_duty_self_checks(
+        session: Session,
+        duty: EmployeeDutySession,
+        clicked_at: datetime,
+        acknowledged_first_warning: bool = False,
+        acknowledged_self_check: str = ""
+) -> dict:
+    result = {
+        "blocking_messages": [],
+        "warning_messages": [],
+        "requires_first_warning_ack": False,
+        "requires_notice_ack": False,
+        "notice_title": "",
+        "notice_message": "",
+        "notice_ack_value": "",
+    }
+
+    # 自检项 1：订单结算检查。
+    payment_result = _run_store_duty_payment_self_check(session, duty, clicked_at)
+    result["blocking_messages"].extend(payment_result.get("blocking_messages") or [])
+    first_warning_messages = payment_result.get("warning_messages") or []
+    result["warning_messages"].extend(first_warning_messages)
+
+    if result["blocking_messages"]:
+        return result
+
+    if first_warning_messages and not acknowledged_first_warning:
+        result["requires_first_warning_ack"] = True
+        return result
+
+    # 自检项 2：已组齐订单信息遗漏检查。后续自检项继续按顺序追加在这里。
+    info_result = _run_store_duty_info_self_check(session, duty, clicked_at)
+    result["blocking_messages"].extend(info_result.get("blocking_messages") or [])
+    result["warning_messages"].extend(info_result.get("warning_messages") or [])
+
+    if result["blocking_messages"]:
+        return result
+
+    # 自检项 3-8：非阻断提示。逐项确认后继续下一项；第 8 项确认后结束带店。
+    next_notice = _get_next_store_duty_non_blocking_self_check(
+        session,
+        duty,
+        clicked_at,
+        acknowledged_self_check,
+    )
+    if next_notice:
+        result["requires_notice_ack"] = True
+        result["notice_title"] = next_notice["title"]
+        result["notice_message"] = next_notice["message"]
+        result["notice_ack_value"] = next_notice["ack_value"]
+        return result
+
+    return result
+
+
+DAILY_WORK_STATUS_PENDING = "pending"
+DAILY_WORK_STATUS_COMPLETED = "completed"
+DAILY_WORK_STATUS_LABELS = {
+    DAILY_WORK_STATUS_PENDING: "待完成",
+    DAILY_WORK_STATUS_COMPLETED: "已完成",
+}
+
+
+def _day_start_end(target_date: date) -> Tuple[datetime, datetime]:
+    day_start = datetime.combine(target_date, time.min)
+    return day_start, day_start + timedelta(days=1)
+
+
+def _parse_query_date(raw: Optional[str], default_date: date) -> date:
+    clean = _normalize_text(raw)
+    if not clean:
+        return default_date
+    try:
+        return datetime.strptime(clean, "%Y-%m-%d").date()
+    except ValueError:
+        return default_date
+
+
+def _get_employee_duty_store_names_for_date(
+        session: Session,
+        user_id: int,
+        target_date: date
+) -> List[str]:
+    day_start, day_end = _day_start_end(target_date)
+    sessions = session.exec(
+        select(EmployeeDutySession).where(
+            EmployeeDutySession.user_id == user_id,
+            EmployeeDutySession.action_type == DUTY_ACTION_STORE,
+            EmployeeDutySession.started_at >= day_start,
+            EmployeeDutySession.started_at < day_end,
+        ).order_by(EmployeeDutySession.started_at, EmployeeDutySession.id)
+    ).all()
+
+    store_names = []
+    for duty in sessions:
+        for store_name in _decode_duty_store_names(duty.store_names_json):
+            if store_name and store_name not in store_names:
+                store_names.append(store_name)
+    return store_names
+
+
+def _build_daily_store_work_url(
+        work_date: date,
+        store: str = "",
+        *,
+        success: str = "",
+        error: str = ""
+) -> str:
+    params = {
+        "work_date": work_date.strftime("%Y-%m-%d"),
+    }
+    clean_store = _normalize_text(store)
+    if clean_store:
+        params["store"] = clean_store
+    if success:
+        params["success"] = success
+    if error:
+        params["error"] = error
+    return "/daily-store-work?" + urlencode(params)
+
+
+def _user_can_access_daily_work_item(
+        session: Session,
+        user: User,
+        item: DailyStoreWorkItem
+) -> bool:
+    if user.role == "admin":
+        return True
+    assigned_date = item.assigned_at.date() if item.assigned_at else date.today()
+    return item.store_name in _get_employee_duty_store_names_for_date(session, user.id, assigned_date)
+
+
+def _daily_store_work_payload(item: DailyStoreWorkItem) -> dict:
+    return {
+        "id": item.id,
+        "store_name": item.store_name,
+        "content": item.content,
+        "status": item.status,
+        "status_label": DAILY_WORK_STATUS_LABELS.get(item.status, item.status or ""),
+        "assigned_by_name": item.assigned_by_name,
+        "assigned_at_str": item.assigned_at.strftime("%Y-%m-%d %H:%M") if item.assigned_at else "",
+        "completed_by_name": item.completed_by_name or "",
+        "completed_at_str": item.completed_at.strftime("%Y-%m-%d %H:%M") if item.completed_at else "",
+    }
+
+
+def _build_common_issues_url(keyword: str = "", *, success: str = "", error: str = "") -> str:
+    params = {}
+    clean_keyword = _normalize_text(keyword)
+    if clean_keyword:
+        params["keyword"] = clean_keyword
+    if success:
+        params["success"] = success
+    if error:
+        params["error"] = error
+    return "/common-issues" + (("?" + urlencode(params)) if params else "")
+
+
+def _collect_issue_reason_pairs(reasons: List[str], solutions: List[str]) -> List[dict]:
+    pairs = []
+    max_len = max(len(reasons or []), len(solutions or []))
+    for idx in range(max_len):
+        reason = _normalize_text(reasons[idx] if idx < len(reasons or []) else "")
+        solution = _normalize_text(solutions[idx] if idx < len(solutions or []) else "")
+        if reason and solution:
+            pairs.append({
+                "reason": reason,
+                "solution": solution,
+            })
+    return pairs
+
+
+def _has_incomplete_issue_pair(reasons: List[str], solutions: List[str]) -> bool:
+    max_len = max(len(reasons or []), len(solutions or []))
+    for idx in range(max_len):
+        reason = _normalize_text(reasons[idx] if idx < len(reasons or []) else "")
+        solution = _normalize_text(solutions[idx] if idx < len(solutions or []) else "")
+        if bool(reason) != bool(solution):
+            return True
+    return False
+
+
+def _replace_common_issue_pairs(
+        session: Session,
+        issue: CommonIssue,
+        pairs: List[dict],
+        now: datetime
+):
+    old_pairs = session.exec(
+        select(CommonIssueReasonSolution).where(CommonIssueReasonSolution.issue_id == issue.id)
+    ).all()
+    for item in old_pairs:
+        session.delete(item)
+    session.flush()
+
+    for idx, pair in enumerate(pairs, start=1):
+        session.add(CommonIssueReasonSolution(
+            issue_id=issue.id,
+            reason=pair["reason"],
+            solution=pair["solution"],
+            sort_order=idx,
+            created_at=now,
+            updated_at=now,
+        ))
+
+
+def _build_common_issue_cards(session: Session, issues: List[CommonIssue]) -> List[dict]:
+    issue_ids = [item.id for item in issues if item.id]
+    pair_map = {}
+    if issue_ids:
+        pairs = session.exec(
+            select(CommonIssueReasonSolution).where(
+                CommonIssueReasonSolution.issue_id.in_(issue_ids)
+            ).order_by(CommonIssueReasonSolution.issue_id, CommonIssueReasonSolution.sort_order, CommonIssueReasonSolution.id)
+        ).all()
+        for pair in pairs:
+            pair_map.setdefault(pair.issue_id, []).append({
+                "id": pair.id,
+                "reason": pair.reason,
+                "solution": pair.solution,
+                "sort_order": pair.sort_order,
+            })
+
+    cards = []
+    for issue in issues:
+        cards.append({
+            "id": issue.id,
+            "question": issue.question,
+            "created_by_name": issue.created_by_name,
+            "created_at_str": issue.created_at.strftime("%Y-%m-%d %H:%M") if issue.created_at else "",
+            "updated_at_str": issue.updated_at.strftime("%Y-%m-%d %H:%M") if issue.updated_at else "",
+            "pairs": pair_map.get(issue.id, []),
+        })
+    return cards
+
+
+def _search_common_issues(session: Session, keyword: str) -> List[CommonIssue]:
+    clean_keyword = _normalize_text(keyword)
+    issues = session.exec(
+        select(CommonIssue).order_by(CommonIssue.updated_at.desc(), CommonIssue.id.desc())
+    ).all()
+    if not clean_keyword:
+        return issues
+
+    issue_ids = {issue.id for issue in issues if clean_keyword in (issue.question or "")}
+    matched_pairs = session.exec(
+        select(CommonIssueReasonSolution).where(
+            or_(
+                CommonIssueReasonSolution.reason.contains(clean_keyword),
+                CommonIssueReasonSolution.solution.contains(clean_keyword),
+            )
+        )
+    ).all()
+    issue_ids.update(pair.issue_id for pair in matched_pairs)
+    return [issue for issue in issues if issue.id in issue_ids]
 
 
 @app.middleware("http")
@@ -4968,6 +5580,8 @@ async def record_employee_review_info(
 @app.post("/employee-duty/end")
 async def end_employee_store_duty(
         current_store: str = Form(""),
+        acknowledge_self_check: str = Form(""),
+        self_check_clicked_at: str = Form(""),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -4976,12 +5590,70 @@ async def end_employee_store_duty(
 
     active = _active_store_duty_session(session, user.id)
     if active:
-        active.ended_at = datetime.now()
+        clicked_at = _parse_store_duty_clicked_at(self_check_clicked_at) or datetime.now()
+        non_blocking_ack_values = {item[0] for item in STORE_DUTY_NON_BLOCKING_SELF_CHECKS}
+        acknowledged_first_warning = acknowledge_self_check in {
+            STORE_DUTY_ACK_FORM_VALUE,
+            *non_blocking_ack_values,
+        }
+        self_check_result = _run_store_duty_self_checks(
+            session,
+            active,
+            clicked_at,
+            acknowledged_first_warning=acknowledged_first_warning,
+            acknowledged_self_check=acknowledge_self_check
+        )
+        blocking_messages = self_check_result.get("blocking_messages") or []
+        if blocking_messages:
+            return RedirectResponse(
+                url=_build_root_redirect_url(
+                    current_store or (_decode_duty_store_names(active.store_names_json) or [""])[0],
+                    error="；".join(blocking_messages)
+                ),
+                status_code=303
+            )
+
+        if self_check_result.get("requires_first_warning_ack"):
+            warning_messages = self_check_result.get("warning_messages") or []
+            params = {
+                "store": current_store or (_decode_duty_store_names(active.store_names_json) or [""])[0],
+                "duty_self_check_warning": "；".join(warning_messages),
+                "duty_self_check_clicked_at": clicked_at.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            return RedirectResponse(
+                url="/?" + urlencode({k: v for k, v in params.items() if v}),
+                status_code=303
+            )
+
+        if self_check_result.get("requires_notice_ack"):
+            params = {
+                "store": current_store or (_decode_duty_store_names(active.store_names_json) or [""])[0],
+                "duty_notice_title": self_check_result.get("notice_title") or "",
+                "duty_handover_notice": self_check_result.get("notice_message") or "",
+                "duty_notice_ack_value": self_check_result.get("notice_ack_value") or "",
+                "duty_self_check_clicked_at": clicked_at.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            return RedirectResponse(
+                url="/?" + urlencode({k: v for k, v in params.items() if v}),
+                status_code=303
+            )
+
+        active.ended_at = clicked_at
         active.updated_at = active.ended_at
         session.add(active)
         session.commit()
 
-    response = RedirectResponse(url="/login?success=已结束带店", status_code=303)
+        warning_messages = self_check_result.get("warning_messages") or []
+        success_message = "已结束带店"
+        if warning_messages:
+            success_message = success_message + "。" + "；".join(warning_messages)
+        response = RedirectResponse(
+            url="/login?" + urlencode({"success": success_message}),
+            status_code=303
+        )
+    else:
+        response = RedirectResponse(url="/login?success=已结束带店", status_code=303)
+
     response.delete_cookie("user_id")
     return response
 
@@ -14163,6 +14835,362 @@ async def delete_maintenance_record(
         url=f"/maintenance-records?store={store}&year={year}&month={month}",
         status_code=303
     )
+
+
+# ===================== 当天门店工作内容 页面 =====================
+
+@app.get("/daily-store-work")
+async def daily_store_work_page(
+        request: Request,
+        work_date: Optional[str] = None,
+        store: str = "",
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login?error=请先登录", status_code=303)
+
+    target_date = _parse_query_date(work_date, date.today())
+    active_store_names = get_active_store_name_list(session)
+    if user.role == "admin":
+        store_options = active_store_names
+    else:
+        employee_store_names = _get_employee_duty_store_names_for_date(session, user.id, target_date)
+        store_options = [s for s in employee_store_names if s in active_store_names]
+
+    selected_store = _normalize_text(store)
+    if selected_store and selected_store not in store_options:
+        selected_store = ""
+
+    day_start, day_end = _day_start_end(target_date)
+    items = []
+    if user.role == "admin" or store_options:
+        stmt = select(DailyStoreWorkItem).where(
+            DailyStoreWorkItem.assigned_at >= day_start,
+            DailyStoreWorkItem.assigned_at < day_end,
+        )
+        if selected_store:
+            stmt = stmt.where(DailyStoreWorkItem.store_name == selected_store)
+        elif user.role != "admin":
+            stmt = stmt.where(DailyStoreWorkItem.store_name.in_(store_options))
+
+        items = session.exec(
+            stmt.order_by(DailyStoreWorkItem.assigned_at.desc(), DailyStoreWorkItem.id.desc())
+        ).all()
+
+    work_cards = [_daily_store_work_payload(item) for item in items]
+
+    return templates.TemplateResponse("daily_store_work.html", {
+        "request": request,
+        "page_name": "daily_store_work",
+        "current_store": selected_store or (store_options[0] if store_options else ""),
+        "work_date": target_date.strftime("%Y-%m-%d"),
+        "selected_store": selected_store,
+        "store_options": store_options,
+        "all_store_options": active_store_names,
+        "work_items": work_cards,
+        "current_user": user,
+    })
+
+
+@app.post("/daily-store-work/add")
+async def add_daily_store_work(
+        work_date: str = Form(""),
+        store_filter: str = Form(""),
+        store_names: Optional[List[str]] = Form(None),
+        content: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login?error=请先登录", status_code=303)
+    target_date = _parse_query_date(work_date, date.today())
+    if user.role != "admin":
+        return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, error="无权限派发工作"), status_code=303)
+
+    active_store_names = set(get_active_store_name_list(session))
+    clean_store_names = []
+    for store_name in store_names or []:
+        clean = _normalize_text(store_name)
+        if clean and clean in active_store_names and clean not in clean_store_names:
+            clean_store_names.append(clean)
+
+    clean_content = _normalize_text(content)
+    if not clean_store_names:
+        return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, error="请选择至少一个门店"), status_code=303)
+    if not clean_content:
+        return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, error="工作内容不能为空"), status_code=303)
+
+    now = datetime.now()
+    for store_name in clean_store_names:
+        session.add(DailyStoreWorkItem(
+            store_name=store_name,
+            content=clean_content,
+            status=DAILY_WORK_STATUS_PENDING,
+            assigned_by_user_id=user.id,
+            assigned_by_name=user.display_name,
+            assigned_at=now,
+            completed_by_user_id=None,
+            completed_by_name=None,
+            completed_at=None,
+            created_at=now,
+            updated_at=now,
+        ))
+    session.commit()
+
+    return RedirectResponse(
+        url=_build_daily_store_work_url(target_date, store_filter, success="工作已派发"),
+        status_code=303
+    )
+
+
+@app.post("/daily-store-work/{item_id}/complete")
+async def complete_daily_store_work(
+        item_id: int,
+        work_date: str = Form(""),
+        store_filter: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login?error=请先登录", status_code=303)
+    target_date = _parse_query_date(work_date, date.today())
+
+    item = session.get(DailyStoreWorkItem, item_id)
+    if not item:
+        return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, error="工作不存在"), status_code=303)
+    if user.role == "admin" or not _user_can_access_daily_work_item(session, user, item):
+        return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, error="无权限完成该工作"), status_code=303)
+    if item.status != DAILY_WORK_STATUS_PENDING:
+        return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter), status_code=303)
+
+    now = datetime.now()
+    item.status = DAILY_WORK_STATUS_COMPLETED
+    item.completed_by_user_id = user.id
+    item.completed_by_name = user.display_name
+    item.completed_at = now
+    item.updated_at = now
+    session.add(item)
+    session.commit()
+
+    return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, success="工作已完成"), status_code=303)
+
+
+@app.post("/daily-store-work/{item_id}/reopen")
+async def reopen_daily_store_work(
+        item_id: int,
+        work_date: str = Form(""),
+        store_filter: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login?error=请先登录", status_code=303)
+    target_date = _parse_query_date(work_date, date.today())
+
+    item = session.get(DailyStoreWorkItem, item_id)
+    if not item:
+        return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, error="工作不存在"), status_code=303)
+    if not _user_can_access_daily_work_item(session, user, item):
+        return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, error="无权限撤回该工作"), status_code=303)
+
+    now = datetime.now()
+    item.status = DAILY_WORK_STATUS_PENDING
+    item.completed_by_user_id = None
+    item.completed_by_name = None
+    item.completed_at = None
+    item.updated_at = now
+    session.add(item)
+    session.commit()
+
+    return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, success="工作已撤回为待完成"), status_code=303)
+
+
+@app.post("/daily-store-work/{item_id}/update")
+async def update_daily_store_work(
+        item_id: int,
+        work_date: str = Form(""),
+        store_filter: str = Form(""),
+        content: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login?error=请先登录", status_code=303)
+    target_date = _parse_query_date(work_date, date.today())
+    if user.role != "admin":
+        return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, error="无权限编辑工作"), status_code=303)
+
+    item = session.get(DailyStoreWorkItem, item_id)
+    if not item:
+        return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, error="工作不存在"), status_code=303)
+    clean_content = _normalize_text(content)
+    if not clean_content:
+        return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, error="工作内容不能为空"), status_code=303)
+
+    now = datetime.now()
+    item.content = clean_content
+    item.status = DAILY_WORK_STATUS_PENDING
+    item.completed_by_user_id = None
+    item.completed_by_name = None
+    item.completed_at = None
+    item.updated_at = now
+    session.add(item)
+    session.commit()
+
+    return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, success="工作已更新并重置为待完成"), status_code=303)
+
+
+@app.post("/daily-store-work/{item_id}/delete")
+async def delete_daily_store_work(
+        item_id: int,
+        work_date: str = Form(""),
+        store_filter: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login?error=请先登录", status_code=303)
+    target_date = _parse_query_date(work_date, date.today())
+    if user.role != "admin":
+        return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, error="无权限删除工作"), status_code=303)
+
+    item = session.get(DailyStoreWorkItem, item_id)
+    if item:
+        session.delete(item)
+        session.commit()
+
+    return RedirectResponse(url=_build_daily_store_work_url(target_date, store_filter, success="工作已删除"), status_code=303)
+
+
+# ===================== 常见问题如何处理 页面 =====================
+
+@app.get("/common-issues")
+async def common_issues_page(
+        request: Request,
+        keyword: str = "",
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login?error=请先登录", status_code=303)
+
+    issues = _search_common_issues(session, keyword)
+    issue_cards = _build_common_issue_cards(session, issues)
+
+    return templates.TemplateResponse("common_issues.html", {
+        "request": request,
+        "page_name": "common_issues",
+        "current_store": "",
+        "keyword": _normalize_text(keyword),
+        "issue_cards": issue_cards,
+        "current_user": user,
+    })
+
+
+@app.post("/common-issues/add")
+async def add_common_issue(
+        keyword: str = Form(""),
+        question: str = Form(""),
+        reasons: Optional[List[str]] = Form(None),
+        solutions: Optional[List[str]] = Form(None),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login?error=请先登录", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_common_issues_url(keyword, error="无权限新增常见问题"), status_code=303)
+
+    clean_question = _normalize_text(question)
+    if _has_incomplete_issue_pair(reasons or [], solutions or []):
+        return RedirectResponse(url=_build_common_issues_url(keyword, error="原因及解决方法必须成对填写"), status_code=303)
+    pairs = _collect_issue_reason_pairs(reasons or [], solutions or [])
+    if not clean_question:
+        return RedirectResponse(url=_build_common_issues_url(keyword, error="问题不能为空"), status_code=303)
+    if not pairs:
+        return RedirectResponse(url=_build_common_issues_url(keyword, error="至少需要填写一对原因及解决方法"), status_code=303)
+
+    now = datetime.now()
+    issue = CommonIssue(
+        question=clean_question,
+        created_by_user_id=user.id,
+        created_by_name=user.display_name,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(issue)
+    session.commit()
+    session.refresh(issue)
+
+    _replace_common_issue_pairs(session, issue, pairs, now)
+    session.commit()
+
+    return RedirectResponse(url=_build_common_issues_url(keyword, success="常见问题已创建"), status_code=303)
+
+
+@app.post("/common-issues/{issue_id}/update")
+async def update_common_issue(
+        issue_id: int,
+        keyword: str = Form(""),
+        question: str = Form(""),
+        reasons: Optional[List[str]] = Form(None),
+        solutions: Optional[List[str]] = Form(None),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login?error=请先登录", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_common_issues_url(keyword, error="无权限编辑常见问题"), status_code=303)
+
+    issue = session.get(CommonIssue, issue_id)
+    if not issue:
+        return RedirectResponse(url=_build_common_issues_url(keyword, error="常见问题不存在"), status_code=303)
+
+    clean_question = _normalize_text(question)
+    if _has_incomplete_issue_pair(reasons or [], solutions or []):
+        return RedirectResponse(url=_build_common_issues_url(keyword, error="原因及解决方法必须成对填写"), status_code=303)
+    pairs = _collect_issue_reason_pairs(reasons or [], solutions or [])
+    if not clean_question:
+        return RedirectResponse(url=_build_common_issues_url(keyword, error="问题不能为空"), status_code=303)
+    if not pairs:
+        return RedirectResponse(url=_build_common_issues_url(keyword, error="至少需要填写一对原因及解决方法"), status_code=303)
+
+    now = datetime.now()
+    issue.question = clean_question
+    issue.updated_at = now
+    session.add(issue)
+    _replace_common_issue_pairs(session, issue, pairs, now)
+    session.commit()
+
+    return RedirectResponse(url=_build_common_issues_url(keyword, success="常见问题已更新"), status_code=303)
+
+
+@app.post("/common-issues/{issue_id}/delete")
+async def delete_common_issue(
+        issue_id: int,
+        keyword: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login?error=请先登录", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_common_issues_url(keyword, error="无权限删除常见问题"), status_code=303)
+
+    issue = session.get(CommonIssue, issue_id)
+    if issue:
+        old_pairs = session.exec(
+            select(CommonIssueReasonSolution).where(CommonIssueReasonSolution.issue_id == issue.id)
+        ).all()
+        for pair in old_pairs:
+            session.delete(pair)
+        session.delete(issue)
+        session.commit()
+
+    return RedirectResponse(url=_build_common_issues_url(keyword, success="常见问题已删除"), status_code=303)
+
 
 # ===================== 待办及信息同步 页面 =====================
 

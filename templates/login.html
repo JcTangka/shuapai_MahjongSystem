@@ -68,6 +68,22 @@
         </div>
     </div>
 
+    <div class="modal fade" id="successModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-success text-white">
+                    <h5 class="modal-title">提示</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body text-start py-4 fs-5" id="successMsg" style="white-space: pre-line;">
+                    </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary w-100" data-bs-dismiss="modal">知道了</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="{{ url_for('static', path='/js/bootstrap.bundle.min.js') }}"></script>
 
     <script>
@@ -75,6 +91,7 @@
             // 1. 获取 URL 中的查询参数
             const urlParams = new URLSearchParams(window.location.search);
             const error = urlParams.get('error');
+            const success = urlParams.get('success');
 
             // 2. 如果存在 error 参数
             if (error) {
@@ -86,6 +103,16 @@
                 errorModal.show();
 
                 // (可选) 弹窗关闭后，清除 URL 里的 error 参数，防止刷新页面又弹出来
+                const newUrl = window.location.pathname;
+                window.history.replaceState({}, document.title, newUrl);
+            }
+
+            if (success) {
+                document.getElementById('successMsg').textContent = success;
+
+                var successModal = new bootstrap.Modal(document.getElementById('successModal'));
+                successModal.show();
+
                 const newUrl = window.location.pathname;
                 window.history.replaceState({}, document.title, newUrl);
             }

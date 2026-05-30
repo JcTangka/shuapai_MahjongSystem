@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+
+{% block title %}当天门店工作内容{% endblock %}
+
+{% block breadcrumb %}
+<i class="bi bi-clipboard2-check"></i> 当天门店工作内容
+{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <h4 class="fw-bold mb-1">当天门店工作内容</h4>
+        <div class="text-muted small">按派发时间和门店查看当日工作</div>
+    </div>
+    {% if current_user.role == 'admin' %}
+    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#assignWorkModal">
+        <i class="bi bi-plus-circle me-1"></i>派发工作
+    </button>
+    {% endif %}
+</div>
+
+{% if request.query_params.get('success') %}
+<div class="alert alert-success py-2">{{ request.query_params.get('success') }}</div>
+{% endif %}
+
+<form method="get" action="/daily-store-work" class="row g-3 align-items-end bg-light border rounded-3 p-3 mb-3">
+    <div class="col-md-3">
+        <label class="form-label fw-bold">日期</label>
+        <input type="date" name="work_date" class="form-control" value="{{ work_date }}">
+    </div>
+    <div class="col-md-4">
+        <label class="form-label fw-bold">门店</label>
+        <select name="store" class="form-select">
+            <option value="">全部可见门店</option>
+            {% for store_name in store_options %}
+            <option value="{{ store_name }}" {% if selected_store == store_name %}selected{% endif %}>{{ store_name }}</option>
+            {% endfor %}
+        </select>
+        {% if current_user.role != 'admin' and not store_options %}
+        <div class="form-text text-danger">当天没有开始带店记录，暂无可筛选门店。</div>
+        {% endif %}
+    </div>
+    <div class="col-md-2">
+        <button type="submit" class="btn btn-primary w-100">
+            <i class="bi bi-search me-1"></i>筛选
+        </button>
+    </div>
+    <div class="col-md-2">
+        <a href="/daily-store-work?work_date={{ work_date }}" class="btn btn-outline-secondary w-100">
+            重置
+        </a>
+    </div>
+</form>
+
+<div class="table-responsive bg-white border rounded-3">
+    <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+            <tr>
+                <th style="width:70px;">序号</th>
+                <th style="min-width:160px;">工作所属门店</th>
+                <th>工作内容</th>
+                <th style="width:110px;">工作状态</th>
+                <th style="width:120px;">派发人</th>
+                <th style="width:170px;">派发时间</th>
+                {% if current_user.role == 'admin' %}
+                <th style="width:120px;">完成人</th>
+                <th style="width:230px;">操作</th>
+                {% else %}
+                <th style="width:150px;">操作</th>
+                {% endif %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in work_items %}
+            <tr>
+                <td class="fw-bold text-muted">{{ loop.index }}</td>
+                <td>{{ item.store_name }}</td>
+                <td style="white-space: pre-line;">{{ item.content }}</td>
+                <td>
+                    {% if item.status == 'completed' %}
+                    <span class="badge bg-success">已完成</span>
+                    {% else %}
+                    <span class="badge bg-warning text-dark">待完成</span>
+                    {% endif %}
+                </td>
+                <td>{{ item.assigned_by_name }}</td>
+                <td>{{ item.assigned_at_str }}</td>
+                {% if current_user.role == 'admin' %}
+                <td>{{ item.completed_by_name or '-' }}</td>
+                <td>
+                    <div class="d-flex flex-wrap gap-1">
+                        {% if item.status == 'completed' %}
+                        <form method="post" action="/daily-store-work/{{ item.id }}/reopen" class="mb-0">
+                            <input type="hidden" name="work_date" value="{{ work_date }}">
+                            <input type="hidden" name="store_filter" value="{{ selected_store }}">
+                            <button type="submit" class="btn btn-sm btn-outline-warning">撤回</button>
+                        </form>
+                        {% endif %}
+                        <button type="button"
+                                class="btn btn-sm btn-outline-primary"
+                                data-bs-toggle="modal"
+                                data-bs-target="#editWorkModal"
+                                data-id="{{ item.id }}"
+                                data-content="{{ item.content|e }}">
+                            编辑
+                        </button>
+                        <form method="post" action="/daily-store-work/{{ item.id }}/delete" class="mb-0"
+                              onsubmit="return confirm('确定硬删除这条工作内容吗？');">
+                            <input type="hidden" name="work_date" value="{{ work_date }}">
+                            <input type="hidden" name="store_filter" value="{{ selected_store }}">
+                            <button type="submit" class="btn btn-sm btn-outline-danger">删除</button>
+                        </form>
+                    </div>
+                </td>
+                {% else %}
+                <td>
+                    {% if item.status == 'completed' %}
+                    <form method="post" action="/daily-store-work/{{ item.id }}/reopen" class="mb-0">
+                        <input type="hidden" name="work_date" value="{{ work_date }}">
+                        <input type="hidden" name="store_filter" value="{{ selected_store }}">
+                        <button type="submit" class="btn btn-sm btn-outline-warning">撤回</button>
+                    </form>
+                    {% else %}
+                    <form method="post" action="/daily-store-work/{{ item.id }}/complete" class="mb-0">
+                        <input type="hidden" name="work_date" value="{{ work_date }}">
+                        <input type="hidden" name="store_filter" value="{{ selected_store }}">
+                        <button type="submit" class="btn btn-sm btn-success">完成</button>
+                    </form>
+                    {% endif %}
+                </td>
+                {% endif %}
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="{% if current_user.role == 'admin' %}8{% else %}7{% endif %}" class="text-center text-muted py-5">
+                    暂无工作内容
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if current_user.role == 'admin' %}
+<div class="modal fade" id="assignWorkModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <form method="post" action="/daily-store-work/add">
+                <input type="hidden" name="work_date" value="{{ work_date }}">
+                <input type="hidden" name="store_filter" value="{{ selected_store }}">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title">派发工作</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <label class="form-label fw-bold">工作所属门店</label>
+                    <div class="border rounded p-2 mb-3" style="max-height: 220px; overflow:auto;">
+                        {% for store_name in all_store_options %}
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="store_names" value="{{ store_name }}" id="assign_store_{{ loop.index }}">
+                            <label class="form-check-label" for="assign_store_{{ loop.index }}">{{ store_name }}</label>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <label class="form-label fw-bold">工作内容</label>
+                    <textarea name="content" class="form-control" rows="5" required></textarea>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">确认派发</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="editWorkModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <form method="post" id="editWorkForm">
+                <input type="hidden" name="work_date" value="{{ work_date }}">
+                <input type="hidden" name="store_filter" value="{{ selected_store }}">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title">编辑工作内容</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-warning py-2 small">保存后该工作状态会重新变为待完成，并清空完成人。</div>
+                    <textarea name="content" id="editWorkContent" class="form-control" rows="5" required></textarea>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if current_user.role == 'admin' %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const editModal = document.getElementById('editWorkModal');
+    if (!editModal) return;
+    editModal.addEventListener('show.bs.modal', function(event) {
+        const button = event.relatedTarget;
+        const itemId = button.getAttribute('data-id');
+        const content = button.getAttribute('data-content') || '';
+        document.getElementById('editWorkForm').action = `/daily-store-work/${itemId}/update`;
+        document.getElementById('editWorkContent').value = content;
+    });
+});
+</script>
+{% endif %}
+{% endblock %}
