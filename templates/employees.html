@@ -433,6 +433,11 @@
                     <i class="bi bi-calendar-check"></i>请假审批
                 </a>
 
+                <a class="employee-tab-link {% if active_tab == 'hourly_subsidy_approval' %}active{% endif %}"
+                   href="/employees?store={{ current_store }}&tab=hourly_subsidy_approval">
+                    <i class="bi bi-clock-history"></i>时薪补贴审批
+                </a>
+
                 <a class="employee-tab-link {% if active_tab == 'attendance_manage' %}active{% endif %}"
                    href="/employees?store={{ current_store }}&tab=attendance_manage">
                     <i class="bi bi-clipboard2-check"></i>考勤记录
@@ -470,6 +475,11 @@
                 <a class="employee-tab-link {% if active_tab == 'my_leave' %}active{% endif %}"
                    href="/employees?store={{ current_store }}&tab=my_leave">
                     <i class="bi bi-calendar-plus"></i>我的请假
+                </a>
+
+                <a class="employee-tab-link {% if active_tab == 'my_hourly_subsidy' %}active{% endif %}"
+                   href="/employees?store={{ current_store }}&tab=my_hourly_subsidy">
+                    <i class="bi bi-clock-history"></i>我的时薪补贴
                 </a>
 
                 <a class="employee-tab-link {% if active_tab == 'my_attendance' %}active{% endif %}"
@@ -1045,6 +1055,134 @@
     </div>
 </div>
 
+{% elif active_tab == 'hourly_subsidy_approval' %}
+<!-- =========================
+     管理员：时薪补贴审批
+========================= -->
+<div class="card employee-module-card">
+    <div class="card-header bg-white py-3">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div>
+                <div class="fw-bold">
+                    <i class="bi bi-clock-history me-1 text-primary"></i>时薪补贴审批
+                </div>
+                <div class="small text-muted mt-1">
+                    待审批 {{ pending_hourly_subsidy_count or 0 }} 条；时薪补贴按 {{ '%.2f'|format(hourly_subsidy_rate) }} 元/小时计算。
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th style="width: 70px;">ID</th>
+                    <th>员工</th>
+                    <th>申请日期</th>
+                    <th>补贴日期</th>
+                    <th>小时数</th>
+                    <th>金额</th>
+                    <th>原因 / 备注</th>
+                    <th>状态</th>
+                    <th>审批信息</th>
+                    <th style="width: 260px;">操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in hourly_subsidy_approval_requests %}
+                <tr>
+                    <td class="fw-bold text-muted">#{{ item.id }}</td>
+                    <td><span class="fw-bold">{{ item.employee_name_snapshot }}</span></td>
+                    <td><span class="text-muted small">{{ item.apply_date }}</span></td>
+                    <td><span class="fw-bold">{{ item.work_date }}</span></td>
+                    <td>{{ item.hours }} 小时</td>
+                    <td><span class="fw-bold text-success">+¥{{ '%.2f'|format(item.amount or 0) }}</span></td>
+                    <td class="text-start" style="max-width: 260px;">
+                        {% if item.reason %}
+                            <div class="fw-semibold">{{ item.reason }}</div>
+                        {% else %}
+                            <div class="text-muted">-</div>
+                        {% endif %}
+                        {% if item.remark %}
+                        <div class="small text-muted mt-1">备注：{{ item.remark }}</div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if item.status == 'pending' %}
+                            <span class="badge bg-primary">待审批</span>
+                        {% elif item.status == 'approved' %}
+                            <span class="badge bg-success">已通过</span>
+                            {% if item.salary_flow_id %}
+                            <div class="small text-muted mt-1">工资流水 #{{ item.salary_flow_id }}</div>
+                            {% endif %}
+                        {% elif item.status == 'rejected' %}
+                            <span class="badge bg-danger">已拒绝</span>
+                        {% elif item.status == 'cancelled' %}
+                            <span class="badge bg-secondary">已撤销</span>
+                        {% else %}
+                            <span class="badge bg-secondary">{{ hourly_subsidy_status_label(item.status) }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="text-start" style="max-width: 240px;">
+                        {% if item.approved_by_name %}
+                            <div class="small">审批人：{{ item.approved_by_name }}</div>
+                            {% if item.approved_at %}
+                            <div class="small text-muted">时间：{{ item.approved_at }}</div>
+                            {% endif %}
+                            {% if item.approval_note %}
+                            <div class="small text-muted">备注：{{ item.approval_note }}</div>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if item.status == 'pending' %}
+                        <div class="d-flex flex-column gap-2">
+                            <form action="/employees/hourly-subsidies/approve/{{ item.id }}"
+                                  method="post"
+                                  onsubmit="return confirm('确定同意这条时薪补贴申请吗？同意后将自动生成工资流水。');">
+                                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                <input type="text"
+                                       name="approval_note"
+                                       class="form-control form-control-sm mb-1"
+                                       placeholder="审批备注，可不填">
+                                <button type="submit" class="btn btn-sm btn-success w-100">
+                                    <i class="bi bi-check-circle me-1"></i>同意
+                                </button>
+                            </form>
+                            <form action="/employees/hourly-subsidies/reject/{{ item.id }}"
+                                  method="post"
+                                  onsubmit="return confirm('确定拒绝这条时薪补贴申请吗？');">
+                                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                <input type="text"
+                                       name="approval_note"
+                                       class="form-control form-control-sm mb-1"
+                                       placeholder="拒绝原因，建议填写">
+                                <button type="submit" class="btn btn-sm btn-outline-danger w-100">
+                                    <i class="bi bi-x-circle me-1"></i>拒绝
+                                </button>
+                            </form>
+                        </div>
+                        {% else %}
+                            <span class="text-muted small">暂无操作</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="10" class="text-muted py-5">
+                        <i class="bi bi-inbox fs-1 d-block mb-3"></i>
+                        暂无时薪补贴申请
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
 {% elif active_tab == 'attendance_manage' %}
 <!-- =========================
      管理员：考勤记录
@@ -1446,7 +1584,9 @@
                     </td>
 
                     <td>
-                        {% if item.is_locked %}
+                        {% if item.is_auto %}
+                            <span class="badge bg-info text-dark">自动生成</span>
+                        {% elif item.is_locked %}
                             <span class="badge bg-danger">已锁定</span>
                         {% else %}
                             <span class="badge bg-success">未锁定</span>
@@ -1466,7 +1606,11 @@
                     </td>
 
                     <td>
-                        {% if item.is_locked %}
+                        {% if item.is_auto %}
+                            <button class="btn btn-sm btn-outline-secondary" disabled>
+                                来源记录生成
+                            </button>
+                        {% elif item.is_locked %}
                             <button class="btn btn-sm btn-outline-secondary" disabled>
                                 已锁定
                             </button>
@@ -3787,7 +3931,10 @@
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
 
-            <form action="/employees/leaves/apply"   data-employee-ajax-form="1" method="post">
+            <form action="/employees/leaves/apply"
+                  data-employee-ajax-form="1"
+                  data-current-month-leave-count="{{ my_current_month_leave_count or 0 }}"
+                  method="post">
                 <div class="modal-body">
                     <input type="hidden" name="store" value="{{ current_store or '' }}">
 
@@ -3841,8 +3988,202 @@
                         取消
                     </button>
                     <button type="submit"
+                            class="btn btn-primary">
+                        <i class="bi bi-check-circle me-1"></i>提交申请
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+{% elif active_tab == 'my_hourly_subsidy' %}
+<!-- =========================
+     普通员工：我的时薪补贴
+========================= -->
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <div>
+        <h5 class="fw-bold mb-1">
+            <i class="bi bi-clock-history text-primary me-1"></i>我的时薪补贴
+        </h5>
+        <div class="text-muted small">
+            可多次申请；同一天累计不能超过 {{ hourly_subsidy_max_hours }} 小时，小时数必须为整数，按 {{ '%.2f'|format(hourly_subsidy_rate) }} 元/小时计算。
+        </div>
+    </div>
+
+    <button class="btn btn-primary"
+            data-bs-toggle="modal"
+            data-bs-target="#hourlySubsidyApplyModal">
+        <i class="bi bi-plus-circle me-1"></i>申请时薪补贴
+    </button>
+</div>
+
+<div class="card employee-module-card">
+    <div class="card-header bg-white py-3">
+        <div class="fw-bold">
+            <i class="bi bi-list-check me-1 text-primary"></i>我的时薪补贴记录
+        </div>
+    </div>
+
+    <div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th style="width: 70px;">ID</th>
+                    <th>补贴日期</th>
+                    <th>申请日期</th>
+                    <th>小时数</th>
+                    <th>金额</th>
+                    <th>原因 / 备注</th>
+                    <th>状态</th>
+                    <th>审批信息</th>
+                    <th style="width: 140px;">操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in my_hourly_subsidy_requests %}
+                <tr>
+                    <td class="fw-bold text-muted">#{{ item.id }}</td>
+                    <td><span class="fw-bold">{{ item.work_date }}</span></td>
+                    <td><span class="text-muted small">{{ item.apply_date }}</span></td>
+                    <td>{{ item.hours }} 小时</td>
+                    <td><span class="fw-bold text-success">+¥{{ '%.2f'|format(item.amount or 0) }}</span></td>
+                    <td class="text-start" style="max-width: 280px;">
+                        {% if item.reason %}
+                            <div class="fw-semibold">{{ item.reason }}</div>
+                        {% else %}
+                            <div class="text-muted">-</div>
+                        {% endif %}
+                        {% if item.remark %}
+                        <div class="small text-muted mt-1">备注：{{ item.remark }}</div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if item.status == 'pending' %}
+                            <span class="badge bg-primary">待审批</span>
+                        {% elif item.status == 'approved' %}
+                            <span class="badge bg-success">已通过</span>
+                            {% if item.salary_flow_id %}
+                            <div class="small text-muted mt-1">工资流水 #{{ item.salary_flow_id }}</div>
+                            {% endif %}
+                        {% elif item.status == 'rejected' %}
+                            <span class="badge bg-danger">已拒绝</span>
+                        {% elif item.status == 'cancelled' %}
+                            <span class="badge bg-secondary">已撤销</span>
+                        {% else %}
+                            <span class="badge bg-secondary">{{ hourly_subsidy_status_label(item.status) }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="text-start" style="max-width: 260px;">
+                        {% if item.approved_by_name %}
+                            <div class="small">审批人：{{ item.approved_by_name }}</div>
+                            {% if item.approved_at %}
+                            <div class="small text-muted">时间：{{ item.approved_at }}</div>
+                            {% endif %}
+                            {% if item.approval_note %}
+                            <div class="small text-muted">备注：{{ item.approval_note }}</div>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if item.status == 'pending' %}
+                        <form action="/employees/hourly-subsidies/cancel/{{ item.id }}"
+                              method="post"
+                              onsubmit="return confirm('确定撤销这条时薪补贴申请吗？');">
+                            <input type="hidden" name="store" value="{{ current_store or '' }}">
+                            <button type="submit" class="btn btn-sm btn-outline-secondary">
+                                <i class="bi bi-x-circle me-1"></i>撤销
+                            </button>
+                        </form>
+                        {% else %}
+                            <span class="text-muted small">暂无操作</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="9" class="text-muted py-5">
+                        <i class="bi bi-inbox fs-1 d-block mb-3"></i>
+                        暂无时薪补贴申请
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="modal fade" id="hourlySubsidyApplyModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content border-0 shadow-lg">
+            <div class="modal-header text-white" style="background: linear-gradient(135deg, #2563eb, #1d4ed8);">
+                <h5 class="modal-title">
+                    <i class="bi bi-clock-history me-2"></i>申请时薪补贴
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+
+            <form action="/employees/hourly-subsidies/apply" method="post">
+                <div class="modal-body">
+                    <input type="hidden" name="store" value="{{ current_store or '' }}">
+
+                    <div class="alert alert-info">
+                        <div class="fw-bold mb-1">
+                            <i class="bi bi-info-circle me-1"></i>申请规则
+                        </div>
+                        <div class="small">
+                            时薪补贴按 {{ '%.2f'|format(hourly_subsidy_rate) }} 元/小时计算；每次申请小时数必须为整数，同一天累计不能超过 {{ hourly_subsidy_max_hours }} 小时。
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">
+                            申请日期 <span class="text-danger">*</span>
+                        </label>
+                        <input type="date"
+                               name="work_date"
+                               class="form-control"
+                               value="{{ today_date }}"
+                               required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">
+                            申请小时数 <span class="text-danger">*</span>
+                        </label>
+                        <input type="number"
+                               name="hours"
+                               class="form-control"
+                               min="1"
+                               max="{{ hourly_subsidy_max_hours }}"
+                               step="1"
+                               required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">申请原因</label>
+                        <input type="text"
+                               name="reason"
+                               class="form-control"
+                               placeholder="可不填">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">备注</label>
+                        <textarea name="remark"
+                                  class="form-control"
+                                  rows="3"
+                                  placeholder="可补充说明具体情况，非必填"></textarea>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit"
                             class="btn btn-primary"
-                            onclick="return confirm('确定提交请假申请吗？提交后将先通知当天休班员工确认顶班。');">
+                            onclick="return confirm('确定提交时薪补贴申请吗？');">
                         <i class="bi bi-check-circle me-1"></i>提交申请
                     </button>
                 </div>
@@ -5452,7 +5793,11 @@ function handleEmployeeAjaxResult(result) {
         if (modal) modal.hide();
 
         const form = document.querySelector("form[action='/employees/leaves/apply']");
-        if (form) form.reset();
+        if (form) {
+            const currentCount = parseInt(form.dataset.currentMonthLeaveCount || "0", 10) || 0;
+            form.dataset.currentMonthLeaveCount = String(currentCount + 1);
+            form.reset();
+        }
     }
 
     if (result.action === "leave_approved"
@@ -5622,6 +5967,23 @@ async function submitEmployeeAjaxForm(form) {
     }
 }
 
+function shouldSubmitLeaveApplyForm(form) {
+    if (!form || form.action.indexOf("/employees/leaves/apply") === -1) {
+        return true;
+    }
+
+    const currentCount = parseInt(form.dataset.currentMonthLeaveCount || "0", 10) || 0;
+    if (currentCount >= 3 && !form.dataset.fourthLeaveWarningShown) {
+        const ok = confirm("请注意！这即将是您本月的第四次请假。");
+        if (!ok) {
+            return false;
+        }
+        form.dataset.fourthLeaveWarningShown = "1";
+    }
+
+    return confirm("确定提交请假申请吗？提交后将先通知当天休班员工确认顶班。");
+}
+
 document.addEventListener("DOMContentLoaded", function () {
 
     handleAttendanceEventTypeChange();
@@ -5634,6 +5996,9 @@ document.addEventListener("DOMContentLoaded", function () {
         if (!form) return;
 
         event.preventDefault();
+        if (!shouldSubmitLeaveApplyForm(form)) {
+            return;
+        }
         submitEmployeeAjaxForm(form);
     });
 });

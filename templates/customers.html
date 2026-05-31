@@ -190,6 +190,18 @@
     </div>
 </div>
 
+<form action="/customers/store-followup/save" method="post" id="storeCustomerFollowupForm">
+    <input type="hidden" name="store" value="{{ current_store }}">
+    <input type="hidden" name="search_query" value="{{ search_query }}">
+    <input type="hidden" name="sort_by" value="{{ sort_by }}">
+    {% if customer_list %}
+    <div class="text-end mb-3">
+        <button type="submit" class="btn btn-primary rounded-pill px-4">
+            <i class="bi bi-save me-1"></i>批量保存
+        </button>
+    </div>
+    {% endif %}
+
 <div class="card border-0 shadow-sm">
     <div class="card-body p-0">
         <table class="table table-hover align-middle mb-0 text-center">
@@ -202,6 +214,9 @@
                     <th>最后到店</th>
                     <th>本门店次数</th>
                     <th>常玩玩法</th>
+                    <th>是否进群</th>
+                    <th>是否添加标签</th>
+                    <th style="min-width: 180px;">备注</th>
                     <th>押金</th>
                     <th>状态</th>
                     <th>操作</th>
@@ -254,6 +269,25 @@
                         {% endif %}
                     </td>
 
+                    <td>
+                        <input type="hidden" name="customer_id" value="{{ cust.id }}">
+                        <input class="form-check-input" type="checkbox" name="in_group_chat_{{ cust.id }}" value="1"
+                               {% if cust.in_group_chat %}checked{% endif %}
+                               {% if not cust.current_store_link_id %}disabled{% endif %}>
+                    </td>
+
+                    <td>
+                        <input class="form-check-input" type="checkbox" name="has_tag_{{ cust.id }}" value="1"
+                               {% if cust.has_tag %}checked{% endif %}
+                               {% if not cust.current_store_link_id %}disabled{% endif %}>
+                    </td>
+
+                    <td>
+                        <input type="text" class="form-control form-control-sm" name="store_remark_{{ cust.id }}"
+                               value="{{ cust.store_remark }}" placeholder="填写备注"
+                               {% if not cust.current_store_link_id %}disabled{% endif %}>
+                    </td>
+
                     <td class="text-success fw-bold">
                         ¥{{ cust.guarantee_deposit }}
                     </td>
@@ -267,7 +301,7 @@
                     </td>
 
                     <td>
-                        <button class="btn btn-sm btn-outline-info"
+                        <button type="button" class="btn btn-sm btn-outline-info"
                                 onclick="openDetailModal({{ cust.id }})">
                             查看详情
                         </button>
@@ -275,7 +309,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="10" class="text-muted py-5">
+                    <td colspan="13" class="text-muted py-5">
                         <i class="bi bi-people fs-1 d-block mb-3"></i>
                         暂无符合条件的顾客数据。
                     </td>
@@ -285,6 +319,7 @@
         </table>
     </div>
 </div>
+</form>
 
 <div id="customerInfiniteLoader"
      class="text-center text-muted py-3"

@@ -33,6 +33,7 @@ from database import (GameRecord,Store, Room, User,
                       EmployeeTypeChangeRecord,
                       EmployeeLeaveRequest,
                       EmployeeShiftSwapRequest,
+                      EmployeeHourlySubsidyRequest,
                       EmployeeAttendanceRecord,
                       SalaryFlowRecord,
                       MonthlySalarySettlement,
@@ -80,6 +81,10 @@ FLEXIBLE_INCLUDED_SHIFT_COUNT = 15
 FLEXIBLE_INCLUDED_NORMAL_SALARY = 100.0
 FLEXIBLE_INCLUDED_BIGMID_SALARY = 125.0
 FLEXIBLE_BIGMID_EXTRA_SALARY = 25.0
+HOURLY_SUBSIDY_RATE = 12.5
+HOURLY_SUBSIDY_MAX_HOURS = 18
+LOGISTICS_BASE_SALARY = 2300.0
+FOREMAN_BASE_SALARY = 4000.0
 
 EMPLOYEE_TYPE_OPTIONS = [
     ("regular", "普通"),
@@ -625,6 +630,16 @@ def _shift_swap_status_label(status: str) -> str:
     return mapping.get(status or "pending", status or "未知")
 
 
+def _hourly_subsidy_status_label(status: str) -> str:
+    mapping = {
+        "pending": "待审批",
+        "approved": "已通过",
+        "rejected": "已拒绝",
+        "cancelled": "已撤销",
+    }
+    return mapping.get(status or "pending", status or "未知")
+
+
 def _is_daily_shift(shift_type: str) -> bool:
     return normalize_shift_type(shift_type or "off") in {"early", "mid", "night1", "night2"}
 
@@ -784,6 +799,18 @@ def _build_employees_url(
 
 def _employee_type_label(employee_type: str) -> str:
     return EMPLOYEE_TYPE_LABEL_MAP.get(employee_type or "regular", employee_type or "regular")
+
+
+def _employee_salary_type(user_obj: User) -> str:
+    return "management" if user_obj.role == "admin" else (user_obj.employee_type or "regular")
+
+
+def _employee_participates_team_bonus(employee_type: str) -> bool:
+    return employee_type in {"regular", "management"}
+
+
+def _employee_participates_sales_champion_bonus(employee_type: str) -> bool:
+    return employee_type in {"regular", "management"}
 
 
 def _employee_type_change_effective_from(change_date: date) -> Optional[date]:
@@ -1015,6 +1042,7 @@ def _salary_flow_type_label(flow_type: str) -> str:
         "replacement_pay": "顶班补贴",
         "shift_swap_adjustment": "换班工资调整",
         "flexible_shift_pay": "机动员工班次工资",
+        "hourly_subsidy": "时薪补贴",
         "overtime_pay": "加班补贴",
         "manual_bonus": "临时奖金",
         "manual_deduct": "临时扣款",
@@ -1341,13 +1369,15 @@ def _employee_has_full_attendance_bonus(
     1. 请假审批通过不影响全勤，所以 leave 且 affect_full_attendance=False 不影响；
     2. 迟到、旷工、管理员标记影响全勤的其他考勤异常，会取消全勤；
     3. 工作失误不在考勤表，不影响全勤。
-    4. 机动类型员工不发全勤奖。
+    4. 机动、领班、钟点工不发全勤奖；后勤员工可以拿 200 元全勤奖。
     """
     month_start, month_end = _get_month_start_end(year, month)
 
     employee = session.get(User, user_id)
-    if employee and (employee.employee_type or "regular") == "flexible":
-        return False
+    if employee:
+        employee_type = _employee_salary_type(employee)
+        if employee_type in {"flexible", "foreman", "hourly"}:
+            return False
 
     hit = session.exec(
         select(EmployeeAttendanceRecord).where(
@@ -1674,10 +1704,15 @@ def _calculate_salary_for_one_employee(
         employee_name=user_obj.display_name
     )
 
+    employee_type = _employee_salary_type(user_obj)
     personal_order_count = all_order_count_map.get(user_obj.display_name, 0)
-    personal_commission = _calc_personal_order_commission(personal_order_count)
+    personal_commission = (
+        0.0
+        if employee_type == "logistics"
+        else _calc_personal_order_commission(personal_order_count)
+    )
 
-    is_flexible_employee = (user_obj.employee_type or "regular") == "flexible"
+    is_flexible_employee = employee_type == "flexible"
     if is_flexible_employee:
         _rebuild_flexible_employee_shift_flows(
             session=session,
@@ -1702,7 +1737,11 @@ def _calculate_salary_for_one_employee(
             year=year,
             month=month
         )
-        team_bonus = 0.0 if is_flexible_employee else round(float(team_assessment.per_member_bonus_amount or 0), 2)
+        team_bonus = (
+            round(float(team_assessment.per_member_bonus_amount or 0), 2)
+            if _employee_participates_team_bonus(employee_type)
+            else 0.0
+        )
         team_id = team.id
         team_name_snapshot = team.name
 
@@ -1714,13 +1753,14 @@ def _calculate_salary_for_one_employee(
         year=year,
         month=month
     )
-    full_attendance_bonus = 0.0 if is_flexible_employee else (200.0 if has_full_attendance else 0.0)
+    full_attendance_bonus = 200.0 if has_full_attendance else 0.0
 
     # ===== 销冠奖：并列都发 200 =====
     champion_eligible_names = {
         employee.display_name for employee in session.exec(
-            select(User).where(User.employee_type != "flexible")
+            select(User).where(User.is_active == True)
         ).all()
+        if _employee_participates_sales_champion_bonus(_employee_salary_type(employee))
     }
     champion_eligible_counts = [
         count for employee_name, count in all_order_count_map.items()
@@ -1728,16 +1768,29 @@ def _calculate_salary_for_one_employee(
     ]
     max_order_count = max(champion_eligible_counts) if champion_eligible_counts else 0
     sales_champion_bonus = 0.0
-    if not is_flexible_employee and personal_order_count > 0 and personal_order_count == max_order_count:
+    if (
+        _employee_participates_sales_champion_bonus(employee_type)
+        and personal_order_count > 0
+        and personal_order_count == max_order_count
+    ):
         sales_champion_bonus = 200.0
 
     # ===== 生成自动工资流水 =====
-    base_salary = FLEXIBLE_BASE_SALARY if is_flexible_employee else round(float(profile.base_salary or 2800.0), 2)
-    base_salary_description = (
-        f"{year}年{month}月机动类型员工基础工资 1500 元，包含本月前 15 次非休息班次的普通班工资。"
-        if is_flexible_employee
-        else f"{year}年{month}月基础工资。"
-    )
+    if employee_type == "flexible":
+        base_salary = FLEXIBLE_BASE_SALARY
+        base_salary_description = f"{year}年{month}月机动类型员工基础工资 1500 元，包含本月前 15 次非休息班次的普通班工资。"
+    elif employee_type == "logistics":
+        base_salary = LOGISTICS_BASE_SALARY
+        base_salary_description = f"{year}年{month}月后勤员工基础工资 2300 元。"
+    elif employee_type == "foreman":
+        base_salary = FOREMAN_BASE_SALARY
+        base_salary_description = f"{year}年{month}月领班员工基础工资 4000 元。"
+    elif employee_type == "hourly":
+        base_salary = 0.0
+        base_salary_description = f"{year}年{month}月钟点工基础工资为 0 元。"
+    else:
+        base_salary = round(float(profile.base_salary or 2800.0), 2)
+        base_salary_description = f"{year}年{month}月基础工资。"
 
     _create_salary_settlement_flow(
         session=session,
@@ -2364,7 +2417,7 @@ def _calculate_team_assessment(
         member for member in active_members
         if (
             (member_user := session.get(User, member.user_id))
-            and (member_user.employee_type or "regular") != "flexible"
+            and _employee_participates_team_bonus(_employee_salary_type(member_user))
         )
     ]
     team_member_count = len(eligible_members)
@@ -6241,6 +6294,7 @@ async def employees_page(
     admin_tabs = [
         "employee_list",
         "leave_approval",
+        "hourly_subsidy_approval",
         "attendance_manage",
         "salary_flows",
         "whiteboard",
@@ -6251,6 +6305,7 @@ async def employees_page(
 
     employee_tabs = [
         "my_leave",
+        "my_hourly_subsidy",
         "my_attendance",
         "whiteboard",
         "my_salary",
@@ -6302,10 +6357,14 @@ async def employees_page(
     my_replacement_requests = []
     leave_approval_requests = []
     pending_leave_count = 0
+    my_current_month_leave_count = 0
     flexible_replacement_employees = []
     my_shift_swap_requests = []
     my_pending_shift_swap_requests = []
     shift_swap_target_employees = []
+    my_hourly_subsidy_requests = []
+    hourly_subsidy_approval_requests = []
+    pending_hourly_subsidy_count = 0
 
     # ===== 5. 考勤数据 =====
     attendance_records = []
@@ -6375,6 +6434,17 @@ async def employees_page(
             and employee.role != "admin"
             and (employee.employee_type or "regular") != "flexible"
         ]
+        today = date.today()
+        month_start = today.replace(day=1)
+        month_end = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
+        my_current_month_leave_count = len(session.exec(
+            select(EmployeeLeaveRequest).where(
+                EmployeeLeaveRequest.user_id == user.id,
+                EmployeeLeaveRequest.leave_date >= month_start,
+                EmployeeLeaveRequest.leave_date <= month_end,
+                EmployeeLeaveRequest.status != "cancelled"
+            )
+        ).all())
 
     if tab == "leave_approval" and user.role == "admin":
         leave_approval_requests = session.exec(
@@ -6388,10 +6458,33 @@ async def employees_page(
             if (employee.employee_type or "regular") == "flexible"
         ]
 
+    if tab == "my_hourly_subsidy" and user.role != "admin":
+        my_hourly_subsidy_requests = session.exec(
+            select(EmployeeHourlySubsidyRequest).where(
+                EmployeeHourlySubsidyRequest.user_id == user.id
+            ).order_by(
+                EmployeeHourlySubsidyRequest.work_date.desc(),
+                EmployeeHourlySubsidyRequest.id.desc()
+            )
+        ).all()
+
+    if tab == "hourly_subsidy_approval" and user.role == "admin":
+        hourly_subsidy_approval_requests = session.exec(
+            select(EmployeeHourlySubsidyRequest).order_by(
+                EmployeeHourlySubsidyRequest.created_at.desc(),
+                EmployeeHourlySubsidyRequest.id.desc()
+            )
+        ).all()
+
     if user.role == "admin":
         pending_leave_count = len(session.exec(
             select(EmployeeLeaveRequest).where(
                 EmployeeLeaveRequest.status == "pending_admin_review"
+            )
+        ).all())
+        pending_hourly_subsidy_count = len(session.exec(
+            select(EmployeeHourlySubsidyRequest).where(
+                EmployeeHourlySubsidyRequest.status == "pending"
             )
         ).all())
         # 管理员进入“考勤记录”页签时，查看全部员工考勤异常记录
@@ -6420,7 +6513,8 @@ async def employees_page(
             select(SalaryFlowRecord).where(
                 or_(
                     SalaryFlowRecord.is_auto == False,
-                    SalaryFlowRecord.source_type == "shift_swap"
+                    SalaryFlowRecord.source_type == "shift_swap",
+                    SalaryFlowRecord.source_type == "hourly_subsidy_request"
                 )
             ).order_by(
                 SalaryFlowRecord.flow_date.desc(),
@@ -6631,11 +6725,18 @@ async def employees_page(
         "my_replacement_requests": my_replacement_requests,
         "leave_approval_requests": leave_approval_requests,
         "pending_leave_count": pending_leave_count,
+        "my_current_month_leave_count": my_current_month_leave_count,
         "flexible_replacement_employees": flexible_replacement_employees,
         "my_shift_swap_requests": my_shift_swap_requests,
         "my_pending_shift_swap_requests": my_pending_shift_swap_requests,
         "shift_swap_target_employees": shift_swap_target_employees,
         "shift_swap_status_label": _shift_swap_status_label,
+        "my_hourly_subsidy_requests": my_hourly_subsidy_requests,
+        "hourly_subsidy_approval_requests": hourly_subsidy_approval_requests,
+        "pending_hourly_subsidy_count": pending_hourly_subsidy_count,
+        "hourly_subsidy_status_label": _hourly_subsidy_status_label,
+        "hourly_subsidy_rate": HOURLY_SUBSIDY_RATE,
+        "hourly_subsidy_max_hours": HOURLY_SUBSIDY_MAX_HOURS,
         "tomorrow_date": tomorrow,
         "shift_type_label": _shift_type_label,
         "leave_status_label": _leave_status_label,
@@ -8304,6 +8405,267 @@ async def employee_leave_force_after_replacement_reject(
         url=_build_employees_url(store, "my_leave", success="已坚持请假，并自动生成双方扣薪流水"),
         status_code=303
     )
+
+
+# =========================
+# V3 员工时薪补贴：员工申请
+# =========================
+@app.post("/employees/hourly-subsidies/apply")
+async def employee_hourly_subsidy_apply(
+        request: Request,
+        store: str = Form(""),
+        work_date: str = Form(...),
+        hours: str = Form(...),
+        reason: str = Form(""),
+        remark: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    if user.role != "operator":
+        return RedirectResponse(
+            url=_build_employees_url(store, "my_hourly_subsidy", error="只有普通员工可以申请时薪补贴"),
+            status_code=303
+        )
+
+    try:
+        work_d = datetime.strptime(work_date, "%Y-%m-%d").date()
+    except Exception:
+        return RedirectResponse(
+            url=_build_employees_url(store, "my_hourly_subsidy", error="申请日期格式不正确"),
+            status_code=303
+        )
+
+    hours_text = _normalize_text(hours)
+    if not hours_text.isdigit():
+        return RedirectResponse(
+            url=_build_employees_url(store, "my_hourly_subsidy", error="申请小时数必须为整数"),
+            status_code=303
+        )
+    hours_value = int(hours_text)
+    if hours_value <= 0 or hours_value > HOURLY_SUBSIDY_MAX_HOURS:
+        return RedirectResponse(
+            url=_build_employees_url(store, "my_hourly_subsidy", error=f"申请小时数必须为 1-{HOURLY_SUBSIDY_MAX_HOURS} 的整数"),
+            status_code=303
+        )
+    existing_hours = session.exec(
+        select(EmployeeHourlySubsidyRequest).where(
+            EmployeeHourlySubsidyRequest.user_id == user.id,
+            EmployeeHourlySubsidyRequest.work_date == work_d,
+            EmployeeHourlySubsidyRequest.status.in_(["pending", "approved"])
+        )
+    ).all()
+    used_hours = sum(int(item.hours or 0) for item in existing_hours)
+    if used_hours + hours_value > HOURLY_SUBSIDY_MAX_HOURS:
+        return RedirectResponse(
+            url=_build_employees_url(
+                store,
+                "my_hourly_subsidy",
+                error=f"同一天时薪补贴累计不能超过 {HOURLY_SUBSIDY_MAX_HOURS} 小时，当前已申请 {used_hours} 小时"
+            ),
+            status_code=303
+        )
+
+    reason = _normalize_text(reason)
+    remark = _normalize_text(remark)
+    amount = round(hours_value * HOURLY_SUBSIDY_RATE, 2)
+    now = datetime.now()
+
+    request_row = EmployeeHourlySubsidyRequest(
+        user_id=user.id,
+        employee_name_snapshot=user.display_name,
+        work_date=work_d,
+        apply_date=date.today(),
+        hours=hours_value,
+        hourly_rate=HOURLY_SUBSIDY_RATE,
+        amount=amount,
+        reason=reason or None,
+        remark=remark or None,
+        status="pending",
+        created_at=now,
+        updated_at=now
+    )
+    session.add(request_row)
+    session.flush()
+
+    admins = session.exec(
+        select(User).where(User.role == "admin", User.is_active == True).order_by(User.id)
+    ).all()
+    for admin in admins:
+        _create_employee_notification(
+            session=session,
+            target_user=admin,
+            related_user=user,
+            title="待审批时薪补贴",
+            content=f"{user.display_name} 申请 {work_d} 时薪补贴 {hours_value} 小时，金额 {amount:.2f} 元，请审批。",
+            notification_type="hourly_subsidy_pending",
+            source_type="hourly_subsidy_request",
+            source_id=request_row.id,
+            created_at=now
+        )
+
+    session.commit()
+    return RedirectResponse(
+        url=_build_employees_url(store, "my_hourly_subsidy", success="时薪补贴申请已提交，等待管理员审批"),
+        status_code=303
+    )
+
+
+@app.post("/employees/hourly-subsidies/cancel/{request_id}")
+async def employee_hourly_subsidy_cancel(
+        request: Request,
+        request_id: int,
+        store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    request_row = session.get(EmployeeHourlySubsidyRequest, request_id)
+    if not request_row:
+        return RedirectResponse(url=_build_employees_url(store, "my_hourly_subsidy", error="时薪补贴申请不存在"), status_code=303)
+    if request_row.user_id != user.id:
+        return RedirectResponse(url=_build_employees_url(store, "my_hourly_subsidy", error="只能撤销自己的时薪补贴申请"), status_code=303)
+    if request_row.status != "pending":
+        return RedirectResponse(url=_build_employees_url(store, "my_hourly_subsidy", error="只有待审批的时薪补贴申请可以撤销"), status_code=303)
+
+    request_row.status = "cancelled"
+    request_row.updated_at = datetime.now()
+    session.add(request_row)
+    session.commit()
+    return RedirectResponse(url=_build_employees_url(store, "my_hourly_subsidy", success="时薪补贴申请已撤销"), status_code=303)
+
+
+@app.post("/employees/hourly-subsidies/approve/{request_id}")
+async def employee_hourly_subsidy_approve(
+        request: Request,
+        request_id: int,
+        store: str = Form(""),
+        approval_note: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_employees_url(store, "my_hourly_subsidy", error="只有管理员可以审批时薪补贴"), status_code=303)
+
+    request_row = session.get(EmployeeHourlySubsidyRequest, request_id)
+    if not request_row:
+        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="时薪补贴申请不存在"), status_code=303)
+    if request_row.status != "pending":
+        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="只有待审批的时薪补贴申请可以同意"), status_code=303)
+
+    target_user = session.get(User, request_row.user_id)
+    if not target_user:
+        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="申请员工账号不存在"), status_code=303)
+
+    amount = round(float(request_row.amount or request_row.hours * request_row.hourly_rate), 2)
+    now = datetime.now()
+    note = _normalize_text(approval_note)
+
+    salary_flow = SalaryFlowRecord(
+        user_id=target_user.id,
+        employee_name_snapshot=target_user.display_name,
+        salary_year=request_row.work_date.year,
+        salary_month=request_row.work_date.month,
+        flow_date=request_row.work_date,
+        flow_category="bonus",
+        flow_type="hourly_subsidy",
+        amount=amount,
+        title="时薪补贴",
+        description=(
+            f"{target_user.display_name} {request_row.work_date} 申请时薪补贴 {request_row.hours} 小时，"
+            f"单价 {request_row.hourly_rate:.2f} 元/小时，补贴 {amount:.2f} 元。"
+        ),
+        source_type="hourly_subsidy_request",
+        source_id=request_row.id,
+        is_auto=True,
+        is_locked=False,
+        is_visible_to_employee=True,
+        created_by_user_id=user.id,
+        created_by_name=user.display_name,
+        created_at=now,
+        updated_at=now
+    )
+    session.add(salary_flow)
+    session.flush()
+
+    request_row.status = "approved"
+    request_row.approved_by_user_id = user.id
+    request_row.approved_by_name = user.display_name
+    request_row.approved_at = now
+    request_row.approval_note = note or None
+    request_row.salary_flow_id = salary_flow.id
+    request_row.updated_at = now
+    session.add(request_row)
+
+    _create_employee_notification(
+        session=session,
+        target_user=target_user,
+        related_user=user,
+        title="时薪补贴已通过",
+        content=f"您 {request_row.work_date} 的时薪补贴申请已通过，{request_row.hours} 小时，金额 {amount:.2f} 元。",
+        notification_type="hourly_subsidy_approved",
+        source_type="hourly_subsidy_request",
+        source_id=request_row.id,
+        created_at=now
+    )
+
+    session.commit()
+    return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", success="时薪补贴已同意，工资流水已同步"), status_code=303)
+
+
+@app.post("/employees/hourly-subsidies/reject/{request_id}")
+async def employee_hourly_subsidy_reject(
+        request: Request,
+        request_id: int,
+        store: str = Form(""),
+        approval_note: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_employees_url(store, "my_hourly_subsidy", error="只有管理员可以审批时薪补贴"), status_code=303)
+
+    request_row = session.get(EmployeeHourlySubsidyRequest, request_id)
+    if not request_row:
+        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="时薪补贴申请不存在"), status_code=303)
+    if request_row.status != "pending":
+        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="只有待审批的时薪补贴申请可以拒绝"), status_code=303)
+
+    target_user = session.get(User, request_row.user_id)
+    now = datetime.now()
+    note = _normalize_text(approval_note)
+
+    request_row.status = "rejected"
+    request_row.approved_by_user_id = user.id
+    request_row.approved_by_name = user.display_name
+    request_row.approved_at = now
+    request_row.approval_note = note or None
+    request_row.updated_at = now
+    session.add(request_row)
+
+    if target_user:
+        _create_employee_notification(
+            session=session,
+            target_user=target_user,
+            related_user=user,
+            title="时薪补贴已拒绝",
+            content=f"您 {request_row.work_date} 的时薪补贴申请已被拒绝。" + (f"原因：{note}" if note else ""),
+            notification_type="hourly_subsidy_rejected",
+            source_type="hourly_subsidy_request",
+            source_id=request_row.id,
+            created_at=now
+        )
+
+    session.commit()
+    return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", success="时薪补贴申请已拒绝"), status_code=303)
 
 
 # =========================
@@ -14165,6 +14527,7 @@ async def read_customers(
             select(CustomerStoreLink).where(CustomerStoreLink.customer_id == cust.id)
         ).all()
         visited_store_names = [l.store_name for l in links]
+        current_store_link = next((l for l in links if l.store_name == store), None)
 
         # 关键改动：
         # - 无搜索词时：仍按当前门店隔离展示
@@ -14195,7 +14558,11 @@ async def read_customers(
             "last_visit_date": cust.last_visit_date,
             "guarantee_deposit": cust.guarantee_deposit,
             "current_store_visit_count": visit_count,
-            "is_loss": cust.is_loss
+            "is_loss": cust.is_loss,
+            "current_store_link_id": current_store_link.id if current_store_link else None,
+            "in_group_chat": bool(current_store_link.in_group_chat) if current_store_link else False,
+            "has_tag": bool(current_store_link.has_tag) if current_store_link else False,
+            "store_remark": current_store_link.remark or "" if current_store_link else "",
         })
 
     if sort_by == "last_visit_desc":
@@ -14310,6 +14677,27 @@ def _build_public_traffic_url(
     return "/customers?" + urlencode(params)
 
 
+def _build_store_customers_url(
+    store: str,
+    search_query: str = "",
+    sort_by: str = "default",
+    success: str = "",
+    error: str = "",
+) -> str:
+    params = {
+        "store": store or "牛王庙店",
+        "tab": "store_customers",
+        "sort_by": sort_by or "default",
+    }
+    if search_query:
+        params["search_query"] = search_query
+    if success:
+        params["success"] = success
+    if error:
+        params["error"] = error
+    return "/customers?" + urlencode(params)
+
+
 def _build_contact_customers_url(
     store: str,
     date_filter: str = "today",
@@ -14411,6 +14799,59 @@ async def add_customer(
     session.commit()
 
     return RedirectResponse(url=_build_customers_url(store_name), status_code=303)
+
+
+@app.post("/customers/store-followup/save")
+async def save_store_customer_followup(
+        request: Request,
+        store: str = Form("牛王庙店"),
+        search_query: str = Form(""),
+        sort_by: str = Form("default"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    form = await request.form()
+    customer_ids = []
+    for raw_id in form.getlist("customer_id"):
+        try:
+            customer_ids.append(int(raw_id))
+        except Exception:
+            continue
+
+    now = datetime.now()
+    saved_count = 0
+    for customer_id in customer_ids:
+        link = session.exec(
+            select(CustomerStoreLink).where(
+                CustomerStoreLink.customer_id == customer_id,
+                CustomerStoreLink.store_name == store
+            )
+        ).first()
+        if not link:
+            continue
+
+        link.in_group_chat = form.get(f"in_group_chat_{customer_id}") == "1"
+        link.has_tag = form.get(f"has_tag_{customer_id}") == "1"
+        link.remark = _normalize_text(form.get(f"store_remark_{customer_id}")) or None
+        link.followup_updated_at = now
+        link.followup_updated_by = user.display_name
+        session.add(link)
+        saved_count += 1
+
+    session.commit()
+
+    return RedirectResponse(
+        url=_build_store_customers_url(
+            store,
+            search_query,
+            sort_by,
+            success=f"门店顾客跟进信息已保存（{saved_count} 条）"
+        ),
+        status_code=303
+    )
 
 
 @app.post("/public-traffic-leads/add")

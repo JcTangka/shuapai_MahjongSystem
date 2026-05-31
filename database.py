@@ -269,6 +269,13 @@ class CustomerStoreLink(SQLModel, table=True):
     # 可以在这里也加一个 last_visit，精确记录在这个店的最后一次时间
     last_visit_at_store: date = Field(default_factory=date.today)
 
+    # 门店顾客跟进信息，由店长在门店顾客列表中维护
+    in_group_chat: bool = Field(default=False, index=True)
+    has_tag: bool = Field(default=False, index=True)
+    remark: Optional[str] = None
+    followup_updated_at: datetime = Field(default_factory=datetime.now, index=True)
+    followup_updated_by: Optional[str] = Field(default=None, index=True)
+
 
 class ContactCustomerFollowup(SQLModel, table=True):
     """
@@ -873,6 +880,39 @@ class EmployeeShiftSwapRequest(SQLModel, table=True):
     responded_at: Optional[datetime] = Field(default=None, index=True)
     cancel_requested_at: Optional[datetime] = Field(default=None, index=True)
     cancel_responded_at: Optional[datetime] = Field(default=None, index=True)
+
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+
+
+# ===================== V3 员工管理模块：时薪补贴申请表 =====================
+class EmployeeHourlySubsidyRequest(SQLModel, table=True):
+    """员工主动申请时薪补贴，由管理员审批后生成工资流水。"""
+    __tablename__ = "employeehourlysubsidyrequest"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    user_id: int = Field(foreign_key="user.id", index=True)
+    employee_name_snapshot: str = Field(index=True)
+
+    work_date: date = Field(index=True)
+    apply_date: date = Field(default_factory=date.today, index=True)
+    hours: int = Field(index=True)
+    hourly_rate: float = Field(default=12.5)
+    amount: float = Field(default=0.0)
+
+    reason: Optional[str] = None
+    remark: Optional[str] = None
+
+    # pending / approved / rejected / cancelled
+    status: str = Field(default="pending", index=True)
+
+    approved_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    approved_by_name: Optional[str] = None
+    approved_at: Optional[datetime] = Field(default=None, index=True)
+    approval_note: Optional[str] = None
+
+    salary_flow_id: Optional[int] = Field(default=None, index=True)
 
     created_at: datetime = Field(default_factory=datetime.now, index=True)
     updated_at: datetime = Field(default_factory=datetime.now, index=True)
@@ -1782,6 +1822,7 @@ def migrate_customer_store_link_table():
     兼容老数据库：
     1. 如果 customerstorelink 表没有 created_at，则自动补上
     2. 如果 created_at 为空，则回填今天
+    3. 补充门店顾客跟进字段
     """
     with engine.begin() as conn:
         # 检查表字段
@@ -1793,6 +1834,26 @@ def migrate_customer_store_link_table():
             conn.execute(text("ALTER TABLE customerstorelink ADD COLUMN created_at DATE"))
             conn.execute(text("UPDATE customerstorelink SET created_at = DATE('now') WHERE created_at IS NULL"))
             print("已为 customerstorelink 表补充 created_at 字段")
+
+        alter_columns = [
+            ("in_group_chat", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("has_tag", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("remark", "TEXT"),
+            ("followup_updated_at", "DATETIME"),
+            ("followup_updated_by", "TEXT"),
+        ]
+        for col_name, col_type in alter_columns:
+            if col_name not in col_names:
+                conn.execute(text(f"ALTER TABLE customerstorelink ADD COLUMN {col_name} {col_type}"))
+
+        conn.execute(text("""
+            UPDATE customerstorelink
+            SET followup_updated_at = CURRENT_TIMESTAMP
+            WHERE followup_updated_at IS NULL
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customerstorelink_in_group_chat ON customerstorelink(in_group_chat)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customerstorelink_has_tag ON customerstorelink(has_tag)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customerstorelink_followup_updated_at ON customerstorelink(followup_updated_at)"))
 
 def migrate_game_record_table():
     """
