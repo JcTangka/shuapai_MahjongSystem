@@ -2253,21 +2253,23 @@ def migrate_employee_type_tables():
     with engine.begin() as conn:
         columns = conn.execute(text("PRAGMA table_info(user)")).fetchall()
         existing_columns = {col[1] for col in columns}
+        employee_type_added = "employee_type" not in existing_columns
 
-        if "employee_type" not in existing_columns:
+        if employee_type_added:
             conn.execute(text("""
                 ALTER TABLE user
-                ADD COLUMN employee_type VARCHAR DEFAULT 'regular'
+                ADD COLUMN employee_type VARCHAR
             """))
 
-        conn.execute(text("""
-            UPDATE user
-            SET employee_type = CASE
-                WHEN role = 'admin' THEN 'management'
-                WHEN employee_type IS NULL OR TRIM(employee_type) = '' OR employee_type = 'management' THEN 'regular'
-                ELSE employee_type
-            END
-        """))
+            conn.execute(text("""
+                UPDATE user
+                SET employee_type = CASE
+                    WHEN role = 'admin' THEN 'management'
+                    ELSE 'regular'
+                END
+                WHERE employee_type IS NULL OR TRIM(employee_type) = ''
+            """))
+
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_user_employee_type
             ON user (employee_type)
@@ -2317,7 +2319,7 @@ def migrate_employee_type_tables():
             SELECT
                 id,
                 display_name,
-                employee_type,
+                COALESCE(NULLIF(TRIM(employee_type), ''), CASE WHEN role = 'admin' THEN 'management' ELSE 'regular' END),
                 DATE('now', 'localtime', 'start of month'),
                 id,
                 '系统初始化',

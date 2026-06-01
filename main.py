@@ -611,6 +611,7 @@ def _leave_status_label(status: str) -> str:
         "replacement_rejected_wait_employee": "顶班人拒绝，待请假人确认",
         "force_leave_deducted": "请假人坚持请假，扣薪",
         "approved_with_flexible": "机动顶班，请假已生效",
+        "admin_cancelled": "管理员已撤回",
         "approved": "已通过",
         "rejected": "已拒绝",
         "cancelled": "已撤销",
@@ -625,6 +626,7 @@ def _shift_swap_status_label(status: str) -> str:
         "active": "换班已生效",
         "cancel_pending": "待对方确认撤回",
         "cancel_rejected": "对方拒绝撤回，换班继续生效",
+        "admin_cancelled": "管理员已撤回",
         "cancelled": "已撤回",
     }
     return mapping.get(status or "pending", status or "未知")
@@ -763,6 +765,167 @@ def _create_shift_swap_attendance(
     )
     session.add(attendance)
     return attendance
+
+
+def _delete_unlocked_salary_flows(session: Session, flows: List[Optional[SalaryFlowRecord]]) -> Optional[str]:
+    unique_flows = {flow.id: flow for flow in flows if flow and flow.id}.values()
+    locked = [flow for flow in unique_flows if flow.is_locked]
+    if locked:
+        return "相关工资流水已锁定，不能直接撤回，请走工资修正"
+    for flow in unique_flows:
+        session.delete(flow)
+    return None
+
+
+def _cancel_leave_by_admin(
+        session: Session,
+        *,
+        leave_req: EmployeeLeaveRequest,
+        operator: User
+) -> Optional[str]:
+    applicant = session.get(User, leave_req.user_id)
+    if not applicant:
+        return "请假员工账号不存在"
+
+    if leave_req.status not in {
+        "pending",
+        "approved",
+        "approved_with_flexible",
+        "replacement_rejected_wait_employee",
+        "force_leave_deducted",
+    }:
+        return "该请假申请当前不能由管理员撤回"
+
+    related_flows: List[Optional[SalaryFlowRecord]] = []
+    if leave_req.salary_flow_id:
+        related_flows.append(session.get(SalaryFlowRecord, leave_req.salary_flow_id))
+    if leave_req.replacement_salary_flow_id:
+        related_flows.append(session.get(SalaryFlowRecord, leave_req.replacement_salary_flow_id))
+
+    if leave_req.status == "approved_with_flexible":
+        replacement = session.get(User, leave_req.replacement_user_id) if leave_req.replacement_user_id else None
+        if not replacement:
+            return "机动顶班员工账号不存在，不能恢复排班"
+        current_shift = _get_shift_type_for_employee_on_date(
+            session=session,
+            employee_name=replacement.display_name,
+            work_date=leave_req.leave_date
+        )
+        if current_shift != leave_req.shift_type:
+            return "机动员工当天排班已被后续修改，不能直接撤回"
+
+    error = _delete_unlocked_salary_flows(session, related_flows)
+    if error:
+        return error
+
+    attendance_rows = session.exec(
+        select(EmployeeAttendanceRecord).where(
+            EmployeeAttendanceRecord.leave_request_id == leave_req.id
+        )
+    ).all()
+    for attendance in attendance_rows:
+        session.delete(attendance)
+
+    if leave_req.status == "approved_with_flexible":
+        replacement = session.get(User, leave_req.replacement_user_id)
+        upsert_shift(session, replacement.display_name, leave_req.leave_date, "off")
+        session.flush()
+        _rebuild_flexible_employee_shift_flows(
+            session=session,
+            employee=replacement,
+            year=leave_req.leave_date.year,
+            month=leave_req.leave_date.month,
+            operator=operator
+        )
+
+    now = datetime.now()
+    leave_req.status = "admin_cancelled"
+    leave_req.final_deduct_amount = 0.0
+    leave_req.attendance_record_id = None
+    leave_req.salary_flow_id = None
+    leave_req.replacement_salary_flow_id = None
+    leave_req.updated_at = now
+    session.add(leave_req)
+
+    _create_employee_notification(
+        session=session,
+        target_user=applicant,
+        related_user=operator,
+        title="请假已由管理员撤回",
+        content=f"管理员已撤回您 {leave_req.leave_date} 的请假，相关工资和考勤记录已恢复。",
+        notification_type="leave_admin_cancelled",
+        source_type="leave_request",
+        source_id=leave_req.id,
+        created_at=now
+    )
+    return None
+
+
+def _admin_cancel_shift_swap(
+        session: Session,
+        *,
+        item: EmployeeShiftSwapRequest,
+        operator: User
+) -> Optional[str]:
+    if item.status not in {"active", "cancel_pending", "cancel_rejected"}:
+        return "该换班记录当前不能由管理员撤回"
+
+    applicant = session.get(User, item.applicant_user_id)
+    target = session.get(User, item.target_user_id)
+    if not applicant or not target:
+        return "换班员工账号不存在"
+    if (
+        _get_shift_type_for_employee_on_date(session, applicant.display_name, item.swap_date) != item.target_original_shift_type
+        or _get_shift_type_for_employee_on_date(session, target.display_name, item.swap_date) != item.applicant_original_shift_type
+    ):
+        return "双方排班已被后续修改，不能直接撤回"
+
+    flows = session.exec(
+        select(SalaryFlowRecord).where(
+            SalaryFlowRecord.source_type == "shift_swap",
+            SalaryFlowRecord.source_id == item.id
+        )
+    ).all()
+    error = _delete_unlocked_salary_flows(session, flows)
+    if error:
+        return error
+
+    flow_ids = [flow.id for flow in flows if flow.id]
+    attendance_rows = session.exec(
+        select(EmployeeAttendanceRecord).where(
+            EmployeeAttendanceRecord.event_type == "shift_swap",
+            EmployeeAttendanceRecord.event_date == item.swap_date,
+            or_(
+                EmployeeAttendanceRecord.salary_flow_id.in_(flow_ids) if flow_ids else False,
+                EmployeeAttendanceRecord.user_id.in_([applicant.id, target.id])
+            )
+        )
+    ).all()
+    for attendance in attendance_rows:
+        session.delete(attendance)
+
+    upsert_shift(session, applicant.display_name, item.swap_date, item.applicant_original_shift_type)
+    upsert_shift(session, target.display_name, item.swap_date, item.target_original_shift_type)
+
+    now = datetime.now()
+    item.status = "admin_cancelled"
+    item.cancel_responded_at = now
+    item.updated_at = now
+    session.add(item)
+
+    for target_user in [applicant, target]:
+        _create_employee_notification(
+            session=session,
+            target_user=target_user,
+            related_user=operator,
+            title="换班已由管理员撤回",
+            content=f"管理员已撤回 {item.swap_date} 的换班，双方排班和工资流水已恢复。",
+            notification_type="shift_swap_admin_cancelled",
+            source_type="shift_swap",
+            source_id=item.id,
+            created_at=now
+        )
+    return None
 
 
 def _build_employees_url(
@@ -5067,6 +5230,12 @@ async def get_current_user(
 
 DUTY_ACTION_STORE = "store_duty"
 DUTY_ACTION_REVIEW = "review_info"
+DUTY_ACTION_LOGIN = "login_duty"
+DUTY_REVIEW_SESSION_COOKIE = "employee_review_session_id"
+
+
+def _is_logistics_employee(user: Optional[User]) -> bool:
+    return bool(user and user.role != "admin" and (user.employee_type or "regular") == "logistics")
 
 
 def _encode_duty_store_names(store_names: List[str]) -> str:
@@ -5119,6 +5288,63 @@ def _active_store_duty_session(session: Session, user_id: int) -> Optional[Emplo
     ).first()
 
 
+def _active_login_duty_session(session: Session, user_id: int) -> Optional[EmployeeDutySession]:
+    return session.exec(
+        select(EmployeeDutySession).where(
+            EmployeeDutySession.user_id == user_id,
+            EmployeeDutySession.action_type == DUTY_ACTION_LOGIN,
+            EmployeeDutySession.ended_at.is_(None)
+        ).order_by(EmployeeDutySession.started_at.desc(), EmployeeDutySession.id.desc())
+    ).first()
+
+
+def _start_logistics_login_duty(session: Session, user: User) -> None:
+    now = datetime.now()
+    existing = _active_login_duty_session(session, user.id)
+    if existing:
+        existing.ended_at = now
+        existing.updated_at = now
+        session.add(existing)
+
+    session.add(EmployeeDutySession(
+        user_id=user.id,
+        employee_name=user.display_name,
+        action_type=DUTY_ACTION_LOGIN,
+        store_names_json=None,
+        started_at=now,
+        reviewed_at=None,
+        ended_at=None,
+        created_at=now,
+        updated_at=now
+    ))
+    session.commit()
+
+
+def _end_logistics_login_duty(session: Session, user_id: int) -> None:
+    active = _active_login_duty_session(session, user_id)
+    if not active:
+        return
+    now = datetime.now()
+    active.ended_at = now
+    active.updated_at = now
+    session.add(active)
+    session.commit()
+
+
+def _employee_duty_action_label(action_type: str) -> str:
+    if action_type == DUTY_ACTION_STORE:
+        return "开始带店"
+    if action_type == DUTY_ACTION_LOGIN:
+        return "登录上班"
+    return "复查补信息"
+
+
+def _employee_duty_status_label(item: EmployeeDutySession) -> str:
+    if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN}:
+        return "已下班" if item.ended_at else "上班中"
+    return "无需下班"
+
+
 def _today_review_session(session: Session, user_id: int) -> Optional[EmployeeDutySession]:
     today_start = datetime.combine(date.today(), time.min)
     tomorrow_start = today_start + timedelta(days=1)
@@ -5132,7 +5358,30 @@ def _today_review_session(session: Session, user_id: int) -> Optional[EmployeeDu
     ).first()
 
 
-def _build_employee_duty_status(session: Session, user: Optional[User]) -> dict:
+def _review_session_from_current_login(
+        session: Session,
+        user_id: int,
+        review_session_id: Optional[str]
+) -> Optional[EmployeeDutySession]:
+    try:
+        session_id = int(review_session_id or "")
+    except Exception:
+        return None
+
+    return session.exec(
+        select(EmployeeDutySession).where(
+            EmployeeDutySession.id == session_id,
+            EmployeeDutySession.user_id == user_id,
+            EmployeeDutySession.action_type == DUTY_ACTION_REVIEW,
+        )
+    ).first()
+
+
+def _build_employee_duty_status(
+        session: Session,
+        user: Optional[User],
+        review_session_id: Optional[str] = None
+) -> dict:
     active_stores = session.exec(
         select(Store).where(Store.is_active == True).order_by(Store.sort_order, Store.id)
     ).all()
@@ -5147,12 +5396,12 @@ def _build_employee_duty_status(session: Session, user: Optional[User]) -> dict:
         "store_options": [s.name for s in active_stores],
     }
 
-    if not user or user.role == "admin":
+    if not user or user.role == "admin" or _is_logistics_employee(user):
         return status
 
     status["requires_release"] = True
     store_session = _active_store_duty_session(session, user.id)
-    review_session = _today_review_session(session, user.id)
+    review_session = _review_session_from_current_login(session, user.id, review_session_id)
 
     if store_session:
         status["is_released"] = True
@@ -5301,6 +5550,11 @@ def _store_duty_month_start_filter_text(clicked_at: datetime) -> str:
     return month_start.strftime("%Y-%m-%d %H:%M")
 
 
+def _store_duty_week_ago_filter_text(clicked_at: datetime) -> str:
+    week_ago = clicked_at - timedelta(days=7)
+    return week_ago.strftime("%Y-%m-%d %H:%M")
+
+
 def _run_store_duty_payment_self_check(
         session: Session,
         duty: EmployeeDutySession,
@@ -5315,7 +5569,7 @@ def _run_store_duty_payment_self_check(
         return result
 
     clicked_at_text = _store_duty_order_end_filter_text(clicked_at)
-    month_start_text = _store_duty_month_start_filter_text(clicked_at)
+    week_ago_text = _store_duty_week_ago_filter_text(clicked_at)
     candidate_games = session.exec(
         select(GameRecord).where(
             GameRecord.store_name.in_(store_names),
@@ -5323,7 +5577,7 @@ def _run_store_duty_payment_self_check(
             GameRecord.record_source.in_(STORE_DUTY_SELF_CHECK_ORDER_SOURCES),
             GameRecord.order_end_time.is_not(None),
             GameRecord.order_end_time != "",
-            GameRecord.order_end_time >= month_start_text,
+            GameRecord.order_end_time >= week_ago_text,
             GameRecord.order_end_time <= clicked_at_text,
             GameRecord.is_payAll == False
         ).order_by(GameRecord.record_source, GameRecord.store_name, GameRecord.order_end_time, GameRecord.id)
@@ -5841,7 +6095,11 @@ async def enforce_employee_duty_release(request: Request, call_next):
         if getattr(user, "must_change_password", False):
             return await call_next(request)
 
-        duty_status = _build_employee_duty_status(session, user)
+        duty_status = _build_employee_duty_status(
+            session,
+            user,
+            request.cookies.get(DUTY_REVIEW_SESSION_COOKIE)
+        )
         request.state.duty_status = duty_status
 
         if (
@@ -5985,6 +6243,9 @@ async def login_action(
         value=str(user.id),
         max_age=60 * 60 * 24 * 7
     )
+    response.delete_cookie(DUTY_REVIEW_SESSION_COOKIE)
+    if _is_logistics_employee(user):
+        _start_logistics_login_duty(session, user)
     return response
 
 
@@ -6014,9 +6275,22 @@ async def register_action(
 
 
 @app.get("/logout")
-async def logout():
+async def logout(
+        request: Request,
+        session: Session = Depends(get_session)
+):
+    try:
+        user_id_int = int(request.cookies.get("user_id") or "")
+    except Exception:
+        user_id_int = None
+    if user_id_int:
+        user = session.get(User, user_id_int)
+        if _is_logistics_employee(user):
+            _end_logistics_login_duty(session, user_id_int)
+
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie("user_id")
+    response.delete_cookie(DUTY_REVIEW_SESSION_COOKIE)
     return response
 
 
@@ -6067,10 +6341,12 @@ async def start_employee_store_duty(
     session.add(duty)
     session.commit()
 
-    return RedirectResponse(
+    response = RedirectResponse(
         url=f"/?store={clean_store_names[0]}&success=已开始带店",
         status_code=303
     )
+    response.delete_cookie(DUTY_REVIEW_SESSION_COOKIE)
+    return response
 
 
 @app.post("/employee-duty/review")
@@ -6085,10 +6361,12 @@ async def record_employee_review_info(
     if user.role == "admin":
         return RedirectResponse(url=f"/?store={current_store}", status_code=303)
 
+    now = datetime.now()
     today_review = _today_review_session(session, user.id)
-    if not today_review:
-        now = datetime.now()
-        session.add(EmployeeDutySession(
+    if today_review:
+        review_session_id = today_review.id
+    else:
+        duty = EmployeeDutySession(
             user_id=user.id,
             employee_name=user.display_name,
             action_type=DUTY_ACTION_REVIEW,
@@ -6098,13 +6376,22 @@ async def record_employee_review_info(
             ended_at=None,
             created_at=now,
             updated_at=now
-        ))
+        )
+        session.add(duty)
         session.commit()
+        session.refresh(duty)
+        review_session_id = duty.id
 
-    return RedirectResponse(
+    response = RedirectResponse(
         url=f"/?store={current_store}&success=已记录复查补信息",
         status_code=303
     )
+    if review_session_id:
+        response.set_cookie(
+            key=DUTY_REVIEW_SESSION_COOKIE,
+            value=str(review_session_id)
+        )
+    return response
 
 
 @app.post("/employee-duty/end")
@@ -6185,6 +6472,7 @@ async def end_employee_store_duty(
         response = RedirectResponse(url="/login?success=已结束带店", status_code=303)
 
     response.delete_cookie("user_id")
+    response.delete_cookie(DUTY_REVIEW_SESSION_COOKIE)
     return response
 
 
@@ -6413,13 +6701,16 @@ async def employees_page(
                 EmployeeLeaveRequest.id
             )
         ).all()
-        my_shift_swap_requests = session.exec(
-            select(EmployeeShiftSwapRequest).where(
+        shift_swap_query = select(EmployeeShiftSwapRequest)
+        if user.role != "admin":
+            shift_swap_query = shift_swap_query.where(
                 or_(
                     EmployeeShiftSwapRequest.applicant_user_id == user.id,
                     EmployeeShiftSwapRequest.target_user_id == user.id
                 )
-            ).order_by(
+            )
+        my_shift_swap_requests = session.exec(
+            shift_swap_query.order_by(
                 EmployeeShiftSwapRequest.created_at.desc(),
                 EmployeeShiftSwapRequest.id.desc()
             )
@@ -6586,6 +6877,7 @@ async def employees_page(
             if emp.role == "admin":
                 continue
             store_session = _active_store_duty_session(session, emp.id)
+            login_session = _active_login_duty_session(session, emp.id) if _is_logistics_employee(emp) else None
             review_session = _today_review_session(session, emp.id)
             if store_session:
                 total_minutes = max(int((now - store_session.started_at).total_seconds() // 60), 0) if store_session.started_at else 0
@@ -6596,6 +6888,16 @@ async def employees_page(
                     "store_names": "、".join(_decode_duty_store_names(store_session.store_names_json)) or "-",
                     "action_time": store_session.started_at,
                     "duration_text": f"{total_minutes // 60}小时{total_minutes % 60}分钟" if store_session.started_at else "-",
+                })
+            elif login_session:
+                total_minutes = max(int((now - login_session.started_at).total_seconds() // 60), 0) if login_session.started_at else 0
+                current_duty_rows.append({
+                    "employee": emp,
+                    "status_label": "上班中",
+                    "action_label": "登录上班",
+                    "store_names": "-",
+                    "action_time": login_session.started_at,
+                    "duration_text": f"{total_minutes // 60}小时{total_minutes % 60}分钟" if login_session.started_at else "-",
                 })
             elif review_session:
                 current_duty_rows.append({
@@ -6647,7 +6949,7 @@ async def employees_page(
             )
         ).all()
         for item in duty_records:
-            action_time = item.started_at if item.action_type == DUTY_ACTION_STORE else item.reviewed_at
+            action_time = item.started_at if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN} else item.reviewed_at
             action_date = action_time.date() if action_time else None
             if action_date and not (filter_start_date <= action_date <= filter_end_date):
                 continue
@@ -6656,8 +6958,8 @@ async def employees_page(
             if duty_action_type != "all" and item.action_type != duty_action_type:
                 continue
             item_status = (
-                "active" if item.action_type == DUTY_ACTION_STORE and not item.ended_at
-                else "ended" if item.action_type == DUTY_ACTION_STORE
+                "active" if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN} and not item.ended_at
+                else "ended" if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN}
                 else "review"
             )
             if duty_status != "all" and item_status != duty_status:
@@ -6665,7 +6967,7 @@ async def employees_page(
 
             end_time = item.ended_at
             duration_text = "-"
-            if item.action_type == DUTY_ACTION_STORE and action_time:
+            if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN} and action_time:
                 end_for_calc = end_time or now
                 total_minutes = max(int((end_for_calc - action_time).total_seconds() // 60), 0)
                 duration_text = f"{total_minutes // 60}小时{total_minutes % 60}分钟"
@@ -6683,6 +6985,9 @@ async def employees_page(
                 "end_time": end_time,
                 "duration_text": duration_text,
             })
+            if item.action_type == DUTY_ACTION_LOGIN:
+                duty_session_rows[-1]["action_label"] = "登录上班"
+                duty_session_rows[-1]["status_label"] = _employee_duty_status_label(item)
 
         duty_filters.update({
             "date_filter": duty_date_filter,
@@ -7414,6 +7719,33 @@ async def employee_shift_swap_cancel_respond(
 
 
 # =========================
+# V3 员工换班：管理员撤回已生效换班
+# =========================
+@app.post("/employees/shift-swaps/admin-cancel/{swap_id}")
+async def employee_shift_swap_admin_cancel(
+        swap_id: int,
+        store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="只有管理员可以撤回换班"), status_code=303)
+
+    item = session.get(EmployeeShiftSwapRequest, swap_id)
+    if not item:
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="换班记录不存在"), status_code=303)
+
+    error = _admin_cancel_shift_swap(session=session, item=item, operator=user)
+    if error:
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=error), status_code=303)
+
+    session.commit()
+    return RedirectResponse(url=_build_employees_url(store, "my_leave", success="换班已由管理员撤回，原工资流水已删除，排班已恢复"), status_code=303)
+
+
+# =========================
 # V3 员工请假：提交申请
 # =========================
 @app.post("/employees/leaves/apply")
@@ -7582,6 +7914,146 @@ async def employee_leave_apply(
         url=_build_employees_url(store, "my_leave", success="请假申请已提交，等待管理员审批"),
         status_code=303
     )
+
+
+# =========================
+# V3 员工请假：待审批申请编辑
+# =========================
+@app.post("/employees/leaves/update/{leave_id}")
+async def employee_leave_update_pending(
+        request: Request,
+        leave_id: int,
+        store: str = Form(""),
+        leave_date: str = Form(...),
+        reason: str = Form(""),
+        remark: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请先登录", 401)
+        return RedirectResponse(url="/login", status_code=303)
+
+    leave_req = session.get(EmployeeLeaveRequest, leave_id)
+    if not leave_req or leave_req.user_id != user.id:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请假申请不存在或无权编辑", 404)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="请假申请不存在或无权编辑"), status_code=303)
+    if leave_req.status != "pending_admin_review":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("只有待管理员审批的请假申请可以编辑")
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="只有待管理员审批的请假申请可以编辑"), status_code=303)
+
+    try:
+        leave_d = datetime.strptime(leave_date, "%Y-%m-%d").date()
+    except Exception:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请假日期格式不正确")
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="请假日期格式不正确"), status_code=303)
+
+    if leave_d <= date.today():
+        if _is_ajax_request(request):
+            return _employee_ajax_error("当天无法请假，请至少提前一天提交请假申请")
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="当天无法请假，请至少提前一天提交请假申请"), status_code=303)
+
+    reason = _normalize_text(reason) or leave_req.reason
+    remark = _normalize_text(remark)
+    if not reason:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请假原因不能为空")
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="请假原因不能为空"), status_code=303)
+
+    existing = session.exec(
+        select(EmployeeLeaveRequest).where(
+            EmployeeLeaveRequest.user_id == user.id,
+            EmployeeLeaveRequest.leave_date == leave_d,
+            EmployeeLeaveRequest.id != leave_req.id,
+            EmployeeLeaveRequest.status.in_([
+                "pending_admin_review",
+                "pending",
+                "replacement_accepted",
+                "replacement_rejected_wait_employee",
+                "force_leave_deducted",
+                "approved_with_flexible",
+                "approved",
+            ])
+        )
+    ).first()
+    if existing:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("该日期已有待审批或已通过的请假申请，请勿重复提交")
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="该日期已有待审批或已通过的请假申请，请勿重复提交"), status_code=303)
+
+    shift_type = _get_shift_type_for_employee_on_date(session=session, employee_name=user.display_name, work_date=leave_d)
+    if shift_type == "off":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("当天排班为休班，无需发起顶班请假")
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="当天排班为休班，无需发起顶班请假"), status_code=303)
+
+    leave_req.leave_date = leave_d
+    leave_req.shift_type = shift_type
+    leave_req.reason = reason
+    leave_req.remark = remark or None
+    leave_req.estimated_deduct_amount = _calc_employee_leave_deduct(
+        session=session,
+        employee=user,
+        leave_date=leave_d,
+        shift_type=shift_type
+    )
+    leave_req.updated_at = datetime.now()
+    session.add(leave_req)
+    session.commit()
+    session.refresh(leave_req)
+
+    if _is_ajax_request(request):
+        return _employee_ajax_success(
+            message="请假申请已更新",
+            action="leave_updated",
+            payload={"leave": _leave_request_payload(leave_req)}
+        )
+    return RedirectResponse(url=_build_employees_url(store, "my_leave", success="请假申请已更新"), status_code=303)
+
+
+# =========================
+# V3 员工请假：待审批申请撤回
+# =========================
+@app.post("/employees/leaves/cancel-pending/{leave_id}")
+async def employee_leave_cancel_pending(
+        request: Request,
+        leave_id: int,
+        store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请先登录", 401)
+        return RedirectResponse(url="/login", status_code=303)
+
+    leave_req = session.get(EmployeeLeaveRequest, leave_id)
+    if not leave_req or leave_req.user_id != user.id:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请假申请不存在或无权撤回", 404)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="请假申请不存在或无权撤回"), status_code=303)
+    if leave_req.status != "pending_admin_review":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("只有待管理员审批的请假申请可以撤回")
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="只有待管理员审批的请假申请可以撤回"), status_code=303)
+
+    leave_req.status = "cancelled"
+    leave_req.updated_at = datetime.now()
+    session.add(leave_req)
+    session.commit()
+    session.refresh(leave_req)
+
+    if _is_ajax_request(request):
+        return _employee_ajax_success(
+            message="请假申请已撤回",
+            action="leave_cancelled",
+            payload={"leave": _leave_request_payload(leave_req)}
+        )
+    return RedirectResponse(url=_build_employees_url(store, "my_leave", success="请假申请已撤回"), status_code=303)
 
 # =========================
 # V3 员工请假：管理员批准并进入休班顶班
@@ -8405,6 +8877,49 @@ async def employee_leave_force_after_replacement_reject(
         url=_build_employees_url(store, "my_leave", success="已坚持请假，并自动生成双方扣薪流水"),
         status_code=303
     )
+
+
+# =========================
+# V3 员工请假：管理员撤回已审批/已生效请假
+# =========================
+@app.post("/employees/leaves/admin-cancel/{leave_id}")
+async def employee_leave_admin_cancel(
+        request: Request,
+        leave_id: int,
+        store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请先登录", 401)
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("只有管理员可以撤回请假", 403)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="只有管理员可以撤回请假"), status_code=303)
+
+    leave_req = session.get(EmployeeLeaveRequest, leave_id)
+    if not leave_req:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请假申请不存在", 404)
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="请假申请不存在"), status_code=303)
+
+    error = _cancel_leave_by_admin(session=session, leave_req=leave_req, operator=user)
+    if error:
+        if _is_ajax_request(request):
+            return _employee_ajax_error(error)
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=error), status_code=303)
+
+    session.commit()
+    session.refresh(leave_req)
+    if _is_ajax_request(request):
+        return _employee_ajax_success(
+            message="请假已撤回，相关工资和排班已恢复",
+            action="leave_admin_cancelled",
+            payload={"leave": _leave_request_payload(leave_req)}
+        )
+    return RedirectResponse(url=_build_employees_url(store, "leave_approval", success="请假已撤回，相关工资和排班已恢复"), status_code=303)
 
 
 # =========================
@@ -14158,6 +14673,7 @@ async def read_customers(
         contact_date_filter: str = "today",
         contact_start_date: str = "",
         contact_end_date: str = "",
+        contact_store_filter: str = "all",
         contact_employee: str = "all",
         pull_date_filter: str = "today",
         pull_start_date: str = "",
@@ -14292,6 +14808,9 @@ async def read_customers(
             contact_start_date,
             contact_end_date
         )
+        contact_store_filter = _normalize_text(contact_store_filter) or "all"
+        if contact_store_filter != "all" and contact_store_filter not in store_list:
+            contact_store_filter = "all"
         employee_names = sorted([
             _normalize_text(u.display_name)
             for u in session.exec(select(User).order_by(User.display_name)).all()
@@ -14320,6 +14839,9 @@ async def read_customers(
                 continue
             if contact_employee != "all" and employee_name != contact_employee:
                 continue
+            source_store_name = _normalize_text(game.store_name)
+            if contact_store_filter != "all" and source_store_name != contact_store_filter:
+                continue
 
             reservation_dt = _game_reservation_dt(game)
             if reservation_dt.date() < range_start or reservation_dt.date() > range_end:
@@ -14333,11 +14855,12 @@ async def read_customers(
                 if nickname == PLACEHOLDER_PLAYER_NAME and wechat_id == PLACEHOLDER_PLAYER_WECHAT:
                     continue
 
-                key = (employee_name, wechat_id)
+                key = (employee_name, source_store_name, wechat_id)
                 existing = contact_map.get(key)
                 if not existing or reservation_dt < existing["first_contact_dt"]:
                     contact_map[key] = {
                         "employee_name": employee_name,
+                        "store_name": source_store_name,
                         "nickname": nickname,
                         "wechat_id": wechat_id,
                         "first_contact_dt": reservation_dt,
@@ -14345,7 +14868,7 @@ async def read_customers(
 
         contact_items = sorted(
             contact_map.values(),
-            key=lambda item: (item["employee_name"], item["first_contact_dt"], item["wechat_id"])
+            key=lambda item: (item["employee_name"], item["store_name"], item["first_contact_dt"], item["wechat_id"])
         )
         contact_wechat_ids = sorted({item["wechat_id"] for item in contact_items})
 
@@ -14385,6 +14908,7 @@ async def read_customers(
             followup = followup_by_wechat.get(item["wechat_id"])
             full_contact_customer_list.append({
                 "employee_name": item["employee_name"],
+                "store_name": item["store_name"],
                 "nickname": item["nickname"],
                 "wechat_id": item["wechat_id"],
                 "is_new": not is_old,
@@ -14401,6 +14925,7 @@ async def read_customers(
             "contact_date_filter": contact_date_filter,
             "contact_start_date": range_start.strftime("%Y-%m-%d"),
             "contact_end_date": range_end.strftime("%Y-%m-%d"),
+            "contact_store_filter": contact_store_filter,
             "contact_employee": contact_employee,
             "employee_names": employee_names,
             "contact_customer_list": contact_customer_list,
@@ -14703,6 +15228,7 @@ def _build_contact_customers_url(
     date_filter: str = "today",
     start_date: str = "",
     end_date: str = "",
+    contact_store_filter: str = "all",
     employee: str = "all",
     success: str = "",
     error: str = "",
@@ -14713,6 +15239,7 @@ def _build_contact_customers_url(
         "contact_date_filter": date_filter or "today",
         "contact_start_date": start_date or "",
         "contact_end_date": end_date or "",
+        "contact_store_filter": contact_store_filter or "all",
         "contact_employee": employee or "all",
     }
     if success:
@@ -14945,6 +15472,7 @@ async def save_contact_customer_followup(
         contact_date_filter: str = Form("today"),
         contact_start_date: str = Form(""),
         contact_end_date: str = Form(""),
+        contact_store_filter: str = Form("all"),
         contact_employee: str = Form("all"),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
@@ -14982,6 +15510,7 @@ async def save_contact_customer_followup(
             contact_date_filter,
             contact_start_date,
             contact_end_date,
+            contact_store_filter,
             contact_employee if user.role == "admin" else _normalize_text(user.display_name),
             success="接触顾客跟进状态已保存"
         ),

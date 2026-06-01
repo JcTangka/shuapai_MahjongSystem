@@ -554,6 +554,7 @@
                     <option value="all" {% if duty_filters.action_type == 'all' %}selected{% endif %}>全部类型</option>
                     <option value="store_duty" {% if duty_filters.action_type == 'store_duty' %}selected{% endif %}>开始带店</option>
                     <option value="review_info" {% if duty_filters.action_type == 'review_info' %}selected{% endif %}>复查补信息</option>
+                    <option value="login_duty" {% if duty_filters.action_type == 'login_duty' %}selected{% endif %}>登录上班</option>
                 </select>
             </div>
 
@@ -965,6 +966,8 @@
                             <span class="badge bg-success">机动顶班，已生效</span>
                         {% elif item.status == 'approved' %}
                             <span class="badge bg-success">已通过</span>
+                        {% elif item.status == 'admin_cancelled' %}
+                            <span class="badge bg-secondary">管理员已撤回</span>
                         {% elif item.status == 'rejected' %}
                             <span class="badge bg-danger">已拒绝</span>
                         {% else %}
@@ -1005,7 +1008,7 @@
                             <form action="/employees/leaves/flexible-replacement/{{ item.id }}"
                                   method="post"
                                   data-employee-ajax-form="1"
-                                  onsubmit="return confirm('确定安排所选机动员工顶班吗？安排后不可撤销或更换。');">
+                                  onsubmit="return confirm('确定安排所选机动员工顶班吗？');">
                                 <input type="hidden" name="store" value="{{ current_store or '' }}">
                                 <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
                                     <option value="">选择机动员工</option>
@@ -1037,6 +1040,16 @@
                             </form>
 
                         </div>
+                        {% elif item.status in ['pending', 'approved', 'approved_with_flexible', 'replacement_rejected_wait_employee', 'force_leave_deducted'] %}
+                        <form action="/employees/leaves/admin-cancel/{{ item.id }}"
+                              method="post"
+                              data-employee-ajax-form="1"
+                              onsubmit="return confirm('确定由管理员撤回这次请假吗？未锁定的工资流水/考勤会删除，机动顶班排班会恢复。');">
+                            <input type="hidden" name="store" value="{{ current_store or '' }}">
+                            <button type="submit" class="btn btn-sm btn-outline-secondary w-100">
+                                <i class="bi bi-arrow-counterclockwise me-1"></i>撤回请假
+                            </button>
+                        </form>
                         {% else %}
                             <span class="text-muted small">暂无操作</span>
                         {% endif %}
@@ -3557,6 +3570,7 @@
         </div>
     </div>
 
+    {% if current_user.role != 'admin' %}
     <div class="d-flex gap-2">
         <button class="btn btn-outline-primary"
                 data-bs-toggle="modal"
@@ -3566,9 +3580,10 @@
         <button class="btn btn-primary"
                 data-bs-toggle="modal"
                 data-bs-target="#leaveApplyModal">
-            <i class="bi bi-plus-circle me-1"></i>新增请假申请
+            <i class="bi bi-plus-circle me-1"></i>请假申请
         </button>
     </div>
+    {% endif %}
 </div>
 
 {% if my_pending_shift_swap_requests %}
@@ -3625,7 +3640,10 @@
 
 <div class="card employee-module-card mb-3">
     <div class="card-header bg-white py-3">
-        <div class="fw-bold"><i class="bi bi-arrow-left-right me-1 text-primary"></i>我的换班记录</div>
+        <div class="fw-bold">
+            <i class="bi bi-arrow-left-right me-1 text-primary"></i>
+            {% if current_user.role == 'admin' %}全部换班记录{% else %}我的换班记录{% endif %}
+        </div>
     </div>
     <div class="card-body p-0">
         <table class="table table-hover align-middle mb-0 text-center">
@@ -3649,7 +3667,13 @@
                     <td><span class="badge bg-secondary">{{ shift_swap_status_label(item.status) }}</span></td>
                     <td>{{ item.reason or '-' }}</td>
                     <td>
-                        {% if item.applicant_user_id == current_user.id and item.status in ['active', 'cancel_rejected'] %}
+                        {% if current_user.role == 'admin' and item.status in ['active', 'cancel_pending', 'cancel_rejected'] %}
+                        <form action="/employees/shift-swaps/admin-cancel/{{ item.id }}" method="post"
+                              onsubmit="return confirm('确定由管理员撤回本次换班吗？原工资流水会物理删除，双方排班会恢复。');">
+                            <input type="hidden" name="store" value="{{ current_store or '' }}">
+                            <button class="btn btn-sm btn-outline-danger">管理员撤回</button>
+                        </form>
+                        {% elif item.applicant_user_id == current_user.id and item.status in ['active', 'cancel_rejected'] %}
                         <form action="/employees/shift-swaps/cancel-request/{{ item.id }}" method="post"
                               onsubmit="return confirm('确定申请撤回本次换班吗？需要对方同意。');">
                             <input type="hidden" name="store" value="{{ current_store or '' }}">
@@ -3804,6 +3828,8 @@
                             <span class="badge bg-success">机动顶班，已生效</span>
                         {% elif item.status == 'approved' %}
                             <span class="badge bg-success">已通过</span>
+                        {% elif item.status == 'admin_cancelled' %}
+                            <span class="badge bg-secondary">管理员已撤回</span>
                         {% elif item.status == 'rejected' %}
                             <span class="badge bg-danger">已拒绝</span>
                         {% else %}
@@ -3837,7 +3863,43 @@
                     </td>
 
                     <td>
-                        {% if item.status == 'replacement_rejected_wait_employee' %}
+                        {% if item.status == 'pending_admin_review' %}
+                        <div class="d-flex flex-column gap-2">
+                            <form action="/employees/leaves/update/{{ item.id }}"
+                                  method="post"
+                                  data-employee-ajax-form="1"
+                                  onsubmit="return confirm('确定保存这次请假修改吗？系统会重新读取当天班次并计算预计扣款。');">
+                                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                <input type="date"
+                                       name="leave_date"
+                                       min="{{ tomorrow_date }}"
+                                       value="{{ item.leave_date }}"
+                                       class="form-control form-control-sm mb-1"
+                                       required>
+                                <input type="text"
+                                       name="reason"
+                                       value="{{ item.reason }}"
+                                       class="form-control form-control-sm mb-1"
+                                       required>
+                                <textarea name="remark"
+                                          class="form-control form-control-sm mb-1"
+                                          rows="2"
+                                          placeholder="备注，可不填">{{ item.remark or '' }}</textarea>
+                                <button type="submit" class="btn btn-sm btn-outline-primary w-100">
+                                    <i class="bi bi-pencil-square me-1"></i>保存修改
+                                </button>
+                            </form>
+                            <form action="/employees/leaves/cancel-pending/{{ item.id }}"
+                                  method="post"
+                                  data-employee-ajax-form="1"
+                                  onsubmit="return confirm('确定撤回这次请假吗？撤回后不会产生扣薪。');">
+                                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                <button type="submit" class="btn btn-sm btn-outline-secondary w-100">
+                                    <i class="bi bi-arrow-counterclockwise me-1"></i>撤回请假
+                                </button>
+                            </form>
+                        </div>
+                        {% elif item.status == 'replacement_rejected_wait_employee' %}
                         <div class="d-flex flex-column gap-2">
                             <form action="/employees/leaves/force-after-replacement-reject/{{ item.id }}"
                                   method="post"
@@ -3926,7 +3988,7 @@
         <div class="modal-content border-0 shadow-lg">
             <div class="modal-header text-white" style="background: linear-gradient(135deg, #2563eb, #1d4ed8);">
                 <h5 class="modal-title">
-                    <i class="bi bi-calendar-plus me-2"></i>新增请假申请
+                    <i class="bi bi-calendar-plus me-2"></i>请假申请
                 </h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
@@ -4670,12 +4732,27 @@ function leaveStatusBadge(status, statusLabel) {
     if (status === "force_leave_deducted") return `<span class="badge bg-dark">坚持请假，已扣薪</span>`;
     if (status === "approved_with_flexible") return `<span class="badge bg-success">机动顶班，已生效</span>`;
     if (status === "approved") return `<span class="badge bg-success">已通过</span>`;
+    if (status === "admin_cancelled") return `<span class="badge bg-secondary">管理员已撤回</span>`;
     if (status === "rejected") return `<span class="badge bg-danger">已拒绝</span>`;
     if (status === "cancelled") return `<span class="badge bg-secondary">已撤销</span>`;
     return `<span class="badge bg-secondary">${escapeHtml(statusLabel || status || "未知")}</span>`;
 }
 
 function renderLeaveApprovalActionCell(leave) {
+    if (["pending", "approved", "approved_with_flexible", "replacement_rejected_wait_employee", "force_leave_deducted"].includes(leave.status)) {
+        return `
+            <form action="/employees/leaves/admin-cancel/${leave.id}"
+                  method="post"
+                  data-employee-ajax-form="1"
+                  onsubmit="return confirm('确定由管理员撤回这次请假吗？未锁定的工资流水/考勤会删除，机动顶班排班会恢复。');">
+                <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                <button type="submit" class="btn btn-sm btn-outline-secondary w-100">
+                    <i class="bi bi-arrow-counterclockwise me-1"></i>撤回请假
+                </button>
+            </form>
+        `;
+    }
+
     if (leave.status !== "pending_admin_review") {
         return `<span class="text-muted small">暂无操作</span>`;
     }
@@ -4705,7 +4782,7 @@ function renderLeaveApprovalActionCell(leave) {
             <form action="/employees/leaves/flexible-replacement/${leave.id}"
                   method="post"
                   data-employee-ajax-form="1"
-                  onsubmit="return confirm('确定安排所选机动员工顶班吗？安排后不可撤销或更换。');">
+                  onsubmit="return confirm('确定安排所选机动员工顶班吗？');">
                 <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
                 <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
                     <option value="">选择机动员工</option>
@@ -4834,6 +4911,46 @@ function renderMyLeaveApprovalInfo(leave) {
 }
 
 function renderMyLeaveActionCell(leave) {
+    if (leave.status === "pending_admin_review") {
+        return `
+            <div class="d-flex flex-column gap-2">
+                <form action="/employees/leaves/update/${leave.id}"
+                      method="post"
+                      data-employee-ajax-form="1"
+                      onsubmit="return confirm('确定保存这次请假修改吗？系统会重新读取当天班次并计算预计扣款。');">
+                    <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                    <input type="date"
+                           name="leave_date"
+                           min="{{ tomorrow_date }}"
+                           value="${escapeHtml(leave.leave_date)}"
+                           class="form-control form-control-sm mb-1"
+                           required>
+                    <input type="text"
+                           name="reason"
+                           value="${escapeHtml(leave.reason)}"
+                           class="form-control form-control-sm mb-1"
+                           required>
+                    <textarea name="remark"
+                              class="form-control form-control-sm mb-1"
+                              rows="2"
+                              placeholder="备注，可不填">${escapeHtml(leave.remark || "")}</textarea>
+                    <button type="submit" class="btn btn-sm btn-outline-primary w-100">
+                        <i class="bi bi-pencil-square me-1"></i>保存修改
+                    </button>
+                </form>
+                <form action="/employees/leaves/cancel-pending/${leave.id}"
+                      method="post"
+                      data-employee-ajax-form="1"
+                      onsubmit="return confirm('确定撤回这次请假吗？撤回后不会产生扣薪。');">
+                    <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                    <button type="submit" class="btn btn-sm btn-outline-secondary w-100">
+                        <i class="bi bi-arrow-counterclockwise me-1"></i>撤回请假
+                    </button>
+                </form>
+            </div>
+        `;
+    }
+
     if (leave.status !== "replacement_rejected_wait_employee") {
         return `<span class="text-muted small">暂无操作</span>`;
     }
@@ -5803,7 +5920,8 @@ function handleEmployeeAjaxResult(result) {
     if (result.action === "leave_approved"
         || result.action === "leave_rejected"
         || result.action === "leave_rest_replacement_assigned"
-        || result.action === "leave_flexible_replacement_assigned") {
+        || result.action === "leave_flexible_replacement_assigned"
+        || result.action === "leave_admin_cancelled") {
         updateLeaveApprovalRow(payload.leave);
         updateMyLeaveRow(payload.leave);
     }
@@ -5815,7 +5933,9 @@ function handleEmployeeAjaxResult(result) {
         }
     }
 
-    if (result.action === "leave_cancelled" || result.action === "leave_force_deducted") {
+    if (result.action === "leave_cancelled"
+        || result.action === "leave_force_deducted"
+        || result.action === "leave_updated") {
         updateMyLeaveRow(payload.leave);
     }
 

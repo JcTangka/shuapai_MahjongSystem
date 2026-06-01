@@ -489,6 +489,16 @@
                 </select>
             </div>
 
+            <div class="col-lg-3 col-md-6">
+                <label class="form-label fw-bold text-secondary">门店筛选</label>
+                <select class="form-select" name="contact_store_filter">
+                    <option value="all" {% if contact_store_filter == 'all' %}selected{% endif %}>全部门店</option>
+                    {% for store_name in store_list %}
+                    <option value="{{ store_name }}" {% if contact_store_filter == store_name %}selected{% endif %}>{{ store_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
             <div class="col-lg-3 col-md-6 contact-custom-date d-none">
                 <label class="form-label fw-bold text-secondary">开始日期</label>
                 <input type="date" class="form-control" name="contact_start_date" value="{{ contact_start_date or '' }}">
@@ -546,6 +556,7 @@
     <input type="hidden" name="contact_date_filter" value="{{ contact_date_filter or 'today' }}">
     <input type="hidden" name="contact_start_date" value="{{ contact_start_date or '' }}">
     <input type="hidden" name="contact_end_date" value="{{ contact_end_date or '' }}">
+    <input type="hidden" name="contact_store_filter" value="{{ contact_store_filter or 'all' }}">
     <input type="hidden" name="contact_employee" value="{{ contact_employee or 'all' }}">
 
     {% if contact_customer_list %}
@@ -565,6 +576,7 @@
                         <th>接待店长</th>
                         <th>昵称</th>
                         <th>微信号</th>
+                        <th>所属门店</th>
                         <th>是否添加标签</th>
                         <th>是否拉进群聊</th>
                         <th>是否修改备注</th>
@@ -585,6 +597,7 @@
                             {% endif %}
                         </td>
                         <td class="fw-bold">{{ item.wechat_id }}</td>
+                        <td>{{ item.store_name or '-' }}</td>
                         <td>
                             <input type="hidden" name="wechat_id" value="{{ item.wechat_id }}">
                             <input class="form-check-input contact-followup-checkbox" type="checkbox" name="has_tag_{{ row_index }}" value="1"
@@ -601,7 +614,7 @@
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="7" class="text-muted py-5">
+                        <td colspan="8" class="text-muted py-5">
                             <i class="bi bi-person-lines-fill fs-1 d-block mb-3"></i>
                             当前时间范围暂无接触顾客。
                         </td>
