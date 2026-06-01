@@ -700,13 +700,20 @@
                     <th>系统角色</th>
                     <th>账号状态</th>
                     <th>停用时间</th>
-                    <th style="width: 330px;">操作</th>
+                    <th>员工类型</th>
+                    <th style="width: 420px;">操作</th>
                 </tr>
             </thead>
 
             <tbody id="employee-list-tbody">
                 {% for emp in employee_list %}
-                <tr id="employee-row-{{ emp.id }}" data-employee-id="{{ emp.id }}">
+                {% set pending_type_change = employee_type_change_map.get(emp.id) %}
+                <tr id="employee-row-{{ emp.id }}"
+                    data-employee-id="{{ emp.id }}"
+                    data-display-name="{{ emp.display_name|e }}"
+                    data-employee-type="{{ 'management' if emp.role == 'admin' else emp.employee_type }}"
+                    data-pending-employee-type="{{ pending_type_change.employee_type if pending_type_change else '' }}"
+                    data-pending-effective-from="{{ pending_type_change.effective_from if pending_type_change else '' }}">
                     <td class="fw-bold text-muted">#{{ emp.id }}</td>
 
                     <td>
@@ -748,12 +755,31 @@
                     </td>
 
                     <td>
+                        <span class="badge rounded-pill bg-info text-dark">
+                            {{ employee_type_label('management' if emp.role == 'admin' else emp.employee_type) }}
+                        </span>
+                        {% if pending_type_change %}
+                        <div class="small text-primary mt-1">
+                            {{ pending_type_change.effective_from }} 起调整为
+                            {{ employee_type_label(pending_type_change.employee_type) }}
+                        </div>
+                        {% endif %}
+                    </td>
+
+                    <td>
                         {% if current_user.role == 'admin' %}
                             {% if emp.id == current_user.id %}
                                 <button class="btn btn-sm btn-outline-secondary" disabled>
                                     当前账号不可操作
                                 </button>
                             {% else %}
+                                {% if emp.role != 'admin' %}
+                                <button type="button"
+                                        class="btn btn-sm btn-outline-info"
+                                        onclick="openEmployeeTypeModal({{ emp.id }})">
+                                    <i class="bi bi-person-gear me-1"></i>调整员工类型
+                                </button>
+                                {% endif %}
                                 {% if emp.is_active %}
                                     {% if emp.role != 'admin' %}
                                     <form action="/employees/reset-password/{{ emp.id }}"
@@ -800,7 +826,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="7" class="text-muted py-5">
+                    <td colspan="8" class="text-muted py-5">
                         <i class="bi bi-inbox fs-1 d-block mb-3"></i>
                         暂无员工账号
                     </td>
@@ -827,7 +853,7 @@
                     <i class="bi bi-calendar-check me-1 text-primary"></i>请假审批
                 </div>
                 <div class="small text-muted mt-1">
-                    待审批 {{ pending_leave_count or 0 }} 条；顶班人同意后由管理员审批，审批通过后自动生成考勤记录和工资流水。
+                    待审批 {{ pending_leave_count or 0 }} 条；管理员可选择休班顶班、机动顶班或拒绝申请。
                 </div>
             </div>
         </div>
@@ -874,7 +900,12 @@
                     <td>
                         {% if item.replacement_employee_name_snapshot %}
                             <div class="fw-semibold">{{ item.replacement_employee_name_snapshot }}</div>
-                            {% if item.replacement_response == 'accepted' %}
+                            {% if item.status == 'approved_with_flexible' %}
+                                <span class="badge bg-primary">机动顶班，工资已同步</span>
+                                {% if item.replacement_salary_flow_id %}
+                                <div class="small text-muted mt-1">工资流水 #{{ item.replacement_salary_flow_id }}</div>
+                                {% endif %}
+                            {% elif item.replacement_response == 'accepted' %}
                                 <span class="badge bg-success">已同意</span>
                             {% elif item.replacement_response == 'rejected' %}
                                 <span class="badge bg-danger">已拒绝</span>
@@ -902,7 +933,7 @@
                     </td>
 
                     <td>
-                        {% if item.status in ['approved', 'force_leave_deducted'] %}
+                        {% if item.status in ['approved', 'approved_with_flexible', 'force_leave_deducted'] %}
                             <span class="fw-bold text-danger">¥{{ '%.2f'|format(item.final_deduct_amount or 0) }}</span>
                         {% else %}
                             <span class="text-muted">-</span>
@@ -910,7 +941,9 @@
                     </td>
 
                     <td>
-                        {% if item.status == 'pending' %}
+                        {% if item.status == 'pending_admin_review' %}
+                            <span class="badge bg-primary">待管理员审批</span>
+                        {% elif item.status == 'pending' %}
                             <span class="badge bg-warning text-dark">待顶班确认</span>
                         {% elif item.status == 'replacement_accepted' %}
                             <span class="badge bg-primary">待管理员审批</span>
@@ -918,6 +951,8 @@
                             <span class="badge bg-warning text-dark">待请假人确认</span>
                         {% elif item.status == 'force_leave_deducted' %}
                             <span class="badge bg-dark">坚持请假，已扣薪</span>
+                        {% elif item.status == 'approved_with_flexible' %}
+                            <span class="badge bg-success">机动顶班，已生效</span>
                         {% elif item.status == 'approved' %}
                             <span class="badge bg-success">已通过</span>
                         {% elif item.status == 'rejected' %}
@@ -940,20 +975,40 @@
                     </td>
 
                     <td>
-                        {% if item.status == 'replacement_accepted' or (item.status == 'pending' and not item.replacement_user_id) %}
+                        {% if item.status == 'pending_admin_review' %}
                         <div class="d-flex flex-column gap-2">
 
-                            <form action="/employees/leaves/approve/{{ item.id }}"
+                            <form action="/employees/leaves/rest-replacement/{{ item.id }}"
                                   method="post"
                                   data-employee-ajax-form="1"
-                                  onsubmit="return confirm('确定通过【{{ item.employee_name_snapshot }}】在 {{ item.leave_date }} 的请假吗？通过后会自动生成考勤记录和工资流水。');">
+                                  onsubmit="return confirm('确定批准请假并进入休班顶班流程吗？');">
                                 <input type="hidden" name="store" value="{{ current_store or '' }}">
                                 <input type="text"
                                        name="approval_note"
                                        class="form-control form-control-sm mb-1"
                                        placeholder="审批备注，可不填">
                                 <button type="submit" class="btn btn-sm btn-success w-100">
-                                    <i class="bi bi-check-circle me-1"></i>通过
+                                    <i class="bi bi-check-circle me-1"></i>休班顶班
+                                </button>
+                            </form>
+
+                            <form action="/employees/leaves/flexible-replacement/{{ item.id }}"
+                                  method="post"
+                                  data-employee-ajax-form="1"
+                                  onsubmit="return confirm('确定安排所选机动员工顶班吗？安排后不可撤销或更换。');">
+                                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
+                                    <option value="">选择机动员工</option>
+                                    {% for employee in flexible_replacement_employees %}
+                                    <option value="{{ employee.id }}">{{ employee.display_name }}</option>
+                                    {% endfor %}
+                                </select>
+                                <input type="text"
+                                       name="approval_note"
+                                       class="form-control form-control-sm mb-1"
+                                       placeholder="审批备注，可不填">
+                                <button type="submit" class="btn btn-sm btn-primary w-100">
+                                    <i class="bi bi-person-gear me-1"></i>机动顶班
                                 </button>
                             </form>
 
@@ -1282,7 +1337,7 @@
      1. 用于登记非自动计算的工资变化；
      2. 工作失误扣款放在这里，不放进考勤记录；
      3. 所有记录进入 SalaryFlowRecord；
-     4. 新增/删除都采用 AJAX 局部刷新。
+     4. 新增/编辑/删除都采用 AJAX 局部刷新。
 ========================= -->
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
     <div>
@@ -1324,13 +1379,21 @@
                     <th>状态</th>
                     <th>操作人</th>
                     <th>创建时间</th>
-                    <th style="width: 120px;">操作</th>
+                    <th style="width: 180px;">操作</th>
                 </tr>
             </thead>
 
             <tbody id="salary-flow-tbody">
                 {% for item in salary_flow_records %}
-                <tr id="salary-flow-row-{{ item.id }}" data-flow-id="{{ item.id }}">
+                <tr id="salary-flow-row-{{ item.id }}"
+                    data-flow-id="{{ item.id }}"
+                    data-user-id="{{ item.user_id }}"
+                    data-flow-date="{{ item.flow_date }}"
+                    data-flow-type="{{ item.flow_type }}"
+                    data-amount="{{ item.amount }}"
+                    data-title="{{ item.title|e }}"
+                    data-description="{{ (item.description or '')|e }}"
+                    data-visible="{{ '1' if item.is_visible_to_employee else '0' }}">
                     <td class="fw-bold text-muted">#{{ item.id }}</td>
 
                     <td>
@@ -1408,15 +1471,22 @@
                                 已锁定
                             </button>
                         {% else %}
-                            <form action="/employees/salary-flows/delete/{{ item.id }}"
-                                  method="post"
-                                  data-employee-ajax-form="1"
-                                  onsubmit="return confirm('确定删除这条工资调整流水吗？删除后员工工资明细中也不会再显示该项。');">
-                                <input type="hidden" name="store" value="{{ current_store or '' }}">
-                                <button type="submit" class="btn btn-sm btn-outline-danger">
-                                    <i class="bi bi-trash me-1"></i>删除
+                            <div class="d-flex justify-content-center gap-1">
+                                <button type="button"
+                                        class="btn btn-sm btn-outline-primary"
+                                        onclick="openSalaryFlowEditModal({{ item.id }})">
+                                    <i class="bi bi-pencil me-1"></i>编辑
                                 </button>
-                            </form>
+                                <form action="/employees/salary-flows/delete/{{ item.id }}"
+                                      method="post"
+                                      data-employee-ajax-form="1"
+                                      onsubmit="return confirm('确定删除这条工资调整流水吗？删除后员工工资明细中也不会再显示该项。');">
+                                    <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger">
+                                        <i class="bi bi-trash me-1"></i>删除
+                                    </button>
+                                </form>
+                            </div>
                         {% endif %}
                     </td>
                 </tr>
@@ -1573,6 +1643,114 @@
                     <button type="submit"
                             class="btn btn-primary">
                         <i class="bi bi-check-circle me-1"></i>确定新增
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- 编辑工资调整弹窗 -->
+<div class="modal fade" id="salaryFlowEditModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content border-0 shadow-lg">
+            <div class="modal-header text-white" style="background: linear-gradient(135deg, #2563eb, #1d4ed8);">
+                <h5 class="modal-title">
+                    <i class="bi bi-pencil-square me-2"></i>编辑工资调整
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+
+            <form id="salaryFlowEditForm"
+                  action="/employees/salary-flows/edit/0"
+                  method="post"
+                  data-employee-ajax-form="1"
+                  onsubmit="return confirm('确定保存这条工资调整流水的修改吗？');">
+                <div class="modal-body">
+                    <input type="hidden" name="store" value="{{ current_store or '' }}">
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">员工 <span class="text-danger">*</span></label>
+                        <select name="user_id" id="salaryFlowEditUserInput" class="form-select" required>
+                            {% for emp in active_employees %}
+                            <option value="{{ emp.id }}">{{ emp.display_name }}（{{ '管理员' if emp.role == 'admin' else '普通员工' }}）</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">发生日期 <span class="text-danger">*</span></label>
+                        <input type="date" name="flow_date" id="salaryFlowEditDateInput" class="form-control" required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">调整类型 <span class="text-danger">*</span></label>
+                        <select name="flow_type"
+                                id="salaryFlowEditTypeInput"
+                                class="form-select"
+                                onchange="handleSalaryFlowEditTypeChange()"
+                                required>
+                            <option value="mistake_deduct">工作失误扣款</option>
+                            <option value="replacement_pay">顶班补贴</option>
+                            <option value="overtime_pay">加班补贴</option>
+                            <option value="manual_bonus">临时奖金</option>
+                            <option value="manual_deduct">临时扣款</option>
+                            <option value="manual_correction">工资修正</option>
+                            <option value="other_adjustment">其他调整</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">金额方向 <span class="text-danger">*</span></label>
+                        <select name="amount_action" id="salaryFlowEditAmountActionInput" class="form-select" required>
+                            <option value="deduct">扣钱</option>
+                            <option value="add">加钱</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">金额 <span class="text-danger">*</span></label>
+                        <input type="number"
+                               name="amount"
+                               id="salaryFlowEditAmountInput"
+                               class="form-control"
+                               step="0.01"
+                               min="0.01"
+                               required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">标题</label>
+                        <input type="text" name="title" id="salaryFlowEditTitleInput" class="form-control">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">说明</label>
+                        <textarea name="description"
+                                  id="salaryFlowEditDescriptionInput"
+                                  class="form-control"
+                                  rows="3"></textarea>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">员工可见</label>
+                        <div class="form-check">
+                            <input class="form-check-input"
+                                   type="checkbox"
+                                   name="is_visible_to_employee"
+                                   value="1"
+                                   id="salaryFlowEditVisibleInput">
+                            <label class="form-check-label" for="salaryFlowEditVisibleInput">
+                                在员工“我的工资”中展示该流水
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-check-circle me-1"></i>保存修改
                     </button>
                 </div>
             </form>
@@ -3231,15 +3409,119 @@
             <i class="bi bi-calendar-plus text-primary me-1"></i>我的请假
         </h5>
         <div class="text-muted small">
-            请假需至少提前一天提交；系统会先通知当天休班员工确认顶班，再进入管理员审批。
+            请假需至少提前一天提交；管理员审批后会安排休班顶班或机动顶班。
         </div>
     </div>
 
-    <button class="btn btn-primary"
-            data-bs-toggle="modal"
-            data-bs-target="#leaveApplyModal">
-        <i class="bi bi-plus-circle me-1"></i>新增请假申请
-    </button>
+    <div class="d-flex gap-2">
+        <button class="btn btn-outline-primary"
+                data-bs-toggle="modal"
+                data-bs-target="#shiftSwapApplyModal">
+            <i class="bi bi-arrow-left-right me-1"></i>换班申请
+        </button>
+        <button class="btn btn-primary"
+                data-bs-toggle="modal"
+                data-bs-target="#leaveApplyModal">
+            <i class="bi bi-plus-circle me-1"></i>新增请假申请
+        </button>
+    </div>
+</div>
+
+{% if my_pending_shift_swap_requests %}
+<div class="card employee-module-card mb-3">
+    <div class="card-header bg-white py-3">
+        <div class="fw-bold"><i class="bi bi-arrow-left-right me-1 text-primary"></i>待我确认的换班</div>
+    </div>
+    <div class="card-body">
+        <div class="row g-3">
+            {% for item in my_pending_shift_swap_requests %}
+            <div class="col-md-6 col-xl-4">
+                <div class="border rounded-3 p-3 h-100">
+                    <div class="fw-bold mb-1">{{ item.applicant_name_snapshot }}</div>
+                    <div class="small text-muted mb-2">
+                        {{ item.swap_date }} ｜ {{ shift_type_label(item.applicant_original_shift_type) }}
+                        ↔ {{ shift_type_label(item.target_original_shift_type) }}
+                    </div>
+                    {% if item.status == 'pending' %}
+                    <div class="small mb-3">对方申请与您换班。</div>
+                    <div class="d-flex gap-2">
+                        <form action="/employees/shift-swaps/respond/{{ item.id }}" method="post" class="flex-fill">
+                            <input type="hidden" name="store" value="{{ current_store or '' }}">
+                            <input type="hidden" name="decision" value="accept">
+                            <button class="btn btn-sm btn-success w-100">同意换班</button>
+                        </form>
+                        <form action="/employees/shift-swaps/respond/{{ item.id }}" method="post" class="flex-fill">
+                            <input type="hidden" name="store" value="{{ current_store or '' }}">
+                            <input type="hidden" name="decision" value="reject">
+                            <button class="btn btn-sm btn-outline-danger w-100">拒绝</button>
+                        </form>
+                    </div>
+                    {% else %}
+                    <div class="small mb-3">对方申请撤回已生效的换班。</div>
+                    <div class="d-flex gap-2">
+                        <form action="/employees/shift-swaps/cancel-respond/{{ item.id }}" method="post" class="flex-fill">
+                            <input type="hidden" name="store" value="{{ current_store or '' }}">
+                            <input type="hidden" name="decision" value="accept">
+                            <button class="btn btn-sm btn-success w-100">同意撤回</button>
+                        </form>
+                        <form action="/employees/shift-swaps/cancel-respond/{{ item.id }}" method="post" class="flex-fill">
+                            <input type="hidden" name="store" value="{{ current_store or '' }}">
+                            <input type="hidden" name="decision" value="reject">
+                            <button class="btn btn-sm btn-outline-danger w-100">拒绝撤回</button>
+                        </form>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<div class="card employee-module-card mb-3">
+    <div class="card-header bg-white py-3">
+        <div class="fw-bold"><i class="bi bi-arrow-left-right me-1 text-primary"></i>我的换班记录</div>
+    </div>
+    <div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th>ID</th><th>日期</th><th>申请人</th><th>对方</th>
+                    <th>原班次</th><th>状态</th><th>原因</th><th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in my_shift_swap_requests %}
+                <tr>
+                    <td class="text-muted">#{{ item.id }}</td>
+                    <td class="fw-bold">{{ item.swap_date }}</td>
+                    <td>{{ item.applicant_name_snapshot }}</td>
+                    <td>{{ item.target_name_snapshot }}</td>
+                    <td>
+                        {{ shift_type_label(item.applicant_original_shift_type) }}
+                        ↔ {{ shift_type_label(item.target_original_shift_type) }}
+                    </td>
+                    <td><span class="badge bg-secondary">{{ shift_swap_status_label(item.status) }}</span></td>
+                    <td>{{ item.reason or '-' }}</td>
+                    <td>
+                        {% if item.applicant_user_id == current_user.id and item.status in ['active', 'cancel_rejected'] %}
+                        <form action="/employees/shift-swaps/cancel-request/{{ item.id }}" method="post"
+                              onsubmit="return confirm('确定申请撤回本次换班吗？需要对方同意。');">
+                            <input type="hidden" name="store" value="{{ current_store or '' }}">
+                            <button class="btn btn-sm btn-outline-secondary">申请撤回</button>
+                        </form>
+                        {% else %}
+                        <span class="text-muted small">暂无操作</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="8" class="text-muted py-4">暂无换班记录</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </div>
 
 {% if my_replacement_requests %}
@@ -3354,7 +3636,7 @@
                     </td>
 
                     <td>
-                        {% if item.status in ['approved', 'force_leave_deducted'] %}
+                        {% if item.status in ['approved', 'approved_with_flexible', 'force_leave_deducted'] %}
                             <span class="fw-bold text-danger">
                                 ¥{{ '%.2f'|format(item.final_deduct_amount or 0) }}
                             </span>
@@ -3364,7 +3646,9 @@
                     </td>
 
                     <td>
-                        {% if item.status == 'pending' %}
+                        {% if item.status == 'pending_admin_review' %}
+                            <span class="badge bg-primary">待管理员审批</span>
+                        {% elif item.status == 'pending' %}
                             <span class="badge bg-warning text-dark">待顶班确认</span>
                         {% elif item.status == 'replacement_accepted' %}
                             <span class="badge bg-primary">待管理员审批</span>
@@ -3372,6 +3656,8 @@
                             <span class="badge bg-warning text-dark">待您确认</span>
                         {% elif item.status == 'force_leave_deducted' %}
                             <span class="badge bg-dark">坚持请假，已扣薪</span>
+                        {% elif item.status == 'approved_with_flexible' %}
+                            <span class="badge bg-success">机动顶班，已生效</span>
                         {% elif item.status == 'approved' %}
                             <span class="badge bg-success">已通过</span>
                         {% elif item.status == 'rejected' %}
@@ -3447,6 +3733,50 @@
 </div>
 
 <!-- 新增请假申请弹窗 -->
+<div class="modal fade" id="shiftSwapApplyModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content border-0 shadow-lg">
+            <div class="modal-header text-white" style="background: linear-gradient(135deg, #0d6efd, #4f46e5);">
+                <h5 class="modal-title"><i class="bi bi-arrow-left-right me-2"></i>换班申请</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form action="/employees/shift-swaps/apply" method="post">
+                <div class="modal-body">
+                    <input type="hidden" name="store" value="{{ current_store or '' }}">
+                    <div class="alert alert-info small">
+                        换班至少提前一天申请，双方都必须有具体班次。机动类型员工和已锁定的机动顶班班次不能参与换班。
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">换班员工</label>
+                        <select name="target_user_id" class="form-select" required>
+                            <option value="">请选择</option>
+                            {% for employee in shift_swap_target_employees %}
+                            <option value="{{ employee.id }}">{{ employee.display_name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">换班日期</label>
+                        <input type="date" name="swap_date" min="{{ tomorrow_date }}" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">原因</label>
+                        <input type="text" name="reason" class="form-control" placeholder="可不填">
+                    </div>
+                    <div>
+                        <label class="form-label fw-bold">备注</label>
+                        <textarea name="remark" class="form-control" rows="2" placeholder="可不填"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">提交换班申请</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 <div class="modal fade" id="leaveApplyModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content border-0 shadow-lg">
@@ -3466,7 +3796,7 @@
                             <i class="bi bi-info-circle me-1"></i>请假规则
                         </div>
                         <div class="small">
-                            当天无法请假，至少提前一天提交。系统会指定当天休班员工确认顶班；顶班人同意后进入管理员审批，顶班人拒绝后您可选择取消或坚持请假。
+                            当天无法请假，至少提前一天提交。管理员审批后会安排休班员工或机动类型员工顶班；休班顶班人拒绝后，您可选择取消或坚持请假。
                         </div>
                     </div>
 
@@ -3649,6 +3979,61 @@
 </div>
 {% endif %}
 
+<div class="modal fade" id="employeeTypeModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content rounded-4 border-0 shadow">
+            <div class="modal-header bg-info">
+                <h5 class="modal-title"><i class="bi bi-person-gear me-2"></i>调整员工类型</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form id="employeeTypeForm"
+                  action="/employees/type-change/0"
+                  method="post"
+                  data-employee-ajax-form="1"
+                  onsubmit="return confirm('确定保存员工类型调整吗？');">
+                <div class="modal-body">
+                    <input type="hidden" name="store" value="{{ current_store or '' }}">
+                    <input type="hidden" name="status_filter" value="{{ status_filter or 'active' }}">
+
+                    <div class="alert alert-info small">
+                        仅允许在每月 1 日或最后一天调整。月初调整当月生效；月末调整次月生效。尚未生效的记录可以覆盖。
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">员工</label>
+                        <input type="text" id="employeeTypeEmployeeName" class="form-control" readonly>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">当前类型</label>
+                        <input type="text" id="employeeTypeCurrentLabel" class="form-control" readonly>
+                    </div>
+
+                    <div class="mb-3" id="employeeTypePendingBox" style="display: none;">
+                        <label class="form-label fw-bold">待生效调整</label>
+                        <input type="text" id="employeeTypePendingLabel" class="form-control" readonly>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">调整为 <span class="text-danger">*</span></label>
+                        <select name="employee_type" id="employeeTypeSelect" class="form-select" required>
+                            {% for value, label in employee_type_options %}
+                            <option value="{{ value }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-info">
+                        <i class="bi bi-check-circle me-1"></i>保存调整
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 <div class="modal fade" id="passwordResetResultModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content rounded-4 border-0 shadow">
@@ -3759,13 +4144,46 @@ function renderEmployeeStatusBadge(emp) {
     return `<span class="badge rounded-pill employee-status-inactive">已停用</span>`;
 }
 
+function employeeTypeLabel(employeeType) {
+    const labels = {
+        management: "管理",
+        regular: "普通",
+        logistics: "后勤",
+        flexible: "机动",
+        foreman: "领班",
+        hourly: "钟点工"
+    };
+    return labels[employeeType] || employeeType || "普通";
+}
+
+function renderEmployeeTypeCell(emp) {
+    const pendingHtml = emp.pending_effective_from
+        ? `<div class="small text-primary mt-1">${escapeHtml(emp.pending_effective_from)} 起调整为 ${escapeHtml(emp.pending_employee_type_label)}</div>`
+        : "";
+    return `
+        <span class="badge rounded-pill bg-info text-dark">${escapeHtml(emp.employee_type_label)}</span>
+        ${pendingHtml}
+    `;
+}
+
 function renderEmployeeActionCell(emp) {
     if (emp.is_current_user) {
         return `<button class="btn btn-sm btn-outline-secondary" disabled>当前账号不可操作</button>`;
     }
 
+    const typeButton = emp.role !== "admin"
+        ? `
+            <button type="button"
+                    class="btn btn-sm btn-outline-info"
+                    onclick="openEmployeeTypeModal(${emp.id})">
+                <i class="bi bi-person-gear me-1"></i>调整员工类型
+            </button>
+        `
+        : "";
+
     if (emp.is_active) {
         return `
+            ${typeButton}
             ${emp.role !== "admin" ? `
             <form action="/employees/reset-password/${emp.id}"
                   method="post"
@@ -3794,6 +4212,7 @@ function renderEmployeeActionCell(emp) {
     }
 
     return `
+        ${typeButton}
         <form action="/employees/restore/${emp.id}"
               method="post"
               class="d-inline"
@@ -3853,29 +4272,62 @@ function currentEmployeeStatusFilter() {
     return params.get("status_filter") || "active";
 }
 
+function openEmployeeTypeModal(employeeId) {
+    const row = document.getElementById(`employee-row-${employeeId}`);
+    const form = document.getElementById("employeeTypeForm");
+    if (!row || !form) return;
+
+    form.action = `/employees/type-change/${employeeId}`;
+    document.getElementById("employeeTypeEmployeeName").value = row.dataset.displayName || "";
+    document.getElementById("employeeTypeCurrentLabel").value = employeeTypeLabel(row.dataset.employeeType);
+    document.getElementById("employeeTypeSelect").value = row.dataset.pendingEmployeeType || row.dataset.employeeType || "regular";
+
+    const pendingBox = document.getElementById("employeeTypePendingBox");
+    const pendingLabel = document.getElementById("employeeTypePendingLabel");
+    if (row.dataset.pendingEffectiveFrom) {
+        pendingBox.style.display = "";
+        pendingLabel.value = `${row.dataset.pendingEffectiveFrom} 起调整为 ${employeeTypeLabel(row.dataset.pendingEmployeeType)}`;
+    } else {
+        pendingBox.style.display = "none";
+        pendingLabel.value = "";
+    }
+
+    const modalEl = document.getElementById("employeeTypeModal");
+    if (modalEl) {
+        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    }
+}
+
 function updateEmployeeRow(emp) {
     const row = document.getElementById(`employee-row-${emp.id}`);
     if (!row) return;
 
     const cells = row.children;
-    if (cells.length < 7) return;
+    if (cells.length < 8) return;
 
+    row.dataset.displayName = emp.display_name || "";
+    row.dataset.employeeType = emp.employee_type || "regular";
+    row.dataset.pendingEmployeeType = emp.pending_employee_type || "";
+    row.dataset.pendingEffectiveFrom = emp.pending_effective_from || "";
     cells[2].innerHTML = renderEmployeeNameCell(emp);
     cells[4].innerHTML = renderEmployeeStatusBadge(emp);
     cells[5].innerHTML = emp.deleted_at
         ? `<span class="small text-muted">${escapeHtml(emp.deleted_at)}</span>`
         : `<span class="text-muted">-</span>`;
-    cells[6].innerHTML = renderEmployeeActionCell(emp);
+    cells[6].innerHTML = renderEmployeeTypeCell(emp);
+    cells[7].innerHTML = renderEmployeeActionCell(emp);
 
     row.classList.add("table-warning");
     setTimeout(() => row.classList.remove("table-warning"), 1200);
 }
 
 function leaveStatusBadge(status, statusLabel) {
+    if (status === "pending_admin_review") return `<span class="badge bg-primary">待管理员审批</span>`;
     if (status === "pending") return `<span class="badge bg-warning text-dark">待顶班确认</span>`;
-    if (status === "replacement_accepted") return `<span class="badge bg-primary">待管理员审批</span>`;
+    if (status === "replacement_accepted") return `<span class="badge bg-success">顶班人已同意，请假已生效</span>`;
     if (status === "replacement_rejected_wait_employee") return `<span class="badge bg-warning text-dark">待请假人确认</span>`;
     if (status === "force_leave_deducted") return `<span class="badge bg-dark">坚持请假，已扣薪</span>`;
+    if (status === "approved_with_flexible") return `<span class="badge bg-success">机动顶班，已生效</span>`;
     if (status === "approved") return `<span class="badge bg-success">已通过</span>`;
     if (status === "rejected") return `<span class="badge bg-danger">已拒绝</span>`;
     if (status === "cancelled") return `<span class="badge bg-secondary">已撤销</span>`;
@@ -3883,23 +4335,47 @@ function leaveStatusBadge(status, statusLabel) {
 }
 
 function renderLeaveApprovalActionCell(leave) {
-    if (leave.status !== "replacement_accepted" && !(leave.status === "pending" && !leave.replacement_user_id)) {
+    if (leave.status !== "pending_admin_review") {
         return `<span class="text-muted small">暂无操作</span>`;
     }
 
+    const flexibleOptions = [
+        {% for employee in flexible_replacement_employees %}
+        `<option value="{{ employee.id }}">{{ employee.display_name|e }}</option>`,
+        {% endfor %}
+    ].join("");
+
     return `
         <div class="d-flex flex-column gap-2">
-            <form action="/employees/leaves/approve/${leave.id}"
+            <form action="/employees/leaves/rest-replacement/${leave.id}"
                   method="post"
                   data-employee-ajax-form="1"
-                  onsubmit="return confirm('确定通过【${escapeHtml(leave.employee_name)}】在 ${escapeHtml(leave.leave_date)} 的请假吗？通过后会自动生成考勤记录和工资流水。');">
+                  onsubmit="return confirm('确定批准请假并进入休班顶班流程吗？');">
                 <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
                 <input type="text"
                        name="approval_note"
                        class="form-control form-control-sm mb-1"
                        placeholder="审批备注，可不填">
                 <button type="submit" class="btn btn-sm btn-success w-100">
-                    <i class="bi bi-check-circle me-1"></i>通过
+                    <i class="bi bi-check-circle me-1"></i>休班顶班
+                </button>
+            </form>
+
+            <form action="/employees/leaves/flexible-replacement/${leave.id}"
+                  method="post"
+                  data-employee-ajax-form="1"
+                  onsubmit="return confirm('确定安排所选机动员工顶班吗？安排后不可撤销或更换。');">
+                <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
+                    <option value="">选择机动员工</option>
+                    ${flexibleOptions}
+                </select>
+                <input type="text"
+                       name="approval_note"
+                       class="form-control form-control-sm mb-1"
+                       placeholder="审批备注，可不填">
+                <button type="submit" class="btn btn-sm btn-primary w-100">
+                    <i class="bi bi-person-gear me-1"></i>机动顶班
                 </button>
             </form>
 
@@ -3929,7 +4405,7 @@ function updateLeaveApprovalRow(leave) {
 
     cells[3].innerHTML = `<span class="badge bg-light text-dark border">${escapeHtml(leave.shift_label)}</span>`;
     cells[4].innerHTML = renderReplacementInfo(leave);
-    cells[8].innerHTML = (leave.status === "approved" || leave.status === "force_leave_deducted")
+    cells[8].innerHTML = (leave.status === "approved" || leave.status === "approved_with_flexible" || leave.status === "force_leave_deducted")
         ? `<span class="fw-bold text-danger">${fmtMoney(leave.final_deduct_amount)}</span>`
         : `<span class="text-muted">-</span>`;
     cells[9].innerHTML = leaveStatusBadge(leave.status, leave.status_label);
@@ -3957,7 +4433,12 @@ function renderReplacementInfo(leave) {
         return `<span class="text-muted">-</span>`;
     }
     let badge = `<span class="badge bg-warning text-dark">待确认</span>`;
-    if (leave.replacement_response === "accepted") {
+    if (leave.status === "approved_with_flexible") {
+        badge = `
+            <span class="badge bg-primary">机动顶班，工资已同步</span>
+            ${leave.replacement_salary_flow_id ? `<div class="small text-muted mt-1">工资流水 #${leave.replacement_salary_flow_id}</div>` : ""}
+        `;
+    } else if (leave.replacement_response === "accepted") {
         badge = `<span class="badge bg-success">已同意</span>`;
     } else if (leave.replacement_response === "rejected") {
         badge = `<span class="badge bg-danger">已拒绝</span>`;
@@ -3981,7 +4462,7 @@ function renderMyLeaveRow(leave) {
             </td>
             <td><span class="fw-bold text-danger">${fmtMoney(leave.estimated_deduct_amount)}</span></td>
             <td>
-                ${leave.status === "approved" || leave.status === "force_leave_deducted"
+                ${leave.status === "approved" || leave.status === "approved_with_flexible" || leave.status === "force_leave_deducted"
                     ? `<span class="fw-bold text-danger">${fmtMoney(leave.final_deduct_amount)}</span>`
                     : `<span class="text-muted">-</span>`}
             </td>
@@ -4008,7 +4489,7 @@ function renderMyLeaveApprovalInfo(leave) {
             ${leave.replacement_response_at ? `<div class="small text-muted">确认时间：${escapeHtml(leave.replacement_response_at)}</div>` : ""}
         `;
     }
-    return `<span class="text-muted small">等待顶班确认</span>`;
+    return `<span class="text-muted small">等待管理员审批</span>`;
 }
 
 function renderMyLeaveActionCell(leave) {
@@ -4245,9 +4726,9 @@ function renderSalaryFlowRow(flow) {
      * 管理员工资调整流水行渲染。
      *
      * 说明：
-     * 1. AJAX 新增工资调整后，用该函数生成新行；
-     * 2. 删除按钮同样走 AJAX，不刷新整页；
-     * 3. 已锁定流水不允许删除。
+     * 1. AJAX 新增或编辑工资调整后，用该函数生成新行；
+     * 2. 编辑、删除按钮同样走 AJAX，不刷新整页；
+     * 3. 已锁定流水不允许编辑或删除。
      */
     const amountHtml = Number(flow.amount || 0) >= 0
         ? `<span class="fw-bold text-success">+${fmtMoney(flow.amount)}</span>`
@@ -4256,19 +4737,34 @@ function renderSalaryFlowRow(flow) {
     const actionHtml = flow.is_locked
         ? `<button class="btn btn-sm btn-outline-secondary" disabled>已锁定</button>`
         : `
-            <form action="/employees/salary-flows/delete/${flow.id}"
-                  method="post"
-                  data-employee-ajax-form="1"
-                  onsubmit="return confirm('确定删除这条工资调整流水吗？删除后员工工资明细中也不会再显示该项。');">
-                <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
-                <button type="submit" class="btn btn-sm btn-outline-danger">
-                    <i class="bi bi-trash me-1"></i>删除
+            <div class="d-flex justify-content-center gap-1">
+                <button type="button"
+                        class="btn btn-sm btn-outline-primary"
+                        onclick="openSalaryFlowEditModal(${flow.id})">
+                    <i class="bi bi-pencil me-1"></i>编辑
                 </button>
-            </form>
+                <form action="/employees/salary-flows/delete/${flow.id}"
+                      method="post"
+                      data-employee-ajax-form="1"
+                      onsubmit="return confirm('确定删除这条工资调整流水吗？删除后员工工资明细中也不会再显示该项。');">
+                    <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                    <button type="submit" class="btn btn-sm btn-outline-danger">
+                        <i class="bi bi-trash me-1"></i>删除
+                    </button>
+                </form>
+            </div>
         `;
 
     return `
-        <tr id="salary-flow-row-${flow.id}" data-flow-id="${flow.id}">
+        <tr id="salary-flow-row-${flow.id}"
+            data-flow-id="${flow.id}"
+            data-user-id="${flow.user_id}"
+            data-flow-date="${escapeHtml(flow.flow_date)}"
+            data-flow-type="${escapeHtml(flow.flow_type)}"
+            data-amount="${Number(flow.amount || 0)}"
+            data-title="${escapeHtml(flow.title || "")}"
+            data-description="${escapeHtml(flow.description || "")}"
+            data-visible="${flow.is_visible_to_employee ? "1" : "0"}">
             <td class="fw-bold text-muted">#${flow.id}</td>
             <td><span class="fw-bold">${escapeHtml(flow.employee_name)}</span></td>
             <td>
@@ -4324,6 +4820,24 @@ function prependSalaryFlowRow(flow) {
     }
 }
 
+function updateSalaryFlowRow(flow) {
+    /**
+     * 编辑工资调整流水后，只替换当前行。
+     */
+    const row = document.getElementById(`salary-flow-row-${flow.id}`);
+    if (!row) return;
+
+    const temp = document.createElement("tbody");
+    temp.innerHTML = renderSalaryFlowRow(flow).trim();
+    row.replaceWith(temp.firstElementChild);
+
+    const updatedRow = document.getElementById(`salary-flow-row-${flow.id}`);
+    if (updatedRow) {
+        updatedRow.classList.add("table-warning");
+        setTimeout(() => updatedRow.classList.remove("table-warning"), 1200);
+    }
+}
+
 function removeSalaryFlowRow(flowId) {
     /**
      * 删除工资调整流水后，只移除当前行。
@@ -4346,6 +4860,32 @@ function removeSalaryFlowRow(flowId) {
                 `;
             }
         }, 180);
+    }
+}
+
+function openSalaryFlowEditModal(flowId) {
+    /**
+     * 从工资调整表格行读取数据并填充管理员编辑弹窗。
+     */
+    const row = document.getElementById(`salary-flow-row-${flowId}`);
+    const form = document.getElementById("salaryFlowEditForm");
+    if (!row || !form) return;
+
+    form.action = `/employees/salary-flows/edit/${flowId}`;
+    document.getElementById("salaryFlowEditUserInput").value = row.dataset.userId || "";
+    document.getElementById("salaryFlowEditDateInput").value = row.dataset.flowDate || "";
+    document.getElementById("salaryFlowEditTypeInput").value = row.dataset.flowType || "";
+    document.getElementById("salaryFlowEditAmountActionInput").value = Number(row.dataset.amount || 0) >= 0 ? "add" : "deduct";
+    document.getElementById("salaryFlowEditAmountInput").value = Math.abs(Number(row.dataset.amount || 0)).toFixed(2);
+    document.getElementById("salaryFlowEditTitleInput").value = row.dataset.title || "";
+    document.getElementById("salaryFlowEditDescriptionInput").value = row.dataset.description || "";
+    document.getElementById("salaryFlowEditVisibleInput").checked = row.dataset.visible === "1";
+
+    handleSalaryFlowEditTypeChange();
+
+    const modalEl = document.getElementById("salaryFlowEditModal");
+    if (modalEl) {
+        bootstrap.Modal.getOrCreateInstance(modalEl).show();
     }
 }
 
@@ -4826,7 +5366,7 @@ function removeTeamCard(teamId) {
     }, 180);
 }
 
-function handleSalaryFlowTypeChange() {
+function syncSalaryFlowTypeInputs(typeEl, actionEl, titleEl) {
     /**
      * 根据工资调整类型自动调整金额方向和标题占位。
      *
@@ -4835,10 +5375,6 @@ function handleSalaryFlowTypeChange() {
      * 2. 顶班补贴、加班补贴、临时奖金默认加钱；
      * 3. 工资修正、其他调整允许管理员自行选择加钱/扣钱。
      */
-    const typeEl = document.getElementById("salaryFlowTypeInput");
-    const actionEl = document.getElementById("salaryAmountActionInput");
-    const titleEl = document.getElementById("salaryFlowTitleInput");
-
     if (!typeEl || !actionEl || !titleEl) return;
 
     const type = typeEl.value;
@@ -4866,6 +5402,22 @@ function handleSalaryFlowTypeChange() {
     }
 }
 
+function handleSalaryFlowTypeChange() {
+    syncSalaryFlowTypeInputs(
+        document.getElementById("salaryFlowTypeInput"),
+        document.getElementById("salaryAmountActionInput"),
+        document.getElementById("salaryFlowTitleInput")
+    );
+}
+
+function handleSalaryFlowEditTypeChange() {
+    syncSalaryFlowTypeInputs(
+        document.getElementById("salaryFlowEditTypeInput"),
+        document.getElementById("salaryFlowEditAmountActionInput"),
+        document.getElementById("salaryFlowEditTitleInput")
+    );
+}
+
 function handleEmployeeAjaxResult(result) {
     if (!result.ok) {
         employeeShowToast(result.message || "操作失败", "error");
@@ -4884,6 +5436,14 @@ function handleEmployeeAjaxResult(result) {
         showPasswordResetResult(payload.temp_password);
     }
 
+    if (result.action === "employee_type_updated") {
+        updateEmployeeRow(payload.employee);
+
+        const modalEl = document.getElementById("employeeTypeModal");
+        const modal = modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
+        if (modal) modal.hide();
+    }
+
     if (result.action === "leave_created") {
         prependMyLeaveRow(payload.leave);
 
@@ -4895,7 +5455,10 @@ function handleEmployeeAjaxResult(result) {
         if (form) form.reset();
     }
 
-    if (result.action === "leave_approved" || result.action === "leave_rejected") {
+    if (result.action === "leave_approved"
+        || result.action === "leave_rejected"
+        || result.action === "leave_rest_replacement_assigned"
+        || result.action === "leave_flexible_replacement_assigned") {
         updateLeaveApprovalRow(payload.leave);
         updateMyLeaveRow(payload.leave);
     }
@@ -4903,6 +5466,7 @@ function handleEmployeeAjaxResult(result) {
     if (result.action === "leave_replacement_accepted" || result.action === "leave_replacement_rejected") {
         if (payload.leave) {
             removeReplacementRequestCard(payload.leave.id);
+            updateMyLeaveRow(payload.leave);
         }
     }
 
@@ -4944,6 +5508,14 @@ function handleEmployeeAjaxResult(result) {
 
     if (result.action === "salary_flow_deleted") {
         removeSalaryFlowRow(payload.salary_flow_id);
+    }
+
+    if (result.action === "salary_flow_updated") {
+        updateSalaryFlowRow(payload.salary_flow);
+
+        const modalEl = document.getElementById("salaryFlowEditModal");
+        const modal = modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
+        if (modal) modal.hide();
     }
 
     if (result.action === "team_created") {

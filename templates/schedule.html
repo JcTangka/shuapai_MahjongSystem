@@ -17,7 +17,7 @@
     white-space: nowrap;
   }
 
-  /* 每一天列：给最小宽度，确保“中班/大中班/晚班/休息”能显示 */
+  /* 每一天列：给最小宽度，确保“中班/大中班/晚1班/晚2班/休息”能显示 */
   .schedule-table th.day-col,
   .schedule-table td.day-col {
     min-width: 110px;   /* 你要更宽就调到 120/130 */
@@ -60,7 +60,7 @@
   </div>
 
   <div class="text-secondary small">
-    班次：早班({{ shift_desc.early }}) / 中班({{ shift_desc.mid }}) / 大中班({{ shift_desc.bigmid }}) / 晚班({{ shift_desc.night }}) / 机动 / 休息
+    班次：早班({{ shift_desc.early }}) / 中班({{ shift_desc.mid }}) / 大中班({{ shift_desc.bigmid }}) / 晚1班({{ shift_desc.night1 }}) / 晚2班({{ shift_desc.night2 }}) / 休息
   </div>
 </div>
 
@@ -115,12 +115,17 @@
 
             <td class="text-center day-col">
               {% if current_user.role == "admin" %}
+                {% if key in flexible_locked_shift_keys %}
+                <span class="badge bg-primary">{{ shift_label.get(st, "休息") }}</span>
+                <div class="small text-primary mt-1">机动顶班已锁定</div>
+                {% else %}
                 <select class="form-select form-select-sm"
                         name="shift__{{ name }}__{{ d.isoformat() }}">
                   {% for val, label in shift_options %}
                     <option value="{{ val }}" {% if val == st %}selected{% endif %}>{{ label }}</option>
                   {% endfor %}
                 </select>
+                {% endif %}
               {% else %}
                 <span class="badge bg-light text-dark border">
                   {{ shift_label.get(st, "休息") }}

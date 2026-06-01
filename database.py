@@ -181,6 +181,7 @@ class User(SQLModel, table=True):
     hashed_password: str
     display_name: str  # 显示名称
     role: str = "operator"  # admin / operator
+    employee_type: str = Field(default="regular", index=True)  # management / regular / logistics / flexible / foreman / hourly
 
     # V3：员工软删除 / 停用
     is_active: bool = Field(default=True, index=True)
@@ -195,6 +196,29 @@ class User(SQLModel, table=True):
     password_reset_at: Optional[datetime] = Field(default=None, index=True)
     password_reset_by_user_id: Optional[int] = Field(default=None, index=True)
     password_reset_by_name: Optional[str] = None
+
+
+class EmployeeTypeChangeRecord(SQLModel, table=True):
+    """
+    员工类型变更记录。
+
+    effective_from 始终保存某个月的 1 日，同一员工同一月份最多一条记录。
+    月末提交的记录从次月生效；月初提交的记录从当月生效。
+    """
+    __tablename__ = "employeetypechangerecord"
+    __table_args__ = (
+        UniqueConstraint("user_id", "effective_from", name="uq_employee_type_change_user_month"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    employee_name_snapshot: str = Field(index=True)
+    employee_type: str = Field(index=True)
+    effective_from: date = Field(index=True)
+    changed_by_user_id: int = Field(foreign_key="user.id", index=True)
+    changed_by_name: str
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
 
 
 class EmployeeDutySession(SQLModel, table=True):
@@ -426,7 +450,7 @@ class ShiftSchedule(SQLModel, table=True):
     # 店长/操作员显示名（与 User.display_name 对齐）
     operator_name: str = Field(index=True)
 
-    # 班次：early / mid / bigmid / night / flexible / off
+    # 班次：early / mid / bigmid / night1 / night2 / off
     shift_type: str = Field(default="off", index=True)
 
 # ===================== 新增：待办及信息同步业务表 =====================
@@ -672,10 +696,10 @@ class EmployeeProfile(SQLModel, table=True):
 
     # 工资基础参数
     base_salary: float = Field(default=2800.0)              # 月基础工资
-    normal_daily_salary: float = Field(default=105.74)      # 普通班次日薪
+    normal_daily_salary: float = Field(default=107.0)       # 普通班次日薪
     hourly_salary: float = Field(default=11.74)             # 时薪
-    bigmid_extra_salary: float = Field(default=23.48)       # 大中班额外补贴
-    bigmid_daily_salary: float = Field(default=129.22)      # 大中班日薪 = 105.74 + 23.48
+    bigmid_extra_salary: float = Field(default=25.0)        # 大中班额外补贴
+    bigmid_daily_salary: float = Field(default=132.0)       # 大中班日薪
 
     # 入离职信息
     join_date: date = Field(default_factory=date.today, index=True)
@@ -789,13 +813,13 @@ class EmployeeLeaveRequest(SQLModel, table=True):
     apply_date: date = Field(default_factory=date.today)  # 申请日期
 
     # 系统根据 ShiftSchedule 自动读取并保存快照
-    shift_type: str = Field(default="off", index=True)    # mid / bigmid / night / flexible / off
+    shift_type: str = Field(default="off", index=True)    # early / mid / bigmid / night1 / night2 / off
 
     reason: str
     remark: Optional[str] = None
 
-    # pending / replacement_accepted / replacement_rejected_wait_employee /
-    # force_leave_deducted / approved / rejected / cancelled
+    # pending_admin_review / pending / replacement_rejected_wait_employee /
+    # force_leave_deducted / approved / approved_with_flexible / rejected / cancelled
     status: str = Field(default="pending", index=True)
 
     # 指定休班顶班人
@@ -825,6 +849,35 @@ class EmployeeLeaveRequest(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.now, index=True)
 
 
+# ===================== V3 员工管理模块：换班申请表 =====================
+class EmployeeShiftSwapRequest(SQLModel, table=True):
+    """员工之间的换班申请、确认与撤回记录。"""
+    __tablename__ = "employeeshiftswaprequest"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    applicant_user_id: int = Field(foreign_key="user.id", index=True)
+    applicant_name_snapshot: str = Field(index=True)
+    target_user_id: int = Field(foreign_key="user.id", index=True)
+    target_name_snapshot: str = Field(index=True)
+
+    swap_date: date = Field(index=True)
+    applicant_original_shift_type: str = Field(index=True)
+    target_original_shift_type: str = Field(index=True)
+
+    # pending / rejected / active / cancel_pending / cancel_rejected / cancelled
+    status: str = Field(default="pending", index=True)
+    reason: Optional[str] = None
+    remark: Optional[str] = None
+
+    responded_at: Optional[datetime] = Field(default=None, index=True)
+    cancel_requested_at: Optional[datetime] = Field(default=None, index=True)
+    cancel_responded_at: Optional[datetime] = Field(default=None, index=True)
+
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+
+
 # ===================== V3 员工管理模块：考勤事件表 =====================
 class EmployeeAttendanceRecord(SQLModel, table=True):
     """
@@ -848,7 +901,7 @@ class EmployeeAttendanceRecord(SQLModel, table=True):
     # leave / late / absent / mistake / other
     event_type: str = Field(index=True)
 
-    # 当天班次快照：mid / bigmid / night / flexible / off
+    # 当天班次快照：early / mid / bigmid / night1 / night2 / off
     shift_type: str = Field(default="off", index=True)
 
     reason: str
@@ -1241,6 +1294,8 @@ def create_db_and_tables():
     migrate_public_traffic_lead_table()
     migrate_brand_blacklist_entry_table()
     migrate_user_table()
+    migrate_employee_type_tables()
+    migrate_shift_and_daily_salary_rules()
 
     # V3 员工管理模块初始化：
     # 1. 为已有账号补员工档案；
@@ -1257,6 +1312,22 @@ def create_db_and_tables():
 
 def _normalize_migration_text(value: Optional[str]) -> str:
     return (value or "").strip()
+
+
+def migrate_shift_and_daily_salary_rules():
+    """Remove legacy flexible shifts and apply the unified daily salary rules."""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE shiftschedule
+            SET shift_type = 'off'
+            WHERE shift_type = 'flexible'
+        """))
+        conn.execute(text("""
+            UPDATE employeeprofile
+            SET normal_daily_salary = 107.0,
+                bigmid_extra_salary = 25.0,
+                bigmid_daily_salary = 132.0
+        """))
 
 def migrate_public_traffic_lead_table():
     """
@@ -2114,6 +2185,87 @@ def migrate_user_table():
         conn.commit()
 
 
+def migrate_employee_type_tables():
+    """
+    为账号补充当前员工类型，并初始化按月份生效的员工类型变更记录。
+    """
+    with engine.begin() as conn:
+        columns = conn.execute(text("PRAGMA table_info(user)")).fetchall()
+        existing_columns = {col[1] for col in columns}
+
+        if "employee_type" not in existing_columns:
+            conn.execute(text("""
+                ALTER TABLE user
+                ADD COLUMN employee_type VARCHAR DEFAULT 'regular'
+            """))
+
+        conn.execute(text("""
+            UPDATE user
+            SET employee_type = CASE
+                WHEN role = 'admin' THEN 'management'
+                WHEN employee_type IS NULL OR TRIM(employee_type) = '' OR employee_type = 'management' THEN 'regular'
+                ELSE employee_type
+            END
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_user_employee_type
+            ON user (employee_type)
+        """))
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS employeetypechangerecord (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                employee_name_snapshot VARCHAR NOT NULL,
+                employee_type VARCHAR NOT NULL,
+                effective_from DATE NOT NULL,
+                changed_by_user_id INTEGER NOT NULL,
+                changed_by_name VARCHAR NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES user (id),
+                FOREIGN KEY (changed_by_user_id) REFERENCES user (id),
+                CONSTRAINT uq_employee_type_change_user_month UNIQUE (user_id, effective_from)
+            )
+        """))
+        for col_name in [
+            "user_id",
+            "employee_name_snapshot",
+            "employee_type",
+            "effective_from",
+            "changed_by_user_id",
+            "created_at",
+            "updated_at",
+        ]:
+            conn.execute(text(f"""
+                CREATE INDEX IF NOT EXISTS ix_employeetypechangerecord_{col_name}
+                ON employeetypechangerecord ({col_name})
+            """))
+
+        conn.execute(text("""
+            INSERT OR IGNORE INTO employeetypechangerecord (
+                user_id,
+                employee_name_snapshot,
+                employee_type,
+                effective_from,
+                changed_by_user_id,
+                changed_by_name,
+                created_at,
+                updated_at
+            )
+            SELECT
+                id,
+                display_name,
+                employee_type,
+                DATE('now', 'localtime', 'start of month'),
+                id,
+                '系统初始化',
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP
+            FROM user
+        """))
+
+
 def migrate_daily_store_work_item_table():
     """
     当天门店工作内容表。
@@ -2418,10 +2570,10 @@ def migrate_employee_module_tables():
                 display_name_snapshot=u.display_name,
                 position=position,
                 base_salary=2800.0,
-                normal_daily_salary=105.74,
+                normal_daily_salary=107.0,
                 hourly_salary=11.74,
-                bigmid_extra_salary=23.48,
-                bigmid_daily_salary=129.22,
+                bigmid_extra_salary=25.0,
+                bigmid_daily_salary=132.0,
                 join_date=date.today(),
                 remark="系统初始化自动创建员工档案"
             ))
@@ -2682,7 +2834,10 @@ def get_shift_performance_stats(
             ShiftSchedule.work_date < month_end
         )
     ).all()
-    shift_map = {(r.operator_name, r.work_date): r.shift_type for r in shift_rows}
+    shift_map = {
+        (r.operator_name, r.work_date): normalize_shift_type(r.shift_type)
+        for r in shift_rows
+    }
 
     # 3) 查询本月所有已组齐牌局（不按门店过滤）
     games = session.exec(
@@ -2794,9 +2949,14 @@ def get_shift_performance_stats(
 
             display_shift = today_shift
 
-            # 如果次日休息，则今天这一列承担“前一天晚班+次日休息日业绩回并”的角色，显示为晚班
+            # 如果次日休息，则今天这一列承担“前一天晚班+次日休息日业绩回并”的角色。
+            # 已排晚1/晚2班时保留具体班次；其他历史情况默认归入晚1班。
             if next_shift == "off":
-                display_shift = "night"
+                display_shift = (
+                    today_shift
+                    if today_shift in {"night1", "night2"}
+                    else "night1"
+                )
 
             daily.append({
                 "date": d,
@@ -2811,7 +2971,7 @@ def get_shift_performance_stats(
 
     # 7) 下半部分：各班次业绩汇总
     #    汇总按“上半部分最终显示的班次归属”来汇总
-    summary_keys = ["early", "mid", "bigmid", "night", "flexible"]
+    summary_keys = ["early", "mid", "bigmid", "night1", "night2"]
     summary_map = {}
     for sk in summary_keys:
         for d in day_list:
@@ -2877,6 +3037,11 @@ def upsert_shift(
         ))
 
 
+def normalize_shift_type(shift_type: str) -> str:
+    """将拆分前保存的晚班记录兼容映射为晚1班。"""
+    return "night1" if shift_type == "night" else shift_type
+
+
 def get_month_shifts_map(
     session: Session,
     year: int,
@@ -2895,7 +3060,10 @@ def get_month_shifts_map(
         )
     ).all()
 
-    return {(r.operator_name, r.work_date): r.shift_type for r in rows}
+    return {
+        (r.operator_name, r.work_date): normalize_shift_type(r.shift_type)
+        for r in rows
+    }
 
 # === 数据库连接设置 ===
 sqlite_file_name = "mahjong.db"

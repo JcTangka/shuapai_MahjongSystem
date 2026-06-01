@@ -22,7 +22,7 @@ import itertools
 from database import (GameRecord,Store, Room, User,
                       Customer, CustomerStoreLink,
                       Blacklist, BrandBlacklistEntry, PlayFrequency, CustomerPlayTypeStat, create_db_and_tables, get_session,
-                      ShiftSchedule, MaintenanceRecord, upsert_shift, get_month_shifts_map, get_month_date_range,
+                      ShiftSchedule, MaintenanceRecord, upsert_shift, get_month_shifts_map, get_month_date_range, normalize_shift_type,
                       get_manager_performance_stats, get_shift_performance_stats,
                       HandoverTodo, HandoverTodoCustomerLink, FormedGameHandoverLink,SelfArrivalRecord,
                       PublicTrafficLead, ContactCustomerFollowup, NewCustomerPullRecord,
@@ -30,7 +30,9 @@ from database import (GameRecord,Store, Room, User,
                       CommonIssue, CommonIssueReasonSolution,
                         # V3 员工管理 / 请假 / 考勤 / 工资流水 / 团队管理
                       EmployeeProfile,
+                      EmployeeTypeChangeRecord,
                       EmployeeLeaveRequest,
+                      EmployeeShiftSwapRequest,
                       EmployeeAttendanceRecord,
                       SalaryFlowRecord,
                       MonthlySalarySettlement,
@@ -54,16 +56,43 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 SHIFT_TYPE_FLEXIBLE = "flexible"
+SHIFT_TYPE_NIGHT_LEGACY = "night"
+SHIFT_TYPE_NIGHT_1 = "night1"
+SHIFT_TYPE_NIGHT_2 = "night2"
 SHIFT_OPTIONS = [
     ("off", "休息"),
     ("early", "早班"),
     ("mid", "中班"),
     ("bigmid", "大中班"),
-    ("night", "晚班"),
-    (SHIFT_TYPE_FLEXIBLE, "机动"),
+    (SHIFT_TYPE_NIGHT_1, "晚1班"),
+    (SHIFT_TYPE_NIGHT_2, "晚2班"),
 ]
 ALLOWED_SHIFT_TYPES = {value for value, _ in SHIFT_OPTIONS}
 SHIFT_LABEL_MAP = {value: label for value, label in SHIFT_OPTIONS}
+# 兼容拆分晚班前已经保存的历史排班记录。
+SHIFT_LABEL_MAP[SHIFT_TYPE_NIGHT_LEGACY] = "晚1班"
+# 兼容历史数据；新排班不再允许选择“机动”班次。
+SHIFT_LABEL_MAP[SHIFT_TYPE_FLEXIBLE] = "机动（历史）"
+NORMAL_DAILY_SALARY = 107.0
+BIGMID_DAILY_SALARY = 132.0
+FLEXIBLE_BASE_SALARY = 1500.0
+FLEXIBLE_INCLUDED_SHIFT_COUNT = 15
+FLEXIBLE_INCLUDED_NORMAL_SALARY = 100.0
+FLEXIBLE_INCLUDED_BIGMID_SALARY = 125.0
+FLEXIBLE_BIGMID_EXTRA_SALARY = 25.0
+
+EMPLOYEE_TYPE_OPTIONS = [
+    ("regular", "普通"),
+    ("logistics", "后勤"),
+    ("flexible", "机动"),
+    ("foreman", "领班"),
+    ("hourly", "钟点工"),
+]
+EMPLOYEE_TYPE_LABEL_MAP = {
+    "management": "管理",
+    **{value: label for value, label in EMPLOYEE_TYPE_OPTIONS},
+}
+ALLOWED_OPERATOR_EMPLOYEE_TYPES = {value for value, _ in EMPLOYEE_TYPE_OPTIONS}
 
 
 # === 辅助函数 ===
@@ -127,8 +156,8 @@ def _get_shift_type_for_employee_on_date(
     - early   早班
     - mid     中班
     - bigmid  大中班
-    - night   晚班
-    - flexible 机动
+    - night1  晚1班
+    - night2  晚2班
     - off     休息
 
     如果当天没有排班记录，第一版默认视为 off。
@@ -143,33 +172,7 @@ def _get_shift_type_for_employee_on_date(
     if not shift:
         return "off"
 
-    return shift.shift_type or "off"
-
-
-def _employee_has_flexible_shift(
-        session: Session,
-        employee_name: str,
-        year: int,
-        month: int
-) -> bool:
-    """
-    判断员工某月是否出现过机动班次。
-
-    工资规则：
-    一旦当月有任意一天为“机动”，基础工资为 0，且不发全勤奖。
-    """
-    month_start, month_end = _get_month_start_end(year, month)
-
-    hit = session.exec(
-        select(ShiftSchedule).where(
-            ShiftSchedule.operator_name == employee_name,
-            ShiftSchedule.work_date >= month_start,
-            ShiftSchedule.work_date <= month_end,
-            ShiftSchedule.shift_type == SHIFT_TYPE_FLEXIBLE
-        )
-    ).first()
-
-    return hit is not None
+    return normalize_shift_type(shift.shift_type or "off")
 
 
 def _get_employee_salary_profile(
@@ -199,9 +202,9 @@ def _get_employee_salary_profile(
         display_name_snapshot=employee_name,
         position="普通员工",
         base_salary=2800.0,
-        normal_daily_salary=105.74,
-        bigmid_extra_salary=23.48,
-        bigmid_daily_salary=129.22,
+        normal_daily_salary=107.0,
+        bigmid_extra_salary=25.0,
+        bigmid_daily_salary=132.0,
         hourly_salary=11.74,
         join_date=None,
         leave_date=None,
@@ -226,19 +229,158 @@ def _calc_leave_deduct_amount(
 
     业务规则：
     1. 休息日请假：不扣款；
-    2. 大中班请假：扣大中班日薪 129.22；
-    3. 其他上班班次请假：扣普通日薪 105.74；
+    2. 大中班请假：扣大中班日薪 132；
+    3. 其他上班班次请假：扣普通日薪 107；
     4. 审批通过的请假不影响全勤奖。
     """
-    profile = _get_employee_salary_profile(session, user_id, employee_name)
-
     if shift_type == "off":
         return 0.0
 
     if shift_type == "bigmid":
-        return round(float(profile.bigmid_daily_salary or 129.22), 2)
+        return BIGMID_DAILY_SALARY
 
-    return round(float(profile.normal_daily_salary or 105.74), 2)
+    return NORMAL_DAILY_SALARY
+
+
+def _get_month_non_off_shifts(
+        session: Session,
+        employee_name: str,
+        year: int,
+        month: int
+) -> List[ShiftSchedule]:
+    month_start, month_end = _get_month_start_end(year, month)
+    return session.exec(
+        select(ShiftSchedule).where(
+            ShiftSchedule.operator_name == employee_name,
+            ShiftSchedule.work_date >= month_start,
+            ShiftSchedule.work_date <= month_end,
+            ShiftSchedule.shift_type != "off"
+        ).order_by(
+            ShiftSchedule.work_date,
+            ShiftSchedule.id
+        )
+    ).all()
+
+
+def _get_flexible_shift_salary_amount(shift_type: str, shift_index: int) -> float:
+    """Return the positive salary contribution for one flexible employee shift."""
+    if shift_index <= FLEXIBLE_INCLUDED_SHIFT_COUNT:
+        return FLEXIBLE_BIGMID_EXTRA_SALARY if shift_type == "bigmid" else 0.0
+    return BIGMID_DAILY_SALARY if shift_type == "bigmid" else NORMAL_DAILY_SALARY
+
+
+def _calc_flexible_employee_leave_deduct(
+        session: Session,
+        *,
+        employee_name: str,
+        leave_date: date,
+        shift_type: str
+) -> float:
+    """Calculate leave deduction by the shift's position in a flexible employee's month."""
+    shifts = _get_month_non_off_shifts(session, employee_name, leave_date.year, leave_date.month)
+    shift_index = next(
+        (index for index, item in enumerate(shifts, start=1) if item.work_date == leave_date),
+        len(shifts) + 1
+    )
+    if shift_index <= FLEXIBLE_INCLUDED_SHIFT_COUNT:
+        return FLEXIBLE_INCLUDED_BIGMID_SALARY if shift_type == "bigmid" else FLEXIBLE_INCLUDED_NORMAL_SALARY
+    return BIGMID_DAILY_SALARY if shift_type == "bigmid" else NORMAL_DAILY_SALARY
+
+
+def _calc_employee_leave_deduct(
+        session: Session,
+        *,
+        employee: User,
+        leave_date: date,
+        shift_type: str
+) -> float:
+    if shift_type == "off":
+        return 0.0
+    if (employee.employee_type or "regular") == "flexible":
+        return _calc_flexible_employee_leave_deduct(
+            session=session,
+            employee_name=employee.display_name,
+            leave_date=leave_date,
+            shift_type=shift_type
+        )
+    return _calc_leave_deduct_amount(
+        session=session,
+        user_id=employee.id,
+        employee_name=employee.display_name,
+        shift_type=shift_type
+    )
+
+
+def _rebuild_flexible_employee_shift_flows(
+        session: Session,
+        *,
+        employee: User,
+        year: int,
+        month: int,
+        operator: Optional[User]
+) -> None:
+    """Rebuild visible per-shift salary flows for one flexible employee month."""
+    old_flows = session.exec(
+        select(SalaryFlowRecord).where(
+            SalaryFlowRecord.user_id == employee.id,
+            SalaryFlowRecord.salary_year == year,
+            SalaryFlowRecord.salary_month == month,
+            SalaryFlowRecord.source_type == "flexible_schedule"
+        )
+    ).all()
+    old_flow_map = {flow.source_id: flow for flow in old_flows}
+
+    shifts = _get_month_non_off_shifts(session, employee.display_name, year, month)
+    active_shift_ids = {shift.id for shift in shifts}
+    for old_flow in old_flows:
+        if old_flow.source_id not in active_shift_ids and not old_flow.is_locked:
+            session.delete(old_flow)
+
+    now = datetime.now()
+    for shift_index, shift in enumerate(shifts, start=1):
+        normalized_shift = normalize_shift_type(shift.shift_type or "off")
+        amount = _get_flexible_shift_salary_amount(normalized_shift, shift_index)
+        included_text = (
+            f"本月第 {shift_index} 次非休息班次，计入 1500 元基础工资"
+            if shift_index <= FLEXIBLE_INCLUDED_SHIFT_COUNT
+            else f"本月第 {shift_index} 次非休息班次，属于超出 15 次后的班次"
+        )
+        description = (
+            f"{employee.display_name} {shift.work_date} {_shift_type_label(normalized_shift)}，"
+            f"{included_text}，本次工资流转 {amount:.2f} 元。"
+        )
+        flow = old_flow_map.get(shift.id)
+        if flow:
+            if flow.is_locked:
+                continue
+            flow.flow_date = shift.work_date
+            flow.amount = round(amount, 2)
+            flow.description = description
+            flow.updated_at = now
+            session.add(flow)
+            continue
+
+        session.add(SalaryFlowRecord(
+            user_id=employee.id,
+            employee_name_snapshot=employee.display_name,
+            salary_year=year,
+            salary_month=month,
+            flow_date=shift.work_date,
+            flow_category="replacement_work",
+            flow_type="flexible_shift_pay",
+            amount=round(amount, 2),
+            title="机动员工班次工资",
+            description=description,
+            source_type="flexible_schedule",
+            source_id=shift.id,
+            is_auto=True,
+            is_locked=False,
+            is_visible_to_employee=True,
+            created_by_user_id=operator.id if operator else None,
+            created_by_name=operator.display_name if operator else "系统自动",
+            created_at=now,
+            updated_at=now
+        ))
 
 
 def _find_leave_replacement_employee(
@@ -265,7 +407,7 @@ def _find_leave_replacement_employee(
                 User.id != applicant_user_id
             )
         ).first()
-        if candidate:
+        if candidate and (candidate.employee_type or "regular") != "flexible":
             return candidate
 
     return None
@@ -379,6 +521,73 @@ def _create_replacement_pay_salary_flow(
     return salary_flow
 
 
+def _finalize_leave_for_applicant(
+        session: Session,
+        *,
+        leave_req: EmployeeLeaveRequest,
+        applicant: User,
+        operator: User,
+        final_deduct: float,
+        status: str,
+        approval_note: Optional[str] = None,
+        attendance_remark: Optional[str] = None
+) -> None:
+    """Create the applicant attendance record and salary deduction for an approved leave."""
+    now = datetime.now()
+    leave_req.status = status
+    leave_req.final_deduct_amount = round(final_deduct, 2)
+    leave_req.updated_at = now
+
+    attendance = EmployeeAttendanceRecord(
+        user_id=leave_req.user_id,
+        employee_name_snapshot=leave_req.employee_name_snapshot,
+        event_date=leave_req.leave_date,
+        event_type="leave",
+        shift_type=leave_req.shift_type,
+        reason=leave_req.reason,
+        remark=attendance_remark,
+        status="approved",
+        affect_full_attendance=False,
+        deduct_amount=round(final_deduct, 2),
+        is_salary_generated=False,
+        salary_flow_id=None,
+        leave_request_id=leave_req.id,
+        created_by_user_id=operator.id,
+        created_by_name=operator.display_name,
+        approved_by_user_id=leave_req.approved_by_user_id,
+        approved_by_name=leave_req.approved_by_name,
+        approved_at=leave_req.approved_at,
+        approval_note=approval_note or None,
+        created_at=now,
+        updated_at=now
+    )
+    session.add(attendance)
+    session.flush()
+
+    salary_flow = _create_leave_deduct_salary_flow(
+        session=session,
+        target_user=applicant,
+        employee_name=leave_req.employee_name_snapshot,
+        leave_req=leave_req,
+        amount=final_deduct,
+        title="请假扣款",
+        description=(
+            f"{leave_req.employee_name_snapshot} 请假，日期：{leave_req.leave_date}，"
+            f"班次：{_shift_type_label(leave_req.shift_type)}，"
+            f"顶班人：{leave_req.replacement_employee_name_snapshot or '-'}，"
+            f"扣款：{final_deduct:.2f} 元。审批通过请假不影响全勤奖。"
+        ),
+        operator=operator,
+        created_at=now
+    )
+    attendance.is_salary_generated = True
+    attendance.salary_flow_id = salary_flow.id
+    leave_req.attendance_record_id = attendance.id
+    leave_req.salary_flow_id = salary_flow.id
+    session.add(attendance)
+    session.add(leave_req)
+
+
 def _shift_type_label(shift_type: str) -> str:
     """
     班次中文展示。
@@ -391,15 +600,154 @@ def _leave_status_label(status: str) -> str:
     请假状态中文展示。
     """
     mapping = {
+        "pending_admin_review": "待管理员审批",
         "pending": "待顶班确认",
-        "replacement_accepted": "顶班人已同意，待管理员审批",
+        "replacement_accepted": "顶班人已同意，请假已生效",
         "replacement_rejected_wait_employee": "顶班人拒绝，待请假人确认",
         "force_leave_deducted": "请假人坚持请假，扣薪",
+        "approved_with_flexible": "机动顶班，请假已生效",
         "approved": "已通过",
         "rejected": "已拒绝",
         "cancelled": "已撤销",
     }
     return mapping.get(status or "pending", status or "未知")
+
+
+def _shift_swap_status_label(status: str) -> str:
+    mapping = {
+        "pending": "待对方确认",
+        "rejected": "对方已拒绝",
+        "active": "换班已生效",
+        "cancel_pending": "待对方确认撤回",
+        "cancel_rejected": "对方拒绝撤回，换班继续生效",
+        "cancelled": "已撤回",
+    }
+    return mapping.get(status or "pending", status or "未知")
+
+
+def _is_daily_shift(shift_type: str) -> bool:
+    return normalize_shift_type(shift_type or "off") in {"early", "mid", "night1", "night2"}
+
+
+def _is_swappable_shift(shift_type: str) -> bool:
+    return _is_daily_shift(shift_type) or normalize_shift_type(shift_type or "off") == "bigmid"
+
+
+def _is_locked_flexible_replacement_shift(
+        session: Session,
+        *,
+        employee_name: str,
+        work_date: date
+) -> bool:
+    return session.exec(
+        select(EmployeeLeaveRequest).where(
+            EmployeeLeaveRequest.status == "approved_with_flexible",
+            EmployeeLeaveRequest.replacement_employee_name_snapshot == employee_name,
+            EmployeeLeaveRequest.leave_date == work_date
+        )
+    ).first() is not None
+
+
+def _shift_swap_has_conflict(
+        session: Session,
+        *,
+        user_ids: List[int],
+        swap_date: date,
+        exclude_swap_id: Optional[int] = None
+) -> bool:
+    active_statuses = ["pending", "active", "cancel_pending", "cancel_rejected"]
+    rows = session.exec(
+        select(EmployeeShiftSwapRequest).where(
+            EmployeeShiftSwapRequest.swap_date == swap_date,
+            EmployeeShiftSwapRequest.status.in_(active_statuses)
+        )
+    ).all()
+    return any(
+        item.id != exclude_swap_id
+        and (
+            item.applicant_user_id in user_ids
+            or item.target_user_id in user_ids
+        )
+        for item in rows
+    )
+
+
+def _create_shift_swap_salary_flow(
+        session: Session,
+        *,
+        employee: User,
+        swap_req: EmployeeShiftSwapRequest,
+        amount: float,
+        title: str,
+        description: str,
+        operator: User,
+        created_at: datetime
+) -> Optional[SalaryFlowRecord]:
+    if round(float(amount or 0), 2) == 0:
+        return None
+    flow = SalaryFlowRecord(
+        user_id=employee.id,
+        employee_name_snapshot=employee.display_name,
+        salary_year=swap_req.swap_date.year,
+        salary_month=swap_req.swap_date.month,
+        flow_date=swap_req.swap_date,
+        flow_category="manual_adjustment",
+        flow_type="shift_swap_adjustment",
+        amount=round(float(amount), 2),
+        title=title,
+        description=description,
+        source_type="shift_swap",
+        source_id=swap_req.id,
+        is_auto=True,
+        is_locked=False,
+        is_visible_to_employee=True,
+        created_by_user_id=operator.id,
+        created_by_name=operator.display_name,
+        created_at=created_at,
+        updated_at=created_at
+    )
+    session.add(flow)
+    session.flush()
+    return flow
+
+
+def _create_shift_swap_attendance(
+        session: Session,
+        *,
+        employee: User,
+        swap_req: EmployeeShiftSwapRequest,
+        shift_type: str,
+        reason: str,
+        remark: str,
+        operator: User,
+        created_at: datetime,
+        salary_flow: Optional[SalaryFlowRecord] = None
+) -> EmployeeAttendanceRecord:
+    attendance = EmployeeAttendanceRecord(
+        user_id=employee.id,
+        employee_name_snapshot=employee.display_name,
+        event_date=swap_req.swap_date,
+        event_type="shift_swap",
+        shift_type=shift_type,
+        reason=reason,
+        remark=remark,
+        status="recorded",
+        affect_full_attendance=False,
+        deduct_amount=abs(float(salary_flow.amount)) if salary_flow and salary_flow.amount < 0 else 0.0,
+        is_salary_generated=salary_flow is not None,
+        salary_flow_id=salary_flow.id if salary_flow else None,
+        leave_request_id=None,
+        created_by_user_id=operator.id,
+        created_by_name=operator.display_name,
+        approved_by_user_id=None,
+        approved_by_name=None,
+        approved_at=None,
+        approval_note=None,
+        created_at=created_at,
+        updated_at=created_at
+    )
+    session.add(attendance)
+    return attendance
 
 
 def _build_employees_url(
@@ -434,7 +782,96 @@ def _build_employees_url(
 # V3 员工管理：AJAX 局部刷新辅助函数
 # =========================
 
-def _employee_user_payload(emp: User, current_user: User) -> dict:
+def _employee_type_label(employee_type: str) -> str:
+    return EMPLOYEE_TYPE_LABEL_MAP.get(employee_type or "regular", employee_type or "regular")
+
+
+def _employee_type_change_effective_from(change_date: date) -> Optional[date]:
+    """Return the month-level effective date for an allowed type change day."""
+    if change_date.day == 1:
+        return change_date.replace(day=1)
+
+    if change_date.day == calendar.monthrange(change_date.year, change_date.month)[1]:
+        return (change_date + timedelta(days=1)).replace(day=1)
+
+    return None
+
+
+def _sync_effective_employee_types(
+        session: Session,
+        employees: Optional[List[User]] = None,
+        today: Optional[date] = None
+) -> None:
+    """Apply employee type records whose month-level effective date has arrived."""
+    today = today or date.today()
+    employees = employees or session.exec(select(User).order_by(User.id)).all()
+    changed = False
+
+    for emp in employees:
+        effective_record = session.exec(
+            select(EmployeeTypeChangeRecord).where(
+                EmployeeTypeChangeRecord.user_id == emp.id,
+                EmployeeTypeChangeRecord.effective_from <= today
+            ).order_by(
+                EmployeeTypeChangeRecord.effective_from.desc(),
+                EmployeeTypeChangeRecord.id.desc()
+            )
+        ).first()
+
+        effective_type = "management" if emp.role == "admin" else (
+            effective_record.employee_type if effective_record else (emp.employee_type or "regular")
+        )
+        if emp.employee_type != effective_type:
+            emp.employee_type = effective_type
+            session.add(emp)
+            changed = True
+
+    if changed:
+        session.commit()
+
+
+def _pending_employee_type_change(
+        session: Session,
+        employee_id: int,
+        today: Optional[date] = None
+) -> Optional[EmployeeTypeChangeRecord]:
+    today = today or date.today()
+    return session.exec(
+        select(EmployeeTypeChangeRecord).where(
+            EmployeeTypeChangeRecord.user_id == employee_id,
+            EmployeeTypeChangeRecord.effective_from > today
+        ).order_by(
+            EmployeeTypeChangeRecord.effective_from,
+            EmployeeTypeChangeRecord.id
+        )
+    ).first()
+
+
+def _create_initial_employee_type_record(session: Session, employee: User) -> None:
+    """Create the month-level starting point for a newly created account."""
+    effective_from = date.today().replace(day=1)
+    existing = session.exec(
+        select(EmployeeTypeChangeRecord).where(
+            EmployeeTypeChangeRecord.user_id == employee.id,
+            EmployeeTypeChangeRecord.effective_from == effective_from
+        )
+    ).first()
+    if existing:
+        return
+
+    employee_type = "management" if employee.role == "admin" else (employee.employee_type or "regular")
+    session.add(EmployeeTypeChangeRecord(
+        user_id=employee.id,
+        employee_name_snapshot=employee.display_name,
+        employee_type=employee_type,
+        effective_from=effective_from,
+        changed_by_user_id=employee.id,
+        changed_by_name="系统初始化",
+    ))
+    session.commit()
+
+
+def _employee_user_payload(emp: User, current_user: User, session: Optional[Session] = None) -> dict:
     """
     员工列表行局部刷新用的数据结构。
 
@@ -442,11 +879,19 @@ def _employee_user_payload(emp: User, current_user: User) -> dict:
     前端执行“停用 / 恢复”后，不刷新整个页面，
     只根据这里返回的数据更新当前员工这一行。
     """
+    pending_change = _pending_employee_type_change(session, emp.id) if session else None
+    employee_type = "management" if emp.role == "admin" else (emp.employee_type or "regular")
+
     return {
         "id": emp.id,
         "username": emp.username,
         "display_name": emp.display_name,
         "role": emp.role,
+        "employee_type": employee_type,
+        "employee_type_label": _employee_type_label(employee_type),
+        "pending_employee_type": pending_change.employee_type if pending_change else "",
+        "pending_employee_type_label": _employee_type_label(pending_change.employee_type) if pending_change else "",
+        "pending_effective_from": str(pending_change.effective_from) if pending_change else "",
         "role_label": "管理员" if emp.role == "admin" else "普通员工",
         "is_active": bool(getattr(emp, "is_active", True)),
         "status_label": "在职" if getattr(emp, "is_active", True) else "已停用",
@@ -500,6 +945,7 @@ def _attendance_event_type_label(event_type: str) -> str:
     """
     mapping = {
         "leave": "请假",
+        "shift_swap": "换班",
         "late": "迟到",
         "absent": "旷工",
         "other": "其他",
@@ -567,6 +1013,8 @@ def _salary_flow_type_label(flow_type: str) -> str:
     mapping = {
         "mistake_deduct": "工作失误扣款",
         "replacement_pay": "顶班补贴",
+        "shift_swap_adjustment": "换班工资调整",
+        "flexible_shift_pay": "机动员工班次工资",
         "overtime_pay": "加班补贴",
         "manual_bonus": "临时奖金",
         "manual_deduct": "临时扣款",
@@ -893,11 +1341,12 @@ def _employee_has_full_attendance_bonus(
     1. 请假审批通过不影响全勤，所以 leave 且 affect_full_attendance=False 不影响；
     2. 迟到、旷工、管理员标记影响全勤的其他考勤异常，会取消全勤；
     3. 工作失误不在考勤表，不影响全勤。
-    4. 当月出现任意“机动”班次，直接取消全勤奖。
+    4. 机动类型员工不发全勤奖。
     """
     month_start, month_end = _get_month_start_end(year, month)
 
-    if _employee_has_flexible_shift(session, employee_name, year, month):
+    employee = session.get(User, user_id)
+    if employee and (employee.employee_type or "regular") == "flexible":
         return False
 
     hit = session.exec(
@@ -1228,12 +1677,16 @@ def _calculate_salary_for_one_employee(
     personal_order_count = all_order_count_map.get(user_obj.display_name, 0)
     personal_commission = _calc_personal_order_commission(personal_order_count)
 
-    has_flexible_shift = _employee_has_flexible_shift(
-        session=session,
-        employee_name=user_obj.display_name,
-        year=year,
-        month=month
-    )
+    is_flexible_employee = (user_obj.employee_type or "regular") == "flexible"
+    if is_flexible_employee:
+        _rebuild_flexible_employee_shift_flows(
+            session=session,
+            employee=user_obj,
+            year=year,
+            month=month,
+            operator=operator
+        )
+        session.flush()
 
     # ===== 团队奖金 =====
     team, _ = _get_employee_team_for_month(session, user_obj.id, year, month)
@@ -1249,7 +1702,7 @@ def _calculate_salary_for_one_employee(
             year=year,
             month=month
         )
-        team_bonus = 0.0 if has_flexible_shift else round(float(team_assessment.per_member_bonus_amount or 0), 2)
+        team_bonus = 0.0 if is_flexible_employee else round(float(team_assessment.per_member_bonus_amount or 0), 2)
         team_id = team.id
         team_name_snapshot = team.name
 
@@ -1261,19 +1714,28 @@ def _calculate_salary_for_one_employee(
         year=year,
         month=month
     )
-    full_attendance_bonus = 200.0 if has_full_attendance else 0.0
+    full_attendance_bonus = 0.0 if is_flexible_employee else (200.0 if has_full_attendance else 0.0)
 
     # ===== 销冠奖：并列都发 200 =====
-    max_order_count = max(all_order_count_map.values()) if all_order_count_map else 0
+    champion_eligible_names = {
+        employee.display_name for employee in session.exec(
+            select(User).where(User.employee_type != "flexible")
+        ).all()
+    }
+    champion_eligible_counts = [
+        count for employee_name, count in all_order_count_map.items()
+        if employee_name in champion_eligible_names
+    ]
+    max_order_count = max(champion_eligible_counts) if champion_eligible_counts else 0
     sales_champion_bonus = 0.0
-    if personal_order_count > 0 and personal_order_count == max_order_count:
+    if not is_flexible_employee and personal_order_count > 0 and personal_order_count == max_order_count:
         sales_champion_bonus = 200.0
 
     # ===== 生成自动工资流水 =====
-    base_salary = 0.0 if has_flexible_shift else round(float(profile.base_salary or 2800.0), 2)
+    base_salary = FLEXIBLE_BASE_SALARY if is_flexible_employee else round(float(profile.base_salary or 2800.0), 2)
     base_salary_description = (
-        f"{year}年{month}月存在机动班次，基础工资由管理员在工资调整中手工添加，系统自动基础工资为 0 元。"
-        if has_flexible_shift
+        f"{year}年{month}月机动类型员工基础工资 1500 元，包含本月前 15 次非休息班次的普通班工资。"
+        if is_flexible_employee
         else f"{year}年{month}月基础工资。"
     )
 
@@ -1869,7 +2331,7 @@ def _calculate_team_assessment(
     计算团队某月考核结果。
 
     计算口径：
-    1. 团队成员数量：EmployeeTeamMember.is_active=True；
+    1. 团队成员数量：EmployeeTeamMember.is_active=True，且排除机动类型员工；
     2. 团队奖金池：1000 × 团队成员数；
     3. 目标业绩池：团队奖金池 × 60%；
     4. 非结果性考核池：团队奖金池 × 40%；
@@ -1898,7 +2360,14 @@ def _calculate_team_assessment(
         )
     ).all()
 
-    team_member_count = len(active_members)
+    eligible_members = [
+        member for member in active_members
+        if (
+            (member_user := session.get(User, member.user_id))
+            and (member_user.employee_type or "regular") != "flexible"
+        )
+    ]
+    team_member_count = len(eligible_members)
     responsible_store_count = len(active_assignments)
 
     base_pool_amount = 1000.0 * team_member_count
@@ -5394,7 +5863,8 @@ def on_startup():
                     username="13198550326",
                     hashed_password=get_password_hash("shuaipai882008"),
                     display_name="大总管",
-                    role="admin"
+                    role="admin",
+                    employee_type="management"
                 )
             )
 
@@ -5404,13 +5874,17 @@ def on_startup():
                     username="18989218583",
                     hashed_password=get_password_hash("Jtf18989218583"),
                     display_name="耍牌最有法的男人·贾哥",
-                    role="admin"
+                    role="admin",
+                    employee_type="management"
                 )
             )
 
         if users_to_add:
             session.add_all(users_to_add)
             session.commit()
+            for added_user in users_to_add:
+                session.refresh(added_user)
+                _create_initial_employee_type_record(session, added_user)
 
 
 # === 1. 登录与注册页面接口 ===
@@ -5476,10 +5950,13 @@ async def register_action(
         username=username,
         hashed_password=get_password_hash(password),
         display_name=display_name,
-        role="operator"  # 默认注册的都是普通员工
+        role="operator",  # 默认注册的都是普通员工
+        employee_type="regular"
     )
     session.add(new_user)
     session.commit()
+    session.refresh(new_user)
+    _create_initial_employee_type_record(session, new_user)
     return RedirectResponse(url="/login", status_code=303)
 
 
@@ -5796,6 +6273,12 @@ async def employees_page(
     all_employees = session.exec(
         select(User).order_by(User.is_active.desc(), User.role, User.id)
     ).all()
+    _sync_effective_employee_types(session, all_employees)
+
+    employee_type_change_map = {
+        emp.id: _pending_employee_type_change(session, emp.id)
+        for emp in all_employees
+    }
 
     active_employees = [u for u in all_employees if getattr(u, "is_active", True)]
     inactive_employees = [u for u in all_employees if not getattr(u, "is_active", True)]
@@ -5819,6 +6302,10 @@ async def employees_page(
     my_replacement_requests = []
     leave_approval_requests = []
     pending_leave_count = 0
+    flexible_replacement_employees = []
+    my_shift_swap_requests = []
+    my_pending_shift_swap_requests = []
+    shift_swap_target_employees = []
 
     # ===== 5. 考勤数据 =====
     attendance_records = []
@@ -5867,20 +6354,44 @@ async def employees_page(
                 EmployeeLeaveRequest.id
             )
         ).all()
+        my_shift_swap_requests = session.exec(
+            select(EmployeeShiftSwapRequest).where(
+                or_(
+                    EmployeeShiftSwapRequest.applicant_user_id == user.id,
+                    EmployeeShiftSwapRequest.target_user_id == user.id
+                )
+            ).order_by(
+                EmployeeShiftSwapRequest.created_at.desc(),
+                EmployeeShiftSwapRequest.id.desc()
+            )
+        ).all()
+        my_pending_shift_swap_requests = [
+            item for item in my_shift_swap_requests
+            if item.target_user_id == user.id and item.status in {"pending", "cancel_pending"}
+        ]
+        shift_swap_target_employees = [
+            employee for employee in active_employees
+            if employee.id != user.id
+            and employee.role != "admin"
+            and (employee.employee_type or "regular") != "flexible"
+        ]
 
     if tab == "leave_approval" and user.role == "admin":
         leave_approval_requests = session.exec(
             select(EmployeeLeaveRequest).order_by(
-                EmployeeLeaveRequest.status,
-                EmployeeLeaveRequest.leave_date.desc(),
+                EmployeeLeaveRequest.created_at.desc(),
                 EmployeeLeaveRequest.id.desc()
             )
         ).all()
+        flexible_replacement_employees = [
+            employee for employee in active_employees
+            if (employee.employee_type or "regular") == "flexible"
+        ]
 
     if user.role == "admin":
         pending_leave_count = len(session.exec(
             select(EmployeeLeaveRequest).where(
-                EmployeeLeaveRequest.status == "replacement_accepted"
+                EmployeeLeaveRequest.status == "pending_admin_review"
             )
         ).all())
         # 管理员进入“考勤记录”页签时，查看全部员工考勤异常记录
@@ -5907,7 +6418,10 @@ async def employees_page(
     if tab == "salary_flows" and user.role == "admin":
         salary_flow_records = session.exec(
             select(SalaryFlowRecord).where(
-                SalaryFlowRecord.is_auto == False
+                or_(
+                    SalaryFlowRecord.is_auto == False,
+                    SalaryFlowRecord.source_type == "shift_swap"
+                )
             ).order_by(
                 SalaryFlowRecord.flow_date.desc(),
                 SalaryFlowRecord.id.desc()
@@ -6101,6 +6615,9 @@ async def employees_page(
         # 员工列表数据
         "employee_list": employee_list,
         "status_filter": status_filter,
+        "employee_type_options": EMPLOYEE_TYPE_OPTIONS,
+        "employee_type_label": _employee_type_label,
+        "employee_type_change_map": employee_type_change_map,
 
         # 顶部统计数据
         "total_count": total_count,
@@ -6114,6 +6631,11 @@ async def employees_page(
         "my_replacement_requests": my_replacement_requests,
         "leave_approval_requests": leave_approval_requests,
         "pending_leave_count": pending_leave_count,
+        "flexible_replacement_employees": flexible_replacement_employees,
+        "my_shift_swap_requests": my_shift_swap_requests,
+        "my_pending_shift_swap_requests": my_pending_shift_swap_requests,
+        "shift_swap_target_employees": shift_swap_target_employees,
+        "shift_swap_status_label": _shift_swap_status_label,
         "tomorrow_date": tomorrow,
         "shift_type_label": _shift_type_label,
         "leave_status_label": _leave_status_label,
@@ -6235,7 +6757,7 @@ async def delete_employee(
             message="员工已停用，历史业绩和订单记录已保留",
             action="employee_disabled",
             payload={
-                "employee": _employee_user_payload(employee, user),
+                "employee": _employee_user_payload(employee, user, session),
                 "counts": _employee_module_counts_payload(session)
             }
         )
@@ -6307,7 +6829,7 @@ async def restore_employee(
             message="员工已恢复",
             action="employee_restored",
             payload={
-                "employee": _employee_user_payload(employee, user),
+                "employee": _employee_user_payload(employee, user, session),
                 "counts": _employee_module_counts_payload(session)
             }
         )
@@ -6383,7 +6905,7 @@ async def reset_employee_password(
             message=f"已为 {employee.display_name} 重置密码",
             action="employee_password_reset",
             payload={
-                "employee": _employee_user_payload(employee, user),
+                "employee": _employee_user_payload(employee, user, session),
                 "temp_password": temp_password
             }
         )
@@ -6392,6 +6914,403 @@ async def reset_employee_password(
         url=f"/employees?store={store}&tab=employee_list&status_filter={status_filter}&success=员工密码已重置，请将临时密码告知本人",
         status_code=303
     )
+
+# =========================
+# V3 员工管理：管理员调整员工类型
+# =========================
+@app.post("/employees/type-change/{employee_id}")
+async def change_employee_type(
+        request: Request,
+        employee_id: int,
+        employee_type: str = Form(...),
+        store: str = Form(""),
+        status_filter: str = Form("active"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    """管理员在月初或月末调整普通权限账号的员工类型。"""
+    if not user:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请先登录", 401)
+        return RedirectResponse(url="/login", status_code=303)
+
+    if user.role != "admin":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("只有管理员可以调整员工类型", 403)
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="只有管理员可以调整员工类型"),
+            status_code=303
+        )
+
+    employee = session.get(User, employee_id)
+    if not employee:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("员工不存在", 404)
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="员工不存在"),
+            status_code=303
+        )
+
+    if employee.role == "admin":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("管理员账号固定为管理类型，不能调整")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="管理员账号固定为管理类型，不能调整"),
+            status_code=303
+        )
+
+    employee_type = _normalize_text(employee_type)
+    if employee_type not in ALLOWED_OPERATOR_EMPLOYEE_TYPES:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("员工类型不正确")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="员工类型不正确"),
+            status_code=303
+        )
+
+    today = date.today()
+    effective_from = _employee_type_change_effective_from(today)
+    if not effective_from:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("员工类型只能在每月 1 日或最后一天调整")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="员工类型只能在每月 1 日或最后一天调整"),
+            status_code=303
+        )
+
+    now = datetime.now()
+    record = session.exec(
+        select(EmployeeTypeChangeRecord).where(
+            EmployeeTypeChangeRecord.user_id == employee.id,
+            EmployeeTypeChangeRecord.effective_from == effective_from
+        )
+    ).first()
+
+    if record:
+        record.employee_name_snapshot = employee.display_name
+        record.employee_type = employee_type
+        record.changed_by_user_id = user.id
+        record.changed_by_name = user.display_name
+        record.updated_at = now
+    else:
+        record = EmployeeTypeChangeRecord(
+            user_id=employee.id,
+            employee_name_snapshot=employee.display_name,
+            employee_type=employee_type,
+            effective_from=effective_from,
+            changed_by_user_id=user.id,
+            changed_by_name=user.display_name,
+            created_at=now,
+            updated_at=now
+        )
+
+    session.add(record)
+    if effective_from <= today:
+        employee.employee_type = employee_type
+        session.add(employee)
+
+    session.commit()
+    session.refresh(employee)
+
+    effective_message = (
+        f"{effective_from} 起生效"
+        if effective_from > today
+        else "已立即生效"
+    )
+    message = f"员工类型已调整为【{_employee_type_label(employee_type)}】，{effective_message}"
+
+    if _is_ajax_request(request):
+        return _employee_ajax_success(
+            message=message,
+            action="employee_type_updated",
+            payload={
+                "employee": _employee_user_payload(employee, user, session)
+            }
+        )
+
+    return RedirectResponse(
+        url=_build_employees_url(store, "employee_list", status_filter=status_filter, success=message),
+        status_code=303
+    )
+
+
+# =========================
+# V3 员工换班：提交申请
+# =========================
+@app.post("/employees/shift-swaps/apply")
+async def employee_shift_swap_apply(
+        request: Request,
+        target_user_id: int = Form(...),
+        swap_date: str = Form(...),
+        reason: str = Form(""),
+        remark: str = Form(""),
+        store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    try:
+        swap_d = datetime.strptime(swap_date, "%Y-%m-%d").date()
+    except Exception:
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="换班日期格式不正确"), status_code=303)
+    if swap_d <= date.today():
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="换班需至少提前一天申请"), status_code=303)
+
+    target = session.get(User, target_user_id)
+    if not target or not target.is_active or target.id == user.id:
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="请选择有效的换班员工"), status_code=303)
+    if user.role == "admin" or target.role == "admin":
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="管理员不参与普通换班"), status_code=303)
+    if (user.employee_type or "regular") == "flexible" or (target.employee_type or "regular") == "flexible":
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="机动类型员工不能参与普通换班"), status_code=303)
+
+    applicant_shift = _get_shift_type_for_employee_on_date(session, user.display_name, swap_d)
+    target_shift = _get_shift_type_for_employee_on_date(session, target.display_name, swap_d)
+    if not _is_swappable_shift(applicant_shift) or not _is_swappable_shift(target_shift):
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天都必须有具体班次，休息日不能换班"), status_code=303)
+    if (
+        _is_locked_flexible_replacement_shift(session, employee_name=user.display_name, work_date=swap_d)
+        or _is_locked_flexible_replacement_shift(session, employee_name=target.display_name, work_date=swap_d)
+    ):
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="已锁定的机动顶班班次不能参与换班"), status_code=303)
+    if _shift_swap_has_conflict(session, user_ids=[user.id, target.id], swap_date=swap_d):
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天已有待处理或已生效的换班记录"), status_code=303)
+
+    now = datetime.now()
+    item = EmployeeShiftSwapRequest(
+        applicant_user_id=user.id,
+        applicant_name_snapshot=user.display_name,
+        target_user_id=target.id,
+        target_name_snapshot=target.display_name,
+        swap_date=swap_d,
+        applicant_original_shift_type=applicant_shift,
+        target_original_shift_type=target_shift,
+        status="pending",
+        reason=_normalize_text(reason) or None,
+        remark=_normalize_text(remark) or None,
+        created_at=now,
+        updated_at=now
+    )
+    session.add(item)
+    session.flush()
+    _create_employee_notification(
+        session=session,
+        target_user=target,
+        related_user=user,
+        title="待确认换班申请",
+        content=(
+            f"{user.display_name} 申请与您交换 {swap_d} 的班次："
+            f"{_shift_type_label(applicant_shift)} ↔ {_shift_type_label(target_shift)}。"
+        ),
+        notification_type="shift_swap_request",
+        source_type="shift_swap",
+        source_id=item.id,
+        created_at=now
+    )
+    session.commit()
+    return RedirectResponse(url=_build_employees_url(store, "my_leave", success="换班申请已提交，等待对方确认"), status_code=303)
+
+
+# =========================
+# V3 员工换班：对方确认申请
+# =========================
+@app.post("/employees/shift-swaps/respond/{swap_id}")
+async def employee_shift_swap_respond(
+        swap_id: int,
+        decision: str = Form(...),
+        store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    item = session.get(EmployeeShiftSwapRequest, swap_id)
+    if not item or item.target_user_id != user.id or item.status != "pending":
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="该换班申请当前不能处理"), status_code=303)
+    applicant = session.get(User, item.applicant_user_id)
+    if not applicant:
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="申请员工账号不存在"), status_code=303)
+    if (
+        not applicant.is_active
+        or not user.is_active
+        or (applicant.employee_type or "regular") == "flexible"
+        or (user.employee_type or "regular") == "flexible"
+    ):
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方必须是在职的非机动类型员工"), status_code=303)
+
+    now = datetime.now()
+    if decision != "accept":
+        item.status = "rejected"
+        item.responded_at = now
+        item.updated_at = now
+        session.add(item)
+        session.commit()
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", success="已拒绝换班申请"), status_code=303)
+
+    applicant_shift = _get_shift_type_for_employee_on_date(session, applicant.display_name, item.swap_date)
+    target_shift = _get_shift_type_for_employee_on_date(session, user.display_name, item.swap_date)
+    if applicant_shift != item.applicant_original_shift_type or target_shift != item.target_original_shift_type:
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方排班已发生变化，不能同意本次换班"), status_code=303)
+    if (
+        _is_locked_flexible_replacement_shift(session, employee_name=applicant.display_name, work_date=item.swap_date)
+        or _is_locked_flexible_replacement_shift(session, employee_name=user.display_name, work_date=item.swap_date)
+    ):
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="已锁定的机动顶班班次不能参与换班"), status_code=303)
+    if _shift_swap_has_conflict(
+        session,
+        user_ids=[applicant.id, user.id],
+        swap_date=item.swap_date,
+        exclude_swap_id=item.id
+    ):
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天已有其他待处理或已生效的换班记录"), status_code=303)
+
+    upsert_shift(session, applicant.display_name, item.swap_date, item.target_original_shift_type)
+    upsert_shift(session, user.display_name, item.swap_date, item.applicant_original_shift_type)
+    item.status = "active"
+    item.responded_at = now
+    item.updated_at = now
+    session.add(item)
+    session.flush()
+
+    applicant_amount = (
+        25.0 if _is_daily_shift(item.applicant_original_shift_type) and item.target_original_shift_type == "bigmid"
+        else -25.0 if item.applicant_original_shift_type == "bigmid" and _is_daily_shift(item.target_original_shift_type)
+        else 0.0
+    )
+    target_amount = -applicant_amount
+    applicant_flow = _create_shift_swap_salary_flow(
+        session=session, employee=applicant, swap_req=item, amount=applicant_amount,
+        title="换班工资调整",
+        description=f"与 {user.display_name} 换班：{_shift_type_label(item.applicant_original_shift_type)} → {_shift_type_label(item.target_original_shift_type)}，调整 {applicant_amount:.2f} 元。",
+        operator=user, created_at=now
+    )
+    target_flow = _create_shift_swap_salary_flow(
+        session=session, employee=user, swap_req=item, amount=target_amount,
+        title="换班工资调整",
+        description=f"与 {applicant.display_name} 换班：{_shift_type_label(item.target_original_shift_type)} → {_shift_type_label(item.applicant_original_shift_type)}，调整 {target_amount:.2f} 元。",
+        operator=user, created_at=now
+    )
+    _create_shift_swap_attendance(
+        session=session, employee=applicant, swap_req=item, shift_type=item.target_original_shift_type,
+        reason=f"与 {user.display_name} 换班", remark="对方已同意，换班生效。",
+        operator=user, created_at=now, salary_flow=applicant_flow
+    )
+    _create_shift_swap_attendance(
+        session=session, employee=user, swap_req=item, shift_type=item.applicant_original_shift_type,
+        reason=f"与 {applicant.display_name} 换班", remark="本人已同意，换班生效。",
+        operator=user, created_at=now, salary_flow=target_flow
+    )
+    session.commit()
+    return RedirectResponse(url=_build_employees_url(store, "my_leave", success="已同意换班，排班和工资调整已同步"), status_code=303)
+
+
+# =========================
+# V3 员工换班：申请撤回
+# =========================
+@app.post("/employees/shift-swaps/cancel-request/{swap_id}")
+async def employee_shift_swap_cancel_request(
+        swap_id: int,
+        store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    item = session.get(EmployeeShiftSwapRequest, swap_id)
+    if not item or item.applicant_user_id != user.id or item.status not in {"active", "cancel_rejected"}:
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="该换班记录当前不能申请撤回"), status_code=303)
+    target = session.get(User, item.target_user_id)
+    if not target:
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="换班员工账号不存在"), status_code=303)
+    if (
+        _get_shift_type_for_employee_on_date(session, user.display_name, item.swap_date) != item.target_original_shift_type
+        or _get_shift_type_for_employee_on_date(session, target.display_name, item.swap_date) != item.applicant_original_shift_type
+    ):
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方排班已被修改，不能发起撤回"), status_code=303)
+
+    now = datetime.now()
+    item.status = "cancel_pending"
+    item.cancel_requested_at = now
+    item.updated_at = now
+    session.add(item)
+    session.commit()
+    return RedirectResponse(url=_build_employees_url(store, "my_leave", success="已申请撤回换班，等待对方确认"), status_code=303)
+
+
+# =========================
+# V3 员工换班：对方确认撤回
+# =========================
+@app.post("/employees/shift-swaps/cancel-respond/{swap_id}")
+async def employee_shift_swap_cancel_respond(
+        swap_id: int,
+        decision: str = Form(...),
+        store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    item = session.get(EmployeeShiftSwapRequest, swap_id)
+    if not item or item.target_user_id != user.id or item.status != "cancel_pending":
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="该撤回申请当前不能处理"), status_code=303)
+    applicant = session.get(User, item.applicant_user_id)
+    if not applicant:
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="申请员工账号不存在"), status_code=303)
+    now = datetime.now()
+    if decision != "accept":
+        item.status = "cancel_rejected"
+        item.cancel_responded_at = now
+        item.updated_at = now
+        session.add(item)
+        session.commit()
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", success="已拒绝撤回，原换班继续有效"), status_code=303)
+
+    if (
+        _get_shift_type_for_employee_on_date(session, applicant.display_name, item.swap_date) != item.target_original_shift_type
+        or _get_shift_type_for_employee_on_date(session, user.display_name, item.swap_date) != item.applicant_original_shift_type
+    ):
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方排班已被修改，不能撤回换班"), status_code=303)
+
+    upsert_shift(session, applicant.display_name, item.swap_date, item.applicant_original_shift_type)
+    upsert_shift(session, user.display_name, item.swap_date, item.target_original_shift_type)
+    item.status = "cancelled"
+    item.cancel_responded_at = now
+    item.updated_at = now
+    session.add(item)
+    session.flush()
+
+    applicant_amount = (
+        -25.0 if _is_daily_shift(item.applicant_original_shift_type) and item.target_original_shift_type == "bigmid"
+        else 25.0 if item.applicant_original_shift_type == "bigmid" and _is_daily_shift(item.target_original_shift_type)
+        else 0.0
+    )
+    target_amount = -applicant_amount
+    applicant_flow = _create_shift_swap_salary_flow(
+        session=session, employee=applicant, swap_req=item, amount=applicant_amount,
+        title="撤回换班工资调整",
+        description=f"撤回与 {user.display_name} 的换班，恢复 {_shift_type_label(item.applicant_original_shift_type)}，反向调整 {applicant_amount:.2f} 元。",
+        operator=user, created_at=now
+    )
+    target_flow = _create_shift_swap_salary_flow(
+        session=session, employee=user, swap_req=item, amount=target_amount,
+        title="撤回换班工资调整",
+        description=f"撤回与 {applicant.display_name} 的换班，恢复 {_shift_type_label(item.target_original_shift_type)}，反向调整 {target_amount:.2f} 元。",
+        operator=user, created_at=now
+    )
+    _create_shift_swap_attendance(
+        session=session, employee=applicant, swap_req=item, shift_type=item.applicant_original_shift_type,
+        reason=f"撤回与 {user.display_name} 的换班", remark="对方已同意撤回，原排班已恢复。",
+        operator=user, created_at=now, salary_flow=applicant_flow
+    )
+    _create_shift_swap_attendance(
+        session=session, employee=user, swap_req=item, shift_type=item.target_original_shift_type,
+        reason=f"撤回与 {applicant.display_name} 的换班", remark="本人已同意撤回，原排班已恢复。",
+        operator=user, created_at=now, salary_flow=target_flow
+    )
+    session.commit()
+    return RedirectResponse(url=_build_employees_url(store, "my_leave", success="已同意撤回换班，原排班和反向工资调整已同步"), status_code=303)
+
 
 # =========================
 # V3 员工请假：提交申请
@@ -6453,10 +7372,12 @@ async def employee_leave_apply(
             EmployeeLeaveRequest.user_id == user.id,
             EmployeeLeaveRequest.leave_date == leave_d,
             EmployeeLeaveRequest.status.in_([
+                "pending_admin_review",
                 "pending",
                 "replacement_accepted",
                 "replacement_rejected_wait_employee",
                 "force_leave_deducted",
+                "approved_with_flexible",
                 "approved",
             ])
         )
@@ -6476,10 +7397,10 @@ async def employee_leave_apply(
         work_date=leave_d
     )
 
-    estimated_deduct = _calc_leave_deduct_amount(
+    estimated_deduct = _calc_employee_leave_deduct(
         session=session,
-        user_id=user.id,
-        employee_name=user.display_name,
+        employee=user,
+        leave_date=leave_d,
         shift_type=shift_type
     )
 
@@ -6488,20 +7409,6 @@ async def employee_leave_apply(
             return _employee_ajax_error("当天排班为休班，无需发起顶班请假")
         return RedirectResponse(
             url=_build_employees_url(store, "my_leave", error="当天排班为休班，无需发起顶班请假"),
-            status_code=303
-        )
-
-    replacement = _find_leave_replacement_employee(
-        session=session,
-        applicant_user_id=user.id,
-        leave_date=leave_d
-    )
-
-    if not replacement:
-        if _is_ajax_request(request):
-            return _employee_ajax_error("未找到请假当天的休班员工，暂时无法提交请假申请")
-        return RedirectResponse(
-            url=_build_employees_url(store, "my_leave", error="未找到请假当天的休班员工，暂时无法提交请假申请"),
             status_code=303
         )
 
@@ -6516,7 +7423,7 @@ async def employee_leave_apply(
         reason=reason,
         remark=remark or None,
 
-        status="pending",
+        status="pending_admin_review",
         is_before_one_day=True,
         estimated_deduct_amount=estimated_deduct,
         final_deduct_amount=0.0,
@@ -6526,8 +7433,8 @@ async def employee_leave_apply(
         approved_at=None,
         approval_note=None,
 
-        replacement_user_id=replacement.id,
-        replacement_employee_name_snapshot=replacement.display_name,
+        replacement_user_id=None,
+        replacement_employee_name_snapshot=None,
         replacement_response=None,
         replacement_response_at=None,
 
@@ -6542,27 +7449,28 @@ async def employee_leave_apply(
     session.add(leave_req)
     session.flush()
 
-    _create_employee_notification(
-        session=session,
-        target_user=replacement,
-        related_user=user,
-        title="顶班确认",
-        content=(
-            f"{user.display_name} 申请 {leave_d} {_shift_type_label(shift_type)} 请假，"
-            f"系统指定您为顶班人，请确认是否同意顶班。"
-        ),
-        notification_type="leave_replacement_request",
-        source_type="leave_request",
-        source_id=leave_req.id,
-        created_at=now
-    )
+    admins = session.exec(
+        select(User).where(User.role == "admin", User.is_active == True).order_by(User.id)
+    ).all()
+    for admin in admins:
+        _create_employee_notification(
+            session=session,
+            target_user=admin,
+            related_user=user,
+            title="待审批请假",
+            content=f"{user.display_name} 申请 {leave_d} {_shift_type_label(shift_type)} 请假，请选择顶班方式或拒绝。",
+            notification_type="leave_admin_review",
+            source_type="leave_request",
+            source_id=leave_req.id,
+            created_at=now
+        )
 
     session.commit()
     session.refresh(leave_req)
 
     if _is_ajax_request(request):
         return _employee_ajax_success(
-            message=f"请假申请已提交，已通知 {replacement.display_name} 确认顶班",
+            message="请假申请已提交，等待管理员审批",
             action="leave_created",
             payload={
                 "leave": _leave_request_payload(leave_req)
@@ -6570,15 +7478,15 @@ async def employee_leave_apply(
         )
 
     return RedirectResponse(
-        url=_build_employees_url(store, "my_leave", success=f"请假申请已提交，已通知 {replacement.display_name} 确认顶班"),
+        url=_build_employees_url(store, "my_leave", success="请假申请已提交，等待管理员审批"),
         status_code=303
     )
 
 # =========================
-# V3 员工请假：管理员审批通过
+# V3 员工请假：管理员批准并进入休班顶班
 # =========================
-@app.post("/employees/leaves/approve/{leave_id}")
-async def employee_leave_approve(
+@app.post("/employees/leaves/rest-replacement/{leave_id}")
+async def employee_leave_rest_replacement(
         request: Request,
         leave_id: int,
         store: str = Form(""),
@@ -6587,7 +7495,7 @@ async def employee_leave_approve(
         user: Optional[User] = Depends(get_current_user)
 ):
     """
-    管理员审批通过请假申请。
+    管理员批准请假并选择休班员工顶班。
 
     AJAX 模式：
     成功后返回更新后的请假申请数据，前端只更新当前审批行。
@@ -6614,46 +7522,34 @@ async def employee_leave_approve(
             status_code=303
         )
 
-    can_admin_approve = (
-        leave_req.status == "replacement_accepted"
-        or (leave_req.status == "pending" and not leave_req.replacement_user_id)
-    )
-    if not can_admin_approve:
+    if leave_req.status != "pending_admin_review":
         if _is_ajax_request(request):
-            return _employee_ajax_error("只有顶班人已同意的请假申请可以审批")
+            return _employee_ajax_error("该请假申请当前不能安排休班顶班")
         return RedirectResponse(
-            url=_build_employees_url(store, "leave_approval", error="只有顶班人已同意的请假申请可以审批"),
+            url=_build_employees_url(store, "leave_approval", error="该请假申请当前不能安排休班顶班"),
             status_code=303
         )
 
-    applicant = session.get(User, leave_req.user_id)
-    if not applicant:
+    replacement = _find_leave_replacement_employee(
+        session=session,
+        applicant_user_id=leave_req.user_id,
+        leave_date=leave_req.leave_date
+    )
+    if not replacement:
         if _is_ajax_request(request):
-            return _employee_ajax_error("请假员工账号不存在", 404)
+            return _employee_ajax_error("未找到请假当天的休息员工，申请仍停留在待管理员审批")
         return RedirectResponse(
-            url=_build_employees_url(store, "leave_approval", error="请假员工账号不存在"),
+            url=_build_employees_url(store, "leave_approval", error="未找到请假当天的休息员工，申请仍停留在待管理员审批"),
             status_code=303
         )
-
-    shift_type = _get_shift_type_for_employee_on_date(
-        session=session,
-        employee_name=leave_req.employee_name_snapshot,
-        work_date=leave_req.leave_date
-    )
-
-    final_deduct = _calc_leave_deduct_amount(
-        session=session,
-        user_id=leave_req.user_id,
-        employee_name=leave_req.employee_name_snapshot,
-        shift_type=shift_type
-    )
 
     now = datetime.now()
     approval_note = _normalize_text(approval_note)
-
-    leave_req.status = "approved"
-    leave_req.shift_type = shift_type
-    leave_req.final_deduct_amount = final_deduct
+    leave_req.status = "pending"
+    leave_req.replacement_user_id = replacement.id
+    leave_req.replacement_employee_name_snapshot = replacement.display_name
+    leave_req.replacement_response = None
+    leave_req.replacement_response_at = None
     leave_req.approved_by_user_id = user.id
     leave_req.approved_by_name = user.display_name
     leave_req.approved_at = now
@@ -6661,114 +7557,212 @@ async def employee_leave_approve(
     leave_req.updated_at = now
 
     session.add(leave_req)
-    session.flush()
-
-    attendance = EmployeeAttendanceRecord(
-        user_id=leave_req.user_id,
-        employee_name_snapshot=leave_req.employee_name_snapshot,
-        event_date=leave_req.leave_date,
-        event_type="leave",
-        shift_type=shift_type,
-        reason=leave_req.reason,
-        status="approved",
-        affect_full_attendance=False,
-        deduct_amount=final_deduct,
-        is_salary_generated=False,
-        salary_flow_id=None,
-        leave_request_id=leave_req.id,
-
-        created_by_user_id=user.id,
-        created_by_name=user.display_name,
-        approved_by_user_id=user.id,
-        approved_by_name=user.display_name,
-        approved_at=now,
-        approval_note=approval_note or None,
-
-        created_at=now,
-        updated_at=now
-    )
-
-    session.add(attendance)
-    session.flush()
-
-    salary_flow = SalaryFlowRecord(
-        user_id=leave_req.user_id,
-        employee_name_snapshot=leave_req.employee_name_snapshot,
-        salary_year=leave_req.leave_date.year,
-        salary_month=leave_req.leave_date.month,
-        flow_date=leave_req.leave_date,
-
-        flow_category="attendance",
-        flow_type="leave_deduct",
-
-        amount=round(-final_deduct, 2),
-
-        title="请假扣款" if final_deduct > 0 else "请假记录（休息日不扣款）",
-        description=(
-            f"{leave_req.employee_name_snapshot} 请假，"
-            f"日期：{leave_req.leave_date}，"
-            f"班次：{_shift_type_label(shift_type)}，"
-            f"顶班人：{leave_req.replacement_employee_name_snapshot or '-'}，"
-            f"扣款：{final_deduct:.2f} 元。"
-            f"审批通过请假不影响全勤奖。"
+    _create_employee_notification(
+        session=session,
+        target_user=replacement,
+        related_user=session.get(User, leave_req.user_id),
+        title="顶班确认",
+        content=(
+            f"{leave_req.employee_name_snapshot} 申请 {leave_req.leave_date} "
+            f"{_shift_type_label(leave_req.shift_type)} 请假，管理员已批准并指定您为休班顶班人，请确认。"
         ),
-
+        notification_type="leave_replacement_request",
         source_type="leave_request",
         source_id=leave_req.id,
-
-        is_auto=True,
-        is_locked=False,
-        is_visible_to_employee=True,
-
-        created_by_user_id=user.id,
-        created_by_name=user.display_name,
-
-        created_at=now,
-        updated_at=now
+        created_at=now
     )
-
-    session.add(salary_flow)
-    session.flush()
-
-    attendance.is_salary_generated = True
-    attendance.salary_flow_id = salary_flow.id
-
-    leave_req.attendance_record_id = attendance.id
-    leave_req.salary_flow_id = salary_flow.id
-
-    session.add(attendance)
-    session.add(leave_req)
-    if applicant:
-        _create_employee_notification(
-            session=session,
-            target_user=applicant,
-            related_user=user,
-            title="请假申请已通过",
-            content=(
-                f"您 {leave_req.leave_date} 的请假已通过，"
-                f"顶班人：{leave_req.replacement_employee_name_snapshot or '-'}。"
-            ),
-            notification_type="leave_approved",
-            source_type="leave_request",
-            source_id=leave_req.id,
-            created_at=now
-        )
     session.commit()
     session.refresh(leave_req)
 
     if _is_ajax_request(request):
         return _employee_ajax_success(
-            message="请假申请已通过，并已生成考勤记录和工资流水",
-            action="leave_approved",
+            message=f"已批准请假，等待 {replacement.display_name} 确认休班顶班",
+            action="leave_rest_replacement_assigned",
             payload={
                 "leave": _leave_request_payload(leave_req)
             }
         )
 
     return RedirectResponse(
-        url=_build_employees_url(store, "leave_approval", success="请假申请已通过，并已生成考勤记录和工资流水"),
+        url=_build_employees_url(store, "leave_approval", success=f"已批准请假，等待 {replacement.display_name} 确认休班顶班"),
         status_code=303
     )
+
+# =========================
+# V3 员工请假：管理员安排机动类型员工顶班
+# =========================
+@app.post("/employees/leaves/flexible-replacement/{leave_id}")
+async def employee_leave_flexible_replacement(
+        request: Request,
+        leave_id: int,
+        replacement_user_id: int = Form(...),
+        store: str = Form(""),
+        approval_note: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请先登录", 401)
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("只有管理员可以安排机动顶班", 403)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="只有管理员可以安排机动顶班"), status_code=303)
+
+    leave_req = session.get(EmployeeLeaveRequest, leave_id)
+    if not leave_req:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请假申请不存在", 404)
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="请假申请不存在"), status_code=303)
+    if leave_req.status != "pending_admin_review":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("该请假申请当前不能安排机动顶班")
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="该请假申请当前不能安排机动顶班"), status_code=303)
+
+    applicant = session.get(User, leave_req.user_id)
+    replacement = session.get(User, replacement_user_id)
+    if not applicant or not replacement:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请假员工或机动员工账号不存在", 404)
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="请假员工或机动员工账号不存在"), status_code=303)
+    if not replacement.is_active or (replacement.employee_type or "regular") != "flexible":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请选择在职的机动类型员工")
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="请选择在职的机动类型员工"), status_code=303)
+    if replacement.id == applicant.id:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请假员工不能为自己顶班")
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="请假员工不能为自己顶班"), status_code=303)
+
+    replacement_shift_type = _get_shift_type_for_employee_on_date(
+        session=session,
+        employee_name=replacement.display_name,
+        work_date=leave_req.leave_date
+    )
+    if replacement_shift_type != "off":
+        message = f"{replacement.display_name} 当天已有具体班次，请选择其他机动员工"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
+
+    now = datetime.now()
+    approval_note = _normalize_text(approval_note)
+    leave_req.replacement_user_id = replacement.id
+    leave_req.replacement_employee_name_snapshot = replacement.display_name
+    leave_req.replacement_response = "accepted"
+    leave_req.replacement_response_at = now
+    leave_req.approved_by_user_id = user.id
+    leave_req.approved_by_name = user.display_name
+    leave_req.approved_at = now
+    leave_req.approval_note = approval_note or None
+    leave_req.updated_at = now
+    session.add(leave_req)
+
+    upsert_shift(session, replacement.display_name, leave_req.leave_date, leave_req.shift_type)
+    session.flush()
+    _rebuild_flexible_employee_shift_flows(
+        session=session,
+        employee=replacement,
+        year=leave_req.leave_date.year,
+        month=leave_req.leave_date.month,
+        operator=user
+    )
+    session.flush()
+    replacement_shift = session.exec(
+        select(ShiftSchedule).where(
+            ShiftSchedule.operator_name == replacement.display_name,
+            ShiftSchedule.work_date == leave_req.leave_date
+        )
+    ).first()
+    replacement_salary_flow = session.exec(
+        select(SalaryFlowRecord).where(
+            SalaryFlowRecord.user_id == replacement.id,
+            SalaryFlowRecord.source_type == "flexible_schedule",
+            SalaryFlowRecord.source_id == (replacement_shift.id if replacement_shift else None)
+        )
+    ).first()
+    leave_req.replacement_salary_flow_id = replacement_salary_flow.id if replacement_salary_flow else None
+    session.add(leave_req)
+
+    applicant_deduct = _calc_employee_leave_deduct(
+        session=session,
+        employee=applicant,
+        leave_date=leave_req.leave_date,
+        shift_type=leave_req.shift_type
+    )
+    _finalize_leave_for_applicant(
+        session=session,
+        leave_req=leave_req,
+        applicant=applicant,
+        operator=user,
+        final_deduct=applicant_deduct,
+        status="approved_with_flexible",
+        approval_note=approval_note,
+        attendance_remark=f"管理员安排机动员工 {replacement.display_name} 顶班。"
+    )
+    session.add(EmployeeAttendanceRecord(
+        user_id=replacement.id,
+        employee_name_snapshot=replacement.display_name,
+        event_date=leave_req.leave_date,
+        event_type="other",
+        shift_type=leave_req.shift_type,
+        reason=f"机动顶班：为 {leave_req.employee_name_snapshot} 顶班",
+        remark=f"管理员 {user.display_name} 安排机动顶班，排班已自动调整为 {_shift_type_label(leave_req.shift_type)}。",
+        status="recorded",
+        affect_full_attendance=False,
+        deduct_amount=0.0,
+        is_salary_generated=True,
+        salary_flow_id=replacement_salary_flow.id if replacement_salary_flow else None,
+        leave_request_id=leave_req.id,
+        created_by_user_id=user.id,
+        created_by_name=user.display_name,
+        approved_by_user_id=user.id,
+        approved_by_name=user.display_name,
+        approved_at=now,
+        approval_note=approval_note or None,
+        created_at=now,
+        updated_at=now
+    ))
+    _create_employee_notification(
+        session=session,
+        target_user=applicant,
+        related_user=replacement,
+        title="机动顶班已安排，请假已生效",
+        content=f"管理员已安排 {replacement.display_name} 为您顶班，您的请假已生效，扣款 {applicant_deduct:.2f} 元。",
+        notification_type="leave_flexible_replacement",
+        source_type="leave_request",
+        source_id=leave_req.id,
+        created_at=now
+    )
+    _create_employee_notification(
+        session=session,
+        target_user=replacement,
+        related_user=applicant,
+        title="已安排机动顶班",
+        content=(
+            f"管理员已安排您在 {leave_req.leave_date} 为 {leave_req.employee_name_snapshot} 顶班，"
+            f"当天排班已调整为 {_shift_type_label(leave_req.shift_type)}，工资流水已同步更新。"
+        ),
+        notification_type="leave_flexible_replacement_assigned",
+        source_type="leave_request",
+        source_id=leave_req.id,
+        created_at=now
+    )
+    session.commit()
+    session.refresh(leave_req)
+
+    if _is_ajax_request(request):
+        return _employee_ajax_success(
+            message=f"已安排机动员工 {replacement.display_name} 顶班，请假已生效",
+            action="leave_flexible_replacement_assigned",
+            payload={"leave": _leave_request_payload(leave_req)}
+        )
+    return RedirectResponse(
+        url=_build_employees_url(store, "leave_approval", success=f"已安排机动员工 {replacement.display_name} 顶班，请假已生效"),
+        status_code=303
+    )
+
 
 # =========================
 # V3 员工请假：管理员拒绝
@@ -6810,15 +7804,11 @@ async def employee_leave_reject(
             status_code=303
         )
 
-    can_admin_approve = (
-        leave_req.status == "replacement_accepted"
-        or (leave_req.status == "pending" and not leave_req.replacement_user_id)
-    )
-    if not can_admin_approve:
+    if leave_req.status != "pending_admin_review":
         if _is_ajax_request(request):
-            return _employee_ajax_error("只有顶班人已同意的请假申请可以审批")
+            return _employee_ajax_error("只有待管理员审批的请假申请可以拒绝")
         return RedirectResponse(
-            url=_build_employees_url(store, "leave_approval", error="只有顶班人已同意的请假申请可以审批"),
+            url=_build_employees_url(store, "leave_approval", error="只有待管理员审批的请假申请可以拒绝"),
             status_code=303
         )
 
@@ -6911,7 +7901,6 @@ async def employee_leave_replacement_accept(
         )
 
     now = datetime.now()
-    leave_req.status = "replacement_accepted"
     leave_req.replacement_response = "accepted"
     leave_req.replacement_response_at = now
     leave_req.updated_at = now
@@ -6937,58 +7926,58 @@ async def employee_leave_replacement_accept(
         session.add(leave_req)
 
     applicant = session.get(User, leave_req.user_id)
-    if applicant:
-        _create_employee_notification(
-            session=session,
-            target_user=applicant,
-            related_user=user,
-            title="顶班人已同意",
-            content=(
-                f"{user.display_name} 已同意为您顶 {leave_req.leave_date} "
-                f"{_shift_type_label(leave_req.shift_type)}，等待管理员审批。"
-                f"系统已为顶班人生成顶班补贴 {replacement_pay_amount:.2f} 元。"
-            ),
-            notification_type="leave_replacement_accepted",
-            source_type="leave_request",
-            source_id=leave_req.id,
-            created_at=now
+    if not applicant:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请假员工账号不存在", 404)
+        return RedirectResponse(
+            url=_build_employees_url(store, "my_leave", error="请假员工账号不存在"),
+            status_code=303
         )
 
-    admins = session.exec(
-        select(User).where(
-            User.role == "admin",
-            User.is_active == True
-        ).order_by(User.id)
-    ).all()
-    for admin in admins:
-        _create_employee_notification(
-            session=session,
-            target_user=admin,
-            related_user=applicant,
-            title="待审批请假",
-            content=(
-                f"{leave_req.employee_name_snapshot} 申请 {leave_req.leave_date} "
-                f"{_shift_type_label(leave_req.shift_type)} 请假，"
-                f"顶班人 {user.display_name} 已同意，请审批。"
-            ),
-            notification_type="leave_admin_approval",
-            source_type="leave_request",
-            source_id=leave_req.id,
-            created_at=now
-        )
+    applicant_deduct = _calc_employee_leave_deduct(
+        session=session,
+        employee=applicant,
+        leave_date=leave_req.leave_date,
+        shift_type=leave_req.shift_type
+    )
+    _finalize_leave_for_applicant(
+        session=session,
+        leave_req=leave_req,
+        applicant=applicant,
+        operator=user,
+        final_deduct=applicant_deduct,
+        status="approved",
+        approval_note=leave_req.approval_note,
+        attendance_remark=f"休班员工 {user.display_name} 已同意顶班。"
+    )
+    _create_employee_notification(
+        session=session,
+        target_user=applicant,
+        related_user=user,
+        title="顶班人已同意，请假已生效",
+        content=(
+            f"{user.display_name} 已同意为您顶 {leave_req.leave_date} "
+            f"{_shift_type_label(leave_req.shift_type)}，您的请假已生效，"
+            f"扣款 {applicant_deduct:.2f} 元。系统已为顶班人生成顶班补贴 {replacement_pay_amount:.2f} 元。"
+        ),
+        notification_type="leave_replacement_accepted",
+        source_type="leave_request",
+        source_id=leave_req.id,
+        created_at=now
+    )
 
     session.commit()
     session.refresh(leave_req)
 
     if _is_ajax_request(request):
         return _employee_ajax_success(
-            message="已同意顶班，等待管理员审批",
+            message="已同意顶班，请假已生效",
             action="leave_replacement_accepted",
             payload={"leave": _leave_request_payload(leave_req)}
         )
 
     return RedirectResponse(
-        url=_build_employees_url(store, "my_leave", success="已同意顶班，等待管理员审批"),
+        url=_build_employees_url(store, "my_leave", success="已同意顶班，请假已生效"),
         status_code=303
     )
 
@@ -7043,7 +8032,13 @@ async def employee_leave_replacement_reject(
 
     applicant = session.get(User, leave_req.user_id)
     if applicant:
-        daily_amount = _calc_leave_deduct_amount(
+        daily_amount = _calc_employee_leave_deduct(
+            session=session,
+            employee=applicant,
+            leave_date=leave_req.leave_date,
+            shift_type=leave_req.shift_type
+        )
+        replacement_deduct = _calc_leave_deduct_amount(
             session=session,
             user_id=leave_req.user_id,
             employee_name=leave_req.employee_name_snapshot,
@@ -7057,7 +8052,7 @@ async def employee_leave_replacement_reject(
             content=(
                 f"{user.display_name} 拒绝为您顶 {leave_req.leave_date} "
                 f"{_shift_type_label(leave_req.shift_type)}。若坚持请假，您将扣除 "
-                f"{daily_amount * 2:.2f} 元，{user.display_name} 将扣除 {daily_amount:.2f} 元。"
+                f"{daily_amount * 2:.2f} 元，{user.display_name} 将扣除 {replacement_deduct:.2f} 元。"
             ),
             notification_type="leave_replacement_rejected",
             source_type="leave_request",
@@ -7193,14 +8188,19 @@ async def employee_leave_force_after_replacement_reject(
         )
 
     now = datetime.now()
-    daily_amount = _calc_leave_deduct_amount(
+    daily_amount = _calc_employee_leave_deduct(
+        session=session,
+        employee=user,
+        leave_date=leave_req.leave_date,
+        shift_type=leave_req.shift_type
+    )
+    applicant_deduct = round(daily_amount * 2, 2)
+    replacement_deduct = _calc_leave_deduct_amount(
         session=session,
         user_id=leave_req.user_id,
         employee_name=leave_req.employee_name_snapshot,
         shift_type=leave_req.shift_type
     )
-    applicant_deduct = round(daily_amount * 2, 2)
-    replacement_deduct = round(daily_amount, 2)
 
     leave_req.status = "force_leave_deducted"
     leave_req.final_deduct_amount = applicant_deduct
@@ -7224,10 +8224,10 @@ async def employee_leave_force_after_replacement_reject(
         leave_request_id=leave_req.id,
         created_by_user_id=user.id,
         created_by_name=user.display_name,
-        approved_by_user_id=None,
-        approved_by_name=None,
-        approved_at=None,
-        approval_note=None,
+        approved_by_user_id=leave_req.approved_by_user_id,
+        approved_by_name=leave_req.approved_by_name,
+        approved_at=leave_req.approved_at,
+        approval_note=leave_req.approval_note,
         created_at=now,
         updated_at=now
     )
@@ -7826,6 +8826,181 @@ async def employee_salary_flow_add(
 
     return RedirectResponse(
         url=_build_employees_url(store, "salary_flows", success="工资调整流水已新增"),
+        status_code=303
+    )
+
+# =========================
+# V3 员工工资：管理员编辑工资调整流水
+# =========================
+@app.post("/employees/salary-flows/edit/{flow_id}")
+async def employee_salary_flow_edit(
+        request: Request,
+        flow_id: int,
+        store: str = Form(""),
+        user_id: int = Form(...),
+        flow_date: str = Form(...),
+        flow_type: str = Form(...),
+        amount_action: str = Form(...),
+        amount: float = Form(...),
+        title: str = Form(""),
+        description: str = Form(""),
+        is_visible_to_employee: Optional[str] = Form(None),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    """管理员编辑一条未锁定的手工工资调整流水。"""
+    if not user:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请先登录", 401)
+        return RedirectResponse(url="/login", status_code=303)
+
+    if user.role != "admin":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("只有管理员可以编辑工资调整", 403)
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error="只有管理员可以编辑工资调整"),
+            status_code=303
+        )
+
+    salary_flow = session.get(SalaryFlowRecord, flow_id)
+    if not salary_flow:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("工资流水不存在或已被删除", 404)
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error="工资流水不存在或已被删除"),
+            status_code=303
+        )
+
+    if getattr(salary_flow, "is_auto", False):
+        if _is_ajax_request(request):
+            return _employee_ajax_error("自动生成的工资流水不能在这里编辑，请从来源记录处理")
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error="自动生成的工资流水不能在这里编辑，请从来源记录处理"),
+            status_code=303
+        )
+
+    if getattr(salary_flow, "is_locked", False):
+        if _is_ajax_request(request):
+            return _employee_ajax_error("该工资流水已锁定，不能编辑")
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error="该工资流水已锁定，不能编辑"),
+            status_code=303
+        )
+
+    target_user = session.get(User, user_id)
+    if not target_user:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("员工不存在", 404)
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error="员工不存在"),
+            status_code=303
+        )
+
+    if not getattr(target_user, "is_active", True):
+        if _is_ajax_request(request):
+            return _employee_ajax_error("该员工已停用，不能修改工资调整")
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error="该员工已停用，不能修改工资调整"),
+            status_code=303
+        )
+
+    try:
+        flow_d = datetime.strptime(flow_date, "%Y-%m-%d").date()
+    except Exception:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("日期格式不正确")
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error="日期格式不正确"),
+            status_code=303
+        )
+
+    flow_type = _normalize_text(flow_type)
+    amount_action = _normalize_text(amount_action)
+    title = _normalize_text(title)
+    description = _normalize_text(description)
+
+    allowed_flow_types = {
+        "mistake_deduct",
+        "replacement_pay",
+        "overtime_pay",
+        "manual_bonus",
+        "manual_deduct",
+        "manual_correction",
+        "other_adjustment",
+    }
+    if flow_type not in allowed_flow_types:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("工资调整类型不正确")
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error="工资调整类型不正确"),
+            status_code=303
+        )
+
+    amount_value = round(abs(_safe_float(amount)), 2)
+    if amount_value <= 0:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("金额必须大于 0")
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error="金额必须大于 0"),
+            status_code=303
+        )
+
+    if amount_action not in {"add", "deduct"}:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("金额方向不正确")
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error="金额方向不正确"),
+            status_code=303
+        )
+
+    signed_amount = amount_value if amount_action == "add" else -amount_value
+    if flow_type in {"mistake_deduct", "manual_deduct"}:
+        signed_amount = -amount_value
+    if flow_type in {"replacement_pay", "overtime_pay", "manual_bonus"}:
+        signed_amount = amount_value
+
+    if flow_type in {"replacement_pay", "overtime_pay"}:
+        flow_category = "replacement_work"
+    elif flow_type in {"mistake_deduct", "manual_deduct"}:
+        flow_category = "deduction"
+    elif flow_type == "manual_bonus":
+        flow_category = "bonus"
+    else:
+        flow_category = "manual_adjustment"
+
+    if not title:
+        title = _salary_flow_type_label(flow_type)
+    if not description:
+        description = f"{target_user.display_name}：{title}，金额 {signed_amount:.2f} 元。"
+
+    salary_flow.user_id = target_user.id
+    salary_flow.employee_name_snapshot = target_user.display_name
+    salary_flow.salary_year = flow_d.year
+    salary_flow.salary_month = flow_d.month
+    salary_flow.flow_date = flow_d
+    salary_flow.flow_category = flow_category
+    salary_flow.flow_type = flow_type
+    salary_flow.amount = round(signed_amount, 2)
+    salary_flow.title = title
+    salary_flow.description = description
+    salary_flow.is_visible_to_employee = bool(is_visible_to_employee)
+    salary_flow.updated_at = datetime.now()
+
+    session.add(salary_flow)
+    session.commit()
+    session.refresh(salary_flow)
+
+    if _is_ajax_request(request):
+        return _employee_ajax_success(
+            message="工资调整流水已更新",
+            action="salary_flow_updated",
+            payload={
+                "salary_flow": _salary_flow_payload(salary_flow)
+            }
+        )
+
+    return RedirectResponse(
+        url=_build_employees_url(store, "salary_flows", success="工资调整流水已更新"),
         status_code=303
     )
 
@@ -14475,6 +15650,17 @@ async def schedule_page(
 
     # 读取该月排班：map[(name, date)] = shift_type
     shifts_map = get_month_shifts_map(session, y, m)
+    flexible_locked_shift_keys = {
+        (item.replacement_employee_name_snapshot, item.leave_date)
+        for item in session.exec(
+            select(EmployeeLeaveRequest).where(
+                EmployeeLeaveRequest.status == "approved_with_flexible",
+                EmployeeLeaveRequest.leave_date >= day_list[0],
+                EmployeeLeaveRequest.leave_date <= day_list[-1]
+            )
+        ).all()
+        if item.replacement_employee_name_snapshot
+    }
 
     # 给前端的 shift label
     shift_options = SHIFT_OPTIONS
@@ -14497,6 +15683,7 @@ async def schedule_page(
 
         "operator_names": operator_names,
         "shifts_map": shifts_map,
+        "flexible_locked_shift_keys": flexible_locked_shift_keys,
         "shift_options": shift_options,
         "shift_label": shift_label,
 
@@ -14505,8 +15692,8 @@ async def schedule_page(
             "early": "9:00-18:00",
             "mid": "11:00-20:00",
             "bigmid": "11:00-22:00",
-            "night": "16:00-次日1:00",
-            SHIFT_TYPE_FLEXIBLE: "机动",
+            "night1": "16:00-次日1:00",
+            "night2": "16:00-次日1:00",
             "off": "-"
         }
     })
@@ -14543,9 +15730,24 @@ async def schedule_save(
     form = await request.form()
 
     allowed = ALLOWED_SHIFT_TYPES
+    month_start = date(year, month, 1)
+    month_end = date(year, month, calendar.monthrange(year, month)[1])
+    flexible_locked_shift_keys = {
+        (item.replacement_employee_name_snapshot, item.leave_date)
+        for item in session.exec(
+            select(EmployeeLeaveRequest).where(
+                EmployeeLeaveRequest.status == "approved_with_flexible",
+                EmployeeLeaveRequest.leave_date >= month_start,
+                EmployeeLeaveRequest.leave_date <= month_end
+            )
+        ).all()
+        if item.replacement_employee_name_snapshot
+    }
 
     updated = 0
     skipped = 0
+    locked_skipped = 0
+    touched_operator_names = set()
 
     for key, value in form.items():
         if not key.startswith("shift__"):
@@ -14569,15 +15771,34 @@ async def schedule_save(
         if operator_name not in visible_operator_names:
             skipped += 1
             continue
+        if (operator_name, work_date) in flexible_locked_shift_keys:
+            locked_skipped += 1
+            continue
 
         upsert_shift(session, operator_name, work_date, value)
+        touched_operator_names.add(operator_name)
         updated += 1
 
+    session.flush()
+    touched_employees = session.exec(
+        select(User).where(User.display_name.in_(touched_operator_names))
+    ).all() if touched_operator_names else []
+    for employee in touched_employees:
+        if (employee.employee_type or "regular") == "flexible":
+            _rebuild_flexible_employee_shift_flows(
+                session=session,
+                employee=employee,
+                year=year,
+                month=month,
+                operator=user
+            )
     session.commit()
 
     msg = f"保存成功({updated}项)"
     if skipped:
         msg += f"，已忽略停用员工排班({skipped}项)"
+    if locked_skipped:
+        msg += f"，已保留锁定的机动顶班({locked_skipped}项)"
 
     return RedirectResponse(
         url=f"/schedule?year={year}&month={month}&success={msg}",
