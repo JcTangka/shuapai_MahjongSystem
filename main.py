@@ -36,6 +36,7 @@ from database import (GameRecord,Store, Room, User,
                       EmployeeHourlySubsidyRequest,
                       EmployeeAttendanceRecord,
                       SalaryFlowRecord,
+                      EmployeeWorkMistakeRecord,
                       MonthlySalarySettlement,
                       EmployeeNotification,
 
@@ -76,6 +77,7 @@ SHIFT_LABEL_MAP[SHIFT_TYPE_NIGHT_LEGACY] = "晚1班"
 SHIFT_LABEL_MAP[SHIFT_TYPE_FLEXIBLE] = "机动（历史）"
 NORMAL_DAILY_SALARY = 107.0
 BIGMID_DAILY_SALARY = 132.0
+LOGISTICS_DAILY_SALARY = 88.5
 FLEXIBLE_BASE_SALARY = 1500.0
 FLEXIBLE_INCLUDED_SHIFT_COUNT = 15
 FLEXIBLE_INCLUDED_NORMAL_SALARY = 100.0
@@ -241,6 +243,10 @@ def _calc_leave_deduct_amount(
     if shift_type == "off":
         return 0.0
 
+    user = session.get(User, user_id)
+    if (user.employee_type if user else "regular") == "logistics":
+        return LOGISTICS_DAILY_SALARY
+
     if shift_type == "bigmid":
         return BIGMID_DAILY_SALARY
 
@@ -301,6 +307,8 @@ def _calc_employee_leave_deduct(
 ) -> float:
     if shift_type == "off":
         return 0.0
+    if (employee.employee_type or "regular") == "logistics":
+        return LOGISTICS_DAILY_SALARY
     if (employee.employee_type or "regular") == "flexible":
         return _calc_flexible_employee_leave_deduct(
             session=session,
@@ -956,6 +964,28 @@ def _build_employees_url(
 
     return "/employees?" + urlencode(params)
 
+
+def _build_my_assessment_url(
+        store: str,
+        *,
+        assessment_user_id: Optional[int] = None,
+        assessment_mistake_status: str = "active",
+        success: str = "",
+        error: str = ""
+) -> str:
+    params = {
+        "store": store or "",
+        "tab": "my_assessment",
+        "assessment_mistake_status": assessment_mistake_status or "active",
+    }
+    if assessment_user_id:
+        params["assessment_user_id"] = str(assessment_user_id)
+    if success:
+        params["success"] = success
+    if error:
+        params["error"] = error
+    return "/employees?" + urlencode(params)
+
 # =========================
 # V3 员工管理：AJAX 局部刷新辅助函数
 # =========================
@@ -968,12 +998,57 @@ def _employee_salary_type(user_obj: User) -> str:
     return "management" if user_obj.role == "admin" else (user_obj.employee_type or "regular")
 
 
+def _employee_participates_personal_store_bonus(user_obj: User) -> bool:
+    return bool(user_obj and user_obj.role != "admin" and (user_obj.employee_type or "regular") == "regular")
+
+
 def _employee_participates_team_bonus(employee_type: str) -> bool:
-    return employee_type in {"regular", "management"}
+    return False
 
 
-def _employee_participates_sales_champion_bonus(employee_type: str) -> bool:
-    return employee_type in {"regular", "management"}
+def _is_salary_month_paid_or_locked(
+        session: Session,
+        user_id: int,
+        year: int,
+        month: int
+) -> bool:
+    settlement = session.exec(
+        select(MonthlySalarySettlement).where(
+            MonthlySalarySettlement.user_id == user_id,
+            MonthlySalarySettlement.salary_year == year,
+            MonthlySalarySettlement.salary_month == month
+        )
+    ).first()
+    return bool(settlement and settlement.status in {"paid", "locked"})
+
+
+def _refresh_salary_settlement_totals_if_exists(
+        session: Session,
+        user_id: int,
+        year: int,
+        month: int
+) -> None:
+    settlement = session.exec(
+        select(MonthlySalarySettlement).where(
+            MonthlySalarySettlement.user_id == user_id,
+            MonthlySalarySettlement.salary_year == year,
+            MonthlySalarySettlement.salary_month == month
+        )
+    ).first()
+    if not settlement or settlement.status in {"paid", "locked"}:
+        return
+
+    totals = _sum_salary_flows_for_settlement(session, user_id, year, month)
+    settlement.base_salary_total = totals["base_salary_total"]
+    settlement.personal_commission_total = totals["personal_commission_total"]
+    settlement.personal_store_bonus_total = totals["personal_store_bonus_total"]
+    settlement.team_commission_total = totals["team_commission_total"]
+    settlement.bonus_total = totals["bonus_total"]
+    settlement.deduction_total = totals["deduction_total"]
+    settlement.manual_adjustment_total = totals["manual_adjustment_total"]
+    settlement.final_salary = totals["final_salary"]
+    settlement.updated_at = datetime.now()
+    session.add(settlement)
 
 
 def _employee_type_change_effective_from(change_date: date) -> Optional[date]:
@@ -1181,7 +1256,8 @@ def _salary_flow_category_label(flow_category: str) -> str:
     """
     mapping = {
         "base_salary": "基础工资",
-        "personal_commission": "个人提成",
+        "personal_commission": "单量提成",
+        "personal_store_bonus": "个人门店达标奖",
         "team_commission": "团队提成",
         "bonus": "奖金",
         "deduction": "扣款",
@@ -1217,7 +1293,8 @@ def _salary_flow_type_label(flow_type: str) -> str:
         "late_deduct": "迟到扣款",
         "absent_deduct": "旷工扣款",
         "monthly_base_salary": "月基础工资",
-        "personal_order_commission": "个人订单提成",
+        "personal_order_commission": "单量提成",
+        "personal_store_target_bonus": "个人门店达标奖",
         "team_bonus_share": "团队奖金分摊",
         "team_target_bonus_share": "团队目标奖金分摊",
         "team_non_result_bonus_share": "团队非结果性奖金分摊",
@@ -1313,7 +1390,7 @@ def _build_my_salary_data(
 
     注意：
     本函数只读数据，不生成工资流水，不生成结算。
-    后续“工资结算”模块才负责统一生成基础工资、提成、团队奖金、全勤奖、销冠奖等自动流水。
+    后续“工资结算”模块才负责统一生成基础工资、单量提成、全勤奖等自动流水。
     """
     # ===== 1. 查询员工工资档案 =====
     # 说明：
@@ -1494,8 +1571,7 @@ def _build_employee_order_count_map(
 
     用途：
     1. 计算个人提成；
-    2. 判断销冠；
-    3. 销冠并列时都发 200 元。
+    2. 工资结算时复用该数字计算单量提成。
     """
     month_start, month_end = _get_month_start_end(year, month)
 
@@ -1714,6 +1790,7 @@ def _sum_salary_flows_for_settlement(
     result = {
         "base_salary_total": 0.0,
         "personal_commission_total": 0.0,
+        "personal_store_bonus_total": 0.0,
         "team_commission_total": 0.0,
         "bonus_total": 0.0,
         "deduction_total": 0.0,
@@ -1731,8 +1808,10 @@ def _sum_salary_flows_for_settlement(
             result["base_salary_total"] += amount
         elif category == "personal_commission":
             result["personal_commission_total"] += amount
+        elif category == "personal_store_bonus":
+            result["personal_store_bonus_total"] += amount
         elif category == "team_commission":
-            result["team_commission_total"] += amount
+            continue
         elif category == "bonus":
             result["bonus_total"] += amount
 
@@ -1770,6 +1849,7 @@ def _salary_settlement_payload(item: MonthlySalarySettlement) -> dict:
 
         "base_salary_total": round(float(item.base_salary_total or 0), 2),
         "personal_commission_total": round(float(item.personal_commission_total or 0), 2),
+        "personal_store_bonus_total": round(float(getattr(item, "personal_store_bonus_total", 0) or 0), 2),
         "team_commission_total": round(float(item.team_commission_total or 0), 2),
         "bonus_total": round(float(item.bonus_total or 0), 2),
         "deduction_total": round(float(item.deduction_total or 0), 2),
@@ -1814,7 +1894,7 @@ def _calculate_salary_for_one_employee(
     本函数会：
     1. 获取或创建 MonthlySalarySettlement；
     2. 删除旧的未锁定工资结算自动流水；
-    3. 重新生成基础工资、个人提成、团队奖金、全勤奖、销冠奖流水；
+    3. 重新生成基础工资、单量提成、全勤奖流水；
     4. 汇总所有工资流水，写入 MonthlySalarySettlement。
     """
     now = datetime.now()
@@ -1874,6 +1954,12 @@ def _calculate_salary_for_one_employee(
         if employee_type == "logistics"
         else _calc_personal_order_commission(personal_order_count)
     )
+    reached_personal_store_count, personal_store_bonus = _calc_personal_store_bonus(
+        session=session,
+        employee=user_obj,
+        year=year,
+        month=month
+    )
 
     is_flexible_employee = employee_type == "flexible"
     if is_flexible_employee:
@@ -1886,27 +1972,8 @@ def _calculate_salary_for_one_employee(
         )
         session.flush()
 
-    # ===== 团队奖金 =====
-    team, _ = _get_employee_team_for_month(session, user_obj.id, year, month)
-
-    team_bonus = 0.0
     team_id = None
     team_name_snapshot = None
-
-    if team:
-        team_assessment = _calculate_team_assessment(
-            session=session,
-            team=team,
-            year=year,
-            month=month
-        )
-        team_bonus = (
-            round(float(team_assessment.per_member_bonus_amount or 0), 2)
-            if _employee_participates_team_bonus(employee_type)
-            else 0.0
-        )
-        team_id = team.id
-        team_name_snapshot = team.name
 
     # ===== 全勤奖 =====
     has_full_attendance = _employee_has_full_attendance_bonus(
@@ -1917,26 +1984,6 @@ def _calculate_salary_for_one_employee(
         month=month
     )
     full_attendance_bonus = 200.0 if has_full_attendance else 0.0
-
-    # ===== 销冠奖：并列都发 200 =====
-    champion_eligible_names = {
-        employee.display_name for employee in session.exec(
-            select(User).where(User.is_active == True)
-        ).all()
-        if _employee_participates_sales_champion_bonus(_employee_salary_type(employee))
-    }
-    champion_eligible_counts = [
-        count for employee_name, count in all_order_count_map.items()
-        if employee_name in champion_eligible_names
-    ]
-    max_order_count = max(champion_eligible_counts) if champion_eligible_counts else 0
-    sales_champion_bonus = 0.0
-    if (
-        _employee_participates_sales_champion_bonus(employee_type)
-        and personal_order_count > 0
-        and personal_order_count == max_order_count
-    ):
-        sales_champion_bonus = 200.0
 
     # ===== 生成自动工资流水 =====
     if employee_type == "flexible":
@@ -1974,11 +2021,11 @@ def _calculate_salary_for_one_employee(
         user_obj=user_obj,
         year=year,
         month=month,
-        amount=personal_commission,
-        flow_category="personal_commission",
-        flow_type="personal_order_commission",
-        title="个人订单提成",
-        description=f"{year}年{month}月个人订单 {personal_order_count} 单，对应提成 {personal_commission:.2f} 元。",
+        amount=personal_store_bonus,
+        flow_category="personal_store_bonus",
+        flow_type="personal_store_target_bonus",
+        title="个人门店达标奖",
+        description=f"{year}年{month}月个人门店达标 {reached_personal_store_count} 个，每个 100 元，合计 {personal_store_bonus:.2f} 元。",
         settlement_id=settlement.id,
         operator=operator
     )
@@ -1988,11 +2035,11 @@ def _calculate_salary_for_one_employee(
         user_obj=user_obj,
         year=year,
         month=month,
-        amount=team_bonus,
-        flow_category="team_commission",
-        flow_type="team_bonus_share",
-        title="团队奖金分摊",
-        description=f"{year}年{month}月团队【{team_name_snapshot or '-'}】人均团队奖金 {team_bonus:.2f} 元。",
+        amount=personal_commission,
+        flow_category="personal_commission",
+        flow_type="personal_order_commission",
+        title="单量提成",
+        description=f"{year}年{month}月个人订单 {personal_order_count} 单，对应单量提成 {personal_commission:.2f} 元。",
         settlement_id=settlement.id,
         operator=operator
     )
@@ -2011,20 +2058,6 @@ def _calculate_salary_for_one_employee(
         operator=operator
     )
 
-    _create_salary_settlement_flow(
-        session=session,
-        user_obj=user_obj,
-        year=year,
-        month=month,
-        amount=sales_champion_bonus,
-        flow_category="bonus",
-        flow_type="sales_champion_bonus",
-        title="销冠奖",
-        description=f"本月个人订单数 {personal_order_count} 单，为本月最高单量，发放销冠奖 200 元。",
-        settlement_id=settlement.id,
-        operator=operator
-    )
-
     session.flush()
 
     totals = _sum_salary_flows_for_settlement(
@@ -2037,6 +2070,7 @@ def _calculate_salary_for_one_employee(
     settlement.employee_name_snapshot = user_obj.display_name
     settlement.base_salary_total = totals["base_salary_total"]
     settlement.personal_commission_total = totals["personal_commission_total"]
+    settlement.personal_store_bonus_total = totals["personal_store_bonus_total"]
     settlement.team_commission_total = totals["team_commission_total"]
     settlement.bonus_total = totals["bonus_total"]
     settlement.deduction_total = totals["deduction_total"]
@@ -2221,7 +2255,9 @@ def _get_store_active_room_count(session: Session, store_obj: Store) -> int:
 def _build_employee_whiteboard_data(
         session: Session,
         year: int,
-        month: int
+        month: int,
+        current_user: Optional[User] = None,
+        selected_employee_name: str = "all"
 ) -> dict:
     """
     构建员工管理 -> 激励白板数据。
@@ -2263,6 +2299,7 @@ def _build_employee_whiteboard_data(
 
     store_order_count_map = {}
     employee_order_count_map = {}
+    employee_store_order_count_map = {}
 
     for g in month_games:
         store_name = _normalize_text(g.store_name)
@@ -2273,6 +2310,11 @@ def _build_employee_whiteboard_data(
         who_did = _normalize_text(g.who_did)
         if who_did:
             employee_order_count_map[who_did] = employee_order_count_map.get(who_did, 0) + 1
+            if store_name:
+                employee_store_key = (who_did, store_name)
+                employee_store_order_count_map[employee_store_key] = (
+                    employee_store_order_count_map.get(employee_store_key, 0) + 1
+                )
 
     store_rows = []
     for store_obj in active_store_objs:
@@ -2305,6 +2347,88 @@ def _build_employee_whiteboard_data(
     for row in store_rows:
         row["actual_percent"] = round(row["actual_order_count"] / max_store_bar_value * 100, 2) if max_store_bar_value else 0
         row["target_percent"] = round(row["target_order_count"] / max_store_bar_value * 100, 2) if max_store_bar_value else 0
+
+    store_target_map = {
+        row["store_name"]: row["target_order_count"]
+        for row in store_rows
+    }
+
+    # ===== 1.5. 我的本月门店目标订单量 =====
+    current_employee_name = _normalize_text(current_user.display_name) if current_user else ""
+    can_view_all_employee_store_rows = bool(current_user and current_user.role == "admin")
+    selected_employee_name = _normalize_text(selected_employee_name)
+    user_by_display_name = {
+        _normalize_text(item.display_name): item
+        for item in session.exec(select(User).order_by(User.display_name)).all()
+        if _normalize_text(item.display_name)
+    }
+    eligible_employee_store_names = {
+        employee_name
+        for employee_name, employee in user_by_display_name.items()
+        if _employee_participates_personal_store_bonus(employee)
+    }
+    available_employee_store_names = sorted({
+        employee_name
+        for (employee_name, store_name), order_count in employee_store_order_count_map.items()
+        if order_count > 0 and store_name in store_target_map
+        and employee_name in eligible_employee_store_names
+    })
+
+    if not can_view_all_employee_store_rows:
+        selected_employee_name = current_employee_name
+    elif selected_employee_name and selected_employee_name != "all" and selected_employee_name not in available_employee_store_names:
+        selected_employee_name = "all"
+
+    employee_store_rows = []
+    for (employee_name, store_name), order_count in employee_store_order_count_map.items():
+        if order_count <= 0:
+            continue
+        if store_name not in store_target_map:
+            continue
+        if employee_name not in eligible_employee_store_names:
+            continue
+        if not can_view_all_employee_store_rows and employee_name != current_employee_name:
+            continue
+        if can_view_all_employee_store_rows and selected_employee_name != "all" and employee_name != selected_employee_name:
+            continue
+
+        target_order_count = round((store_target_map.get(store_name, 0) or 0) / 6, 2)
+        achievement_rate = 0.0
+        if target_order_count > 0:
+            achievement_rate = round(order_count / target_order_count * 100, 2)
+
+        employee_store_rows.append({
+            "employee_name": employee_name,
+            "store_name": store_name,
+            "target_order_count": target_order_count,
+            "actual_order_count": order_count,
+            "remaining_order_count": round(max(target_order_count - order_count, 0), 2),
+            "is_reached": order_count >= target_order_count if target_order_count > 0 else False,
+            "achievement_rate": achievement_rate,
+        })
+
+    employee_store_rows.sort(
+        key=lambda x: (
+            x["employee_name"],
+            -x["actual_order_count"],
+            -x["target_order_count"],
+            x["store_name"],
+        )
+    )
+
+    max_employee_store_bar_value = max(
+        [max(row["actual_order_count"], row["target_order_count"]) for row in employee_store_rows] or [1]
+    )
+
+    for row in employee_store_rows:
+        row["actual_percent"] = (
+            round(row["actual_order_count"] / max_employee_store_bar_value * 100, 2)
+            if max_employee_store_bar_value else 0
+        )
+        row["target_percent"] = (
+            round(row["target_order_count"] / max_employee_store_bar_value * 100, 2)
+            if max_employee_store_bar_value else 0
+        )
 
     # ===== 2. 员工订单量 =====
     employee_rows = []
@@ -2379,10 +2503,9 @@ def _build_employee_whiteboard_data(
 
     # ===== 4. 顶部概览 =====
     reached_store_count = len([row for row in store_rows if row["is_reached"]])
+    employee_store_reached_count = len([row for row in employee_store_rows if row["is_reached"]])
     total_actual_orders = sum(row["actual_order_count"] for row in store_rows)
     total_target_orders = sum(row["target_order_count"] for row in store_rows)
-
-    top_employee = employee_rows[0] if employee_rows else None
 
     return {
         "year": year,
@@ -2397,14 +2520,282 @@ def _build_employee_whiteboard_data(
         "total_actual_orders": total_actual_orders,
         "total_target_orders": total_target_orders,
 
+        "employee_store_rows": employee_store_rows,
+        "employee_store_count": len(employee_store_rows),
+        "employee_store_reached_count": employee_store_reached_count,
+        "employee_store_title_name": (
+            "全部员工"
+            if can_view_all_employee_store_rows and selected_employee_name == "all"
+            else (selected_employee_name or current_employee_name or "-")
+        ),
+        "employee_store_can_view_all": can_view_all_employee_store_rows,
+        "employee_store_selected_employee": selected_employee_name if can_view_all_employee_store_rows else current_employee_name,
+        "employee_store_employee_options": available_employee_store_names if can_view_all_employee_store_rows else [],
+
         "employee_rows": employee_rows,
         "employee_count": len(employee_rows),
-        "top_employee": top_employee,
         "commission_nodes": commission_node_rows,
         "employee_axis_max": employee_axis_max,
 
         "attendance_rows": attendance_display_rows,
         "attendance_count": len(attendance_display_rows),
+    }
+
+
+def _build_personal_store_target_rows(
+        session: Session,
+        employee: User,
+        year: int,
+        month: int
+) -> List[dict]:
+    """Build per-store personal target rows for one bonus-eligible employee."""
+    if not _employee_participates_personal_store_bonus(employee):
+        return []
+
+    month_start, month_end = _get_month_start_end(year, month)
+    days_in_month = calendar.monthrange(year, month)[1]
+
+    store_target_map = {}
+    for store_obj in get_store_list(session):
+        if not getattr(store_obj, "is_active", True):
+            continue
+        store_target_map[store_obj.name] = _get_store_active_room_count(session, store_obj) * days_in_month * 2
+
+    games = session.exec(
+        select(GameRecord).where(
+            GameRecord.status == "formed",
+            GameRecord.who_did == employee.display_name,
+            GameRecord.record_date >= month_start,
+            GameRecord.record_date <= month_end
+        )
+    ).all()
+
+    store_order_count_map = {}
+    for game in games:
+        store_name = _normalize_text(game.store_name)
+        if store_name and store_name in store_target_map:
+            store_order_count_map[store_name] = store_order_count_map.get(store_name, 0) + 1
+
+    rows = []
+    max_bar_value = 1
+    for store_name, order_count in store_order_count_map.items():
+        if order_count <= 0:
+            continue
+        target_order_count = round((store_target_map.get(store_name, 0) or 0) / 6, 2)
+        is_reached = order_count >= target_order_count if target_order_count > 0 else False
+        row = {
+            "employee_name": employee.display_name,
+            "store_name": store_name,
+            "actual_order_count": order_count,
+            "target_order_count": target_order_count,
+            "remaining_order_count": round(max(target_order_count - order_count, 0), 2),
+            "is_reached": is_reached,
+            "achievement_rate": round(order_count / target_order_count * 100, 2) if target_order_count > 0 else 0.0,
+        }
+        rows.append(row)
+        max_bar_value = max(max_bar_value, order_count, target_order_count)
+
+    rows.sort(key=lambda x: (x["actual_order_count"], x["target_order_count"]), reverse=True)
+    for row in rows:
+        row["actual_percent"] = round(row["actual_order_count"] / max_bar_value * 100, 2) if max_bar_value else 0
+        row["target_percent"] = round(row["target_order_count"] / max_bar_value * 100, 2) if max_bar_value else 0
+
+    return rows
+
+
+def _calc_personal_store_bonus(
+        session: Session,
+        employee: User,
+        year: int,
+        month: int
+) -> Tuple[int, float]:
+    reached_count = len([
+        row for row in _build_personal_store_target_rows(session, employee, year, month)
+        if row["is_reached"]
+    ])
+    return reached_count, round(reached_count * 100.0, 2)
+
+
+def _work_mistake_status_label(status: str) -> str:
+    return {
+        "active": "有效",
+        "withdrawn": "已撤回",
+        "deleted": "已删除",
+    }.get(status or "active", status or "有效")
+
+
+def _work_mistake_payload(item: EmployeeWorkMistakeRecord) -> dict:
+    return {
+        "id": item.id,
+        "user_id": item.user_id,
+        "employee_name": item.employee_name_snapshot,
+        "mistake_date": str(item.mistake_date),
+        "content": item.content or "",
+        "deduct_amount": round(float(item.deduct_amount or 0), 2),
+        "status": item.status,
+        "status_label": _work_mistake_status_label(item.status),
+        "is_deleted": bool(item.is_deleted),
+        "salary_flow_id": item.salary_flow_id,
+        "created_by_name": item.created_by_name or "",
+        "created_at": item.created_at.strftime("%Y-%m-%d %H:%M:%S") if item.created_at else "",
+        "updated_at": item.updated_at.strftime("%Y-%m-%d %H:%M:%S") if item.updated_at else "",
+        "withdrawn_by_name": item.withdrawn_by_name or "",
+        "withdrawn_at": item.withdrawn_at.strftime("%Y-%m-%d %H:%M:%S") if item.withdrawn_at else "",
+        "deleted_by_name": item.deleted_by_name or "",
+        "deleted_at": item.deleted_at.strftime("%Y-%m-%d %H:%M:%S") if item.deleted_at else "",
+    }
+
+
+def _sync_work_mistake_salary_flow(
+        session: Session,
+        *,
+        mistake: EmployeeWorkMistakeRecord,
+        target_user: User,
+        operator: User
+) -> SalaryFlowRecord:
+    now = datetime.now()
+    is_active = mistake.status == "active" and not mistake.is_deleted
+    amount = -round(float(mistake.deduct_amount or 0), 2) if is_active else 0.0
+    title = "工作失误扣款" if is_active else f"工作失误扣款（{_work_mistake_status_label(mistake.status)}）"
+    description = (
+        f"{mistake.mistake_date} {target_user.display_name} 工作失误：{mistake.content}。"
+        f"{'扣款' if is_active else '原扣款已作废'} {abs(float(mistake.deduct_amount or 0)):.2f} 元。"
+    )
+
+    flow = session.get(SalaryFlowRecord, mistake.salary_flow_id) if mistake.salary_flow_id else None
+    if not flow:
+        flow = SalaryFlowRecord(
+            user_id=target_user.id,
+            employee_name_snapshot=target_user.display_name,
+            salary_year=mistake.salary_year,
+            salary_month=mistake.salary_month,
+            flow_date=mistake.mistake_date,
+            flow_category="deduction",
+            flow_type="mistake_deduct",
+            amount=amount,
+            title=title,
+            description=description,
+            source_type="work_mistake",
+            source_id=mistake.id,
+            is_auto=False,
+            is_locked=False,
+            is_visible_to_employee=not mistake.is_deleted,
+            created_by_user_id=operator.id,
+            created_by_name=operator.display_name,
+            created_at=now,
+            updated_at=now
+        )
+        session.add(flow)
+        session.flush()
+        mistake.salary_flow_id = flow.id
+    else:
+        if getattr(flow, "is_locked", False):
+            raise ValueError("对应工资流水已锁定，不能修改工作失误")
+        flow.user_id = target_user.id
+        flow.employee_name_snapshot = target_user.display_name
+        flow.salary_year = mistake.salary_year
+        flow.salary_month = mistake.salary_month
+        flow.flow_date = mistake.mistake_date
+        flow.flow_category = "deduction"
+        flow.flow_type = "mistake_deduct"
+        flow.amount = amount
+        flow.title = title
+        flow.description = description
+        flow.source_type = "work_mistake"
+        flow.source_id = mistake.id
+        flow.is_visible_to_employee = not mistake.is_deleted
+        flow.updated_at = now
+        session.add(flow)
+
+    session.add(mistake)
+    return flow
+
+
+def _build_my_assessment_data(
+        session: Session,
+        *,
+        current_user: User,
+        year: int,
+        month: int,
+        selected_user_id: Optional[int] = None,
+        mistake_status_filter: str = "active"
+) -> dict:
+    can_filter_employee = current_user.role == "admin"
+    employee_options = session.exec(
+        select(User).order_by(User.is_active.desc(), User.display_name)
+    ).all() if can_filter_employee else []
+
+    target_user = current_user
+    if can_filter_employee and selected_user_id:
+        target_user = session.get(User, selected_user_id) or current_user
+    elif can_filter_employee and employee_options:
+        target_user = employee_options[0]
+
+    order_count = _get_employee_order_count_for_month(session, target_user.display_name, year, month)
+    commission_nodes = [660, 710, 760, 810, 860]
+    while commission_nodes[-1] < order_count:
+        commission_nodes.append(commission_nodes[-1] + 50)
+    axis_max = max(order_count, commission_nodes[-1], 1)
+
+    personal_store_rows = _build_personal_store_target_rows(session, target_user, year, month)
+    reached_store_count = len([row for row in personal_store_rows if row["is_reached"]])
+    personal_store_bonus_total = round(reached_store_count * 100.0, 2)
+
+    query = select(EmployeeWorkMistakeRecord).where(
+        EmployeeWorkMistakeRecord.user_id == target_user.id,
+        EmployeeWorkMistakeRecord.salary_year == year,
+        EmployeeWorkMistakeRecord.salary_month == month
+    )
+    if not can_filter_employee:
+        query = query.where(EmployeeWorkMistakeRecord.is_deleted == False)
+    elif mistake_status_filter == "deleted":
+        query = query.where(EmployeeWorkMistakeRecord.is_deleted == True)
+    elif mistake_status_filter != "all":
+        query = query.where(EmployeeWorkMistakeRecord.is_deleted == False)
+
+    mistake_rows = session.exec(
+        query.order_by(
+            EmployeeWorkMistakeRecord.mistake_date.desc(),
+            EmployeeWorkMistakeRecord.id.desc()
+        )
+    ).all()
+    active_mistake_rows = session.exec(
+        select(EmployeeWorkMistakeRecord).where(
+            EmployeeWorkMistakeRecord.user_id == target_user.id,
+            EmployeeWorkMistakeRecord.salary_year == year,
+            EmployeeWorkMistakeRecord.salary_month == month,
+            EmployeeWorkMistakeRecord.status == "active",
+            EmployeeWorkMistakeRecord.is_deleted == False
+        )
+    ).all()
+    active_mistake_deduct_total = round(sum(
+        float(item.deduct_amount or 0)
+        for item in active_mistake_rows
+    ), 2)
+
+    return {
+        "year": year,
+        "month": month,
+        "month_start": date(year, month, 1),
+        "month_end": date(year, month, calendar.monthrange(year, month)[1]),
+        "target_user": target_user,
+        "selected_user_id": target_user.id,
+        "employee_options": employee_options,
+        "can_filter_employee": can_filter_employee,
+        "mistake_status_filter": mistake_status_filter,
+        "order_count": order_count,
+        "order_bar_percent": round(order_count / axis_max * 100, 2) if axis_max else 0,
+        "commission_nodes": [
+            {"value": node, "percent": round(node / axis_max * 100, 2)}
+            for node in commission_nodes
+            if node <= axis_max
+        ],
+        "active_mistake_deduct_total": active_mistake_deduct_total,
+        "personal_store_reached_count": reached_store_count,
+        "personal_store_bonus_total": personal_store_bonus_total,
+        "personal_store_rows": personal_store_rows,
+        "mistake_rows": [_work_mistake_payload(item) for item in mistake_rows],
+        "today": date.today(),
     }
 
 # =========================
@@ -5261,6 +5652,21 @@ def _decode_duty_store_names(raw: Optional[str]) -> List[str]:
     return [_normalize_text(x) for x in raw.split(",") if _normalize_text(x)]
 
 
+def _normalize_duty_store_names(
+        session: Session,
+        store_names: Optional[List[str]]
+) -> List[str]:
+    active_store_names = {
+        s.name for s in session.exec(select(Store).where(Store.is_active == True)).all()
+    }
+    clean_store_names = []
+    for name in store_names or []:
+        clean = _normalize_text(name)
+        if clean and clean in active_store_names and clean not in clean_store_names:
+            clean_store_names.append(clean)
+    return clean_store_names
+
+
 def _build_root_redirect_url(
         store: Optional[str] = "",
         *,
@@ -5286,6 +5692,23 @@ def _active_store_duty_session(session: Session, user_id: int) -> Optional[Emplo
             EmployeeDutySession.ended_at.is_(None)
         ).order_by(EmployeeDutySession.started_at.desc(), EmployeeDutySession.id.desc())
     ).first()
+
+
+def _build_duty_scope_session(
+        duty: EmployeeDutySession,
+        store_names: List[str]
+) -> EmployeeDutySession:
+    return EmployeeDutySession(
+        user_id=duty.user_id,
+        employee_name=duty.employee_name,
+        action_type=duty.action_type,
+        store_names_json=_encode_duty_store_names(store_names),
+        started_at=duty.started_at,
+        reviewed_at=duty.reviewed_at,
+        ended_at=duty.ended_at,
+        created_at=duty.created_at,
+        updated_at=duty.updated_at
+    )
 
 
 def _active_login_duty_session(session: Session, user_id: int) -> Optional[EmployeeDutySession]:
@@ -5859,6 +6282,11 @@ def _get_employee_duty_store_names_for_date(
         user_id: int,
         target_date: date
 ) -> List[str]:
+    if target_date == date.today():
+        active = _active_store_duty_session(session, user_id)
+        if active:
+            return _decode_duty_store_names(active.store_names_json)
+
     day_start, day_end = _day_start_end(target_date)
     sessions = session.exec(
         select(EmployeeDutySession).where(
@@ -5875,6 +6303,28 @@ def _get_employee_duty_store_names_for_date(
             if store_name and store_name not in store_names:
                 store_names.append(store_name)
     return store_names
+
+
+def _run_store_duty_store_release_checks(
+        session: Session,
+        duty: EmployeeDutySession,
+        clicked_at: datetime,
+        store_names: List[str]
+) -> List[str]:
+    scope_duty = _build_duty_scope_session(duty, store_names)
+    messages = []
+
+    payment_result = _run_store_duty_payment_self_check(session, scope_duty, clicked_at)
+    messages.extend(payment_result.get("blocking_messages") or [])
+    messages.extend(
+        message.replace("请继续跟进", "请先处理完成后再移出负责门店")
+        for message in (payment_result.get("warning_messages") or [])
+    )
+
+    info_result = _run_store_duty_info_self_check(session, scope_duty, clicked_at)
+    messages.extend(info_result.get("blocking_messages") or [])
+
+    return messages
 
 
 def _build_daily_store_work_url(
@@ -6072,6 +6522,7 @@ async def enforce_employee_duty_release(request: Request, call_next):
         "/change-password",
         "/register",
         "/employee-duty/start",
+        "/employee-duty/update-stores",
         "/employee-duty/review",
         "/employee-duty/end",
     }
@@ -6307,14 +6758,7 @@ async def start_employee_store_duty(
     if user.role == "admin":
         return RedirectResponse(url=f"/?store={current_store}", status_code=303)
 
-    active_store_names = {
-        s.name for s in session.exec(select(Store).where(Store.is_active == True)).all()
-    }
-    clean_store_names = []
-    for name in store_names or []:
-        clean = _normalize_text(name)
-        if clean and clean in active_store_names and clean not in clean_store_names:
-            clean_store_names.append(clean)
+    clean_store_names = _normalize_duty_store_names(session, store_names)
 
     if not clean_store_names:
         return RedirectResponse(
@@ -6347,6 +6791,87 @@ async def start_employee_store_duty(
     )
     response.delete_cookie(DUTY_REVIEW_SESSION_COOKIE)
     return response
+
+
+@app.post("/employee-duty/update-stores")
+async def update_employee_store_duty_stores(
+        store_names: Optional[List[str]] = Form(None),
+        current_store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role == "admin" or _is_logistics_employee(user):
+        return RedirectResponse(url=_build_root_redirect_url(current_store), status_code=303)
+
+    active = _active_store_duty_session(session, user.id)
+    if not active:
+        return RedirectResponse(
+            url=_build_root_redirect_url(current_store, error="当前没有进行中的带店记录，无法调整负责门店"),
+            status_code=303
+        )
+
+    clean_store_names = _normalize_duty_store_names(session, store_names)
+    if not clean_store_names:
+        return RedirectResponse(
+            url=_build_root_redirect_url(current_store, error="请至少保留一个负责门店；如需下班请直接结束带店"),
+            status_code=303
+        )
+
+    old_store_names = _decode_duty_store_names(active.store_names_json)
+    if clean_store_names == old_store_names:
+        return RedirectResponse(
+            url=_build_root_redirect_url(clean_store_names[0], success="负责门店未发生变化"),
+            status_code=303
+        )
+
+    removed_store_names = [name for name in old_store_names if name not in clean_store_names]
+    clicked_at = datetime.now()
+    if removed_store_names:
+        release_messages = _run_store_duty_store_release_checks(
+            session=session,
+            duty=active,
+            clicked_at=clicked_at,
+            store_names=removed_store_names
+        )
+        if release_messages:
+            return RedirectResponse(
+                url=_build_root_redirect_url(
+                    current_store or old_store_names[0],
+                    error="以下门店仍有未完成事项，暂时不能移出负责范围：\n" + "\n".join(release_messages)
+                ),
+                status_code=303
+            )
+
+    active.ended_at = clicked_at
+    active.updated_at = clicked_at
+    session.add(active)
+
+    new_duty = EmployeeDutySession(
+        user_id=user.id,
+        employee_name=user.display_name,
+        action_type=DUTY_ACTION_STORE,
+        store_names_json=_encode_duty_store_names(clean_store_names),
+        started_at=clicked_at,
+        reviewed_at=None,
+        ended_at=None,
+        created_at=clicked_at,
+        updated_at=clicked_at
+    )
+    session.add(new_duty)
+    session.commit()
+
+    removed_text = f"；已移出：{'、'.join(removed_store_names)}" if removed_store_names else ""
+    added_store_names = [name for name in clean_store_names if name not in old_store_names]
+    added_text = f"；已新增：{'、'.join(added_store_names)}" if added_store_names else ""
+    return RedirectResponse(
+        url=_build_root_redirect_url(
+            clean_store_names[0],
+            success=f"负责门店已更新，当前负责：{'、'.join(clean_store_names)}{removed_text}{added_text}"
+        ),
+        status_code=303
+    )
 
 
 @app.post("/employee-duty/review")
@@ -6546,6 +7071,9 @@ async def employees_page(
         # 不传时默认结算当前月份。
         settlement_year: Optional[int] = None,
         settlement_month: Optional[int] = None,
+        whiteboard_employee: str = "all",
+        assessment_user_id: Optional[int] = None,
+        assessment_mistake_status: str = "active",
         duty_date_filter: str = "today",
         duty_start_date: str = "",
         duty_end_date: str = "",
@@ -6586,8 +7114,8 @@ async def employees_page(
         "attendance_manage",
         "salary_flows",
         "whiteboard",
+        "my_assessment",
         "salary_settlement",
-        "team_assessment",
         "duty_sessions",
     ]
 
@@ -6596,10 +7124,8 @@ async def employees_page(
         "my_hourly_subsidy",
         "my_attendance",
         "whiteboard",
+        "my_assessment",
         "my_salary",
-
-        # 普通员工也可以查看团队考核页，但前端只读，不展示任何操作按钮
-        "team_assessment",
     ]
 
     if user.role == "admin":
@@ -6644,6 +7170,7 @@ async def employees_page(
     my_leave_requests = []
     my_replacement_requests = []
     leave_approval_requests = []
+    logistics_leave_map = {}
     pending_leave_count = 0
     my_current_month_leave_count = 0
     flexible_replacement_employees = []
@@ -6669,6 +7196,7 @@ async def employees_page(
 
     # ===== 7. 激励白板数据 =====
     whiteboard_data = None
+    my_assessment_data = None
 
     # ===== 8. 团队管理与团队考核数据 =====
     team_management_data = None
@@ -6724,6 +7252,7 @@ async def employees_page(
             if employee.id != user.id
             and employee.role != "admin"
             and (employee.employee_type or "regular") != "flexible"
+            and (employee.employee_type or "regular") != "logistics"
         ]
         today = date.today()
         month_start = today.replace(day=1)
@@ -6744,6 +7273,9 @@ async def employees_page(
                 EmployeeLeaveRequest.id.desc()
             )
         ).all()
+        for item in leave_approval_requests:
+            applicant = session.get(User, item.user_id)
+            logistics_leave_map[item.id] = _is_logistics_employee(applicant)
         flexible_replacement_employees = [
             employee for employee in active_employees
             if (employee.employee_type or "regular") == "flexible"
@@ -6857,7 +7389,22 @@ async def employees_page(
         whiteboard_data = _build_employee_whiteboard_data(
             session=session,
             year=today.year,
-            month=today.month
+            month=today.month,
+            current_user=user,
+            selected_employee_name=whiteboard_employee
+        )
+
+    if tab == "my_assessment":
+        today = date.today()
+        if assessment_mistake_status not in {"active", "all", "deleted"}:
+            assessment_mistake_status = "active"
+        my_assessment_data = _build_my_assessment_data(
+            session=session,
+            current_user=user,
+            year=today.year,
+            month=today.month,
+            selected_user_id=assessment_user_id,
+            mistake_status_filter=assessment_mistake_status
         )
 
     # 全员可见：
@@ -7004,6 +7551,7 @@ async def employees_page(
         "request": request,
         "page_name": "employees",
         "current_user": user,
+        "current_user_is_logistics": _is_logistics_employee(user),
         "current_store": store,
         "store_list": store_list,
 
@@ -7029,6 +7577,7 @@ async def employees_page(
         "my_leave_requests": my_leave_requests,
         "my_replacement_requests": my_replacement_requests,
         "leave_approval_requests": leave_approval_requests,
+        "logistics_leave_map": logistics_leave_map,
         "pending_leave_count": pending_leave_count,
         "my_current_month_leave_count": my_current_month_leave_count,
         "flexible_replacement_employees": flexible_replacement_employees,
@@ -7069,6 +7618,8 @@ async def employees_page(
 
         # 激励白板数据
         "whiteboard_data": whiteboard_data,
+        "my_assessment_data": my_assessment_data,
+        "work_mistake_status_label": _work_mistake_status_label,
 
         # 团队管理与团队考核模块数据
         "team_management_data": team_management_data,
@@ -7468,6 +8019,8 @@ async def employee_shift_swap_apply(
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="请选择有效的换班员工"), status_code=303)
     if user.role == "admin" or target.role == "admin":
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="管理员不参与普通换班"), status_code=303)
+    if (user.employee_type or "regular") == "logistics" or (target.employee_type or "regular") == "logistics":
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="后勤类型员工不能参与换班"), status_code=303)
     if (user.employee_type or "regular") == "flexible" or (target.employee_type or "regular") == "flexible":
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="机动类型员工不能参与普通换班"), status_code=303)
 
@@ -7537,6 +8090,8 @@ async def employee_shift_swap_respond(
     applicant = session.get(User, item.applicant_user_id)
     if not applicant:
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="申请员工账号不存在"), status_code=303)
+    if (user.employee_type or "regular") == "logistics" or (applicant.employee_type or "regular") == "logistics":
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="后勤类型员工不能参与换班"), status_code=303)
     if (
         not applicant.is_active
         or not user.is_active
@@ -8103,6 +8658,69 @@ async def employee_leave_rest_replacement(
             status_code=303
         )
 
+    applicant = session.get(User, leave_req.user_id)
+    if not applicant:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请假员工账号不存在", 404)
+        return RedirectResponse(
+            url=_build_employees_url(store, "leave_approval", error="请假员工账号不存在"),
+            status_code=303
+        )
+
+    if _is_logistics_employee(applicant):
+        now = datetime.now()
+        approval_note = _normalize_text(approval_note)
+        applicant_deduct = _calc_employee_leave_deduct(
+            session=session,
+            employee=applicant,
+            leave_date=leave_req.leave_date,
+            shift_type=leave_req.shift_type
+        )
+        leave_req.approved_by_user_id = user.id
+        leave_req.approved_by_name = user.display_name
+        leave_req.approved_at = now
+        leave_req.approval_note = approval_note or None
+        leave_req.updated_at = now
+        session.add(leave_req)
+
+        _finalize_leave_for_applicant(
+            session=session,
+            leave_req=leave_req,
+            applicant=applicant,
+            operator=user,
+            final_deduct=applicant_deduct,
+            status="approved",
+            approval_note=approval_note,
+            attendance_remark="后勤员工请假，管理员审批通过后直接扣除固定日薪 88.5 元，不参与顶班。"
+        )
+        _create_employee_notification(
+            session=session,
+            target_user=applicant,
+            related_user=user,
+            title="请假已批准",
+            content=f"管理员已批准您 {leave_req.leave_date} 的请假，已按后勤固定日薪扣款 {applicant_deduct:.2f} 元。",
+            notification_type="leave_approved",
+            source_type="leave_request",
+            source_id=leave_req.id,
+            created_at=now
+        )
+        session.commit()
+        session.refresh(leave_req)
+
+        if _is_ajax_request(request):
+            return _employee_ajax_success(
+                message="已批准后勤员工请假并扣除固定日薪",
+                action="leave_approved",
+                payload={
+                    "leave": _leave_request_payload(leave_req)
+                }
+            )
+
+        return RedirectResponse(
+            url=_build_employees_url(store, "leave_approval", success="已批准后勤员工请假并扣除固定日薪"),
+            status_code=303
+        )
+
     replacement = _find_leave_replacement_employee(
         session=session,
         applicant_user_id=leave_req.user_id,
@@ -8199,6 +8817,11 @@ async def employee_leave_flexible_replacement(
         if _is_ajax_request(request):
             return _employee_ajax_error("请假员工或机动员工账号不存在", 404)
         return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="请假员工或机动员工账号不存在"), status_code=303)
+    if _is_logistics_employee(applicant):
+        message = "后勤员工请假无需安排机动顶班，请直接批准并扣除固定日薪"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
     if not replacement.is_active or (replacement.employee_type or "regular") != "flexible":
         if _is_ajax_request(request):
             return _employee_ajax_error("请选择在职的机动类型员工")
@@ -9589,7 +10212,6 @@ async def employee_salary_flow_add(
     description = _normalize_text(description)
 
     allowed_flow_types = {
-        "mistake_deduct",
         "replacement_pay",
         "overtime_pay",
         "manual_bonus",
@@ -9630,7 +10252,7 @@ async def employee_salary_flow_add(
 
     # ===== 根据类型兜底判断金额方向 =====
     # 这些类型原则上应为扣款，如果前端误传 add，这里仍强制转成负数。
-    if flow_type in {"mistake_deduct", "manual_deduct"}:
+    if flow_type in {"manual_deduct"}:
         signed_amount = -amount_value
 
     # 这些类型原则上应为加钱，如果前端误传 deduct，这里仍强制转成正数。
@@ -9640,7 +10262,7 @@ async def employee_salary_flow_add(
     # ===== 自动归类 =====
     if flow_type in {"replacement_pay", "overtime_pay"}:
         flow_category = "replacement_work"
-    elif flow_type in {"mistake_deduct", "manual_deduct"}:
+    elif flow_type in {"manual_deduct"}:
         flow_category = "deduction"
     elif flow_type == "manual_bonus":
         flow_category = "bonus"
@@ -9756,6 +10378,14 @@ async def employee_salary_flow_edit(
             status_code=303
         )
 
+    if salary_flow.source_type == "work_mistake" or salary_flow.flow_type == "mistake_deduct":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("工作失误扣款请在“我的考核”里编辑")
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error="工作失误扣款请在“我的考核”里编辑"),
+            status_code=303
+        )
+
     if getattr(salary_flow, "is_locked", False):
         if _is_ajax_request(request):
             return _employee_ajax_error("该工资流水已锁定，不能编辑")
@@ -9797,7 +10427,6 @@ async def employee_salary_flow_edit(
     description = _normalize_text(description)
 
     allowed_flow_types = {
-        "mistake_deduct",
         "replacement_pay",
         "overtime_pay",
         "manual_bonus",
@@ -9831,14 +10460,14 @@ async def employee_salary_flow_edit(
         )
 
     signed_amount = amount_value if amount_action == "add" else -amount_value
-    if flow_type in {"mistake_deduct", "manual_deduct"}:
+    if flow_type in {"manual_deduct"}:
         signed_amount = -amount_value
     if flow_type in {"replacement_pay", "overtime_pay", "manual_bonus"}:
         signed_amount = amount_value
 
     if flow_type in {"replacement_pay", "overtime_pay"}:
         flow_category = "replacement_work"
-    elif flow_type in {"mistake_deduct", "manual_deduct"}:
+    elif flow_type in {"manual_deduct"}:
         flow_category = "deduction"
     elif flow_type == "manual_bonus":
         flow_category = "bonus"
@@ -9933,6 +10562,14 @@ async def employee_salary_flow_delete(
             status_code=303
         )
 
+    if salary_flow.source_type == "work_mistake" or salary_flow.flow_type == "mistake_deduct":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("工作失误扣款请在“我的考核”里撤回或删除")
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error="工作失误扣款请在“我的考核”里撤回或删除"),
+            status_code=303
+        )
+
     if getattr(salary_flow, "is_locked", False):
         if _is_ajax_request(request):
             return _employee_ajax_error("该工资流水已锁定，不能删除")
@@ -9959,6 +10596,293 @@ async def employee_salary_flow_delete(
         status_code=303
     )
 
+
+def _parse_form_date(value: str, fallback: Optional[date] = None) -> date:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except Exception:
+        if fallback:
+            return fallback
+        raise ValueError("日期格式不正确")
+
+
+def _get_admin_work_mistake_target(session: Session, user_id: int) -> User:
+    target_user = session.get(User, user_id)
+    if not target_user:
+        raise ValueError("员工不存在")
+    return target_user
+
+
+@app.post("/employees/work-mistakes/create")
+async def employee_work_mistake_create(
+        store: str = Form(""),
+        assessment_user_id: Optional[int] = Form(None),
+        assessment_mistake_status: str = Form("active"),
+        user_id: int = Form(...),
+        mistake_date: str = Form(""),
+        content: str = Form(""),
+        deduct_amount: float = Form(...),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(
+            url=_build_my_assessment_url(store, error="只有管理员可以发布工作失误"),
+            status_code=303
+        )
+
+    try:
+        target_user = _get_admin_work_mistake_target(session, user_id)
+        mistake_d = _parse_form_date(mistake_date, date.today())
+        content = _normalize_text(content)
+        amount = round(abs(_safe_float(deduct_amount)), 2)
+        if not content:
+            raise ValueError("失误内容不能为空")
+        if amount <= 0:
+            raise ValueError("扣款金额必须大于 0")
+        if _is_salary_month_paid_or_locked(session, target_user.id, mistake_d.year, mistake_d.month):
+            raise ValueError("该员工该月工资已发放或锁定，不能发布工作失误")
+
+        now = datetime.now()
+        mistake = EmployeeWorkMistakeRecord(
+            user_id=target_user.id,
+            employee_name_snapshot=target_user.display_name,
+            mistake_date=mistake_d,
+            salary_year=mistake_d.year,
+            salary_month=mistake_d.month,
+            content=content,
+            deduct_amount=amount,
+            status="active",
+            is_deleted=False,
+            created_by_user_id=user.id,
+            created_by_name=user.display_name,
+            created_at=now,
+            updated_at=now
+        )
+        session.add(mistake)
+        session.flush()
+        _sync_work_mistake_salary_flow(session, mistake=mistake, target_user=target_user, operator=user)
+        _refresh_salary_settlement_totals_if_exists(session, target_user.id, mistake.salary_year, mistake.salary_month)
+        session.commit()
+    except ValueError as e:
+        session.rollback()
+        return RedirectResponse(
+            url=_build_my_assessment_url(
+                store,
+                assessment_user_id=assessment_user_id,
+                assessment_mistake_status=assessment_mistake_status,
+                error=str(e)
+            ),
+            status_code=303
+        )
+
+    return RedirectResponse(
+        url=_build_my_assessment_url(
+            store,
+            assessment_user_id=target_user.id,
+            assessment_mistake_status=assessment_mistake_status,
+            success="工作失误已发布"
+        ),
+        status_code=303
+    )
+
+
+@app.post("/employees/work-mistakes/edit/{mistake_id}")
+async def employee_work_mistake_edit(
+        mistake_id: int,
+        store: str = Form(""),
+        assessment_user_id: Optional[int] = Form(None),
+        assessment_mistake_status: str = Form("active"),
+        user_id: int = Form(...),
+        mistake_date: str = Form(""),
+        content: str = Form(""),
+        deduct_amount: float = Form(...),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_my_assessment_url(store, error="只有管理员可以编辑工作失误"), status_code=303)
+
+    try:
+        mistake = session.get(EmployeeWorkMistakeRecord, mistake_id)
+        if not mistake or mistake.is_deleted:
+            raise ValueError("工作失误记录不存在或已删除")
+        if mistake.status != "active":
+            raise ValueError("只有有效状态的工作失误可以编辑")
+        if _is_salary_month_paid_or_locked(session, mistake.user_id, mistake.salary_year, mistake.salary_month):
+            raise ValueError("该员工该月工资已发放或锁定，不能编辑工作失误")
+        old_user_id = mistake.user_id
+        old_year = mistake.salary_year
+        old_month = mistake.salary_month
+
+        target_user = _get_admin_work_mistake_target(session, user_id)
+        mistake_d = _parse_form_date(mistake_date)
+        if _is_salary_month_paid_or_locked(session, target_user.id, mistake_d.year, mistake_d.month):
+            raise ValueError("目标员工该月工资已发放或锁定，不能编辑工作失误")
+        flow = session.get(SalaryFlowRecord, mistake.salary_flow_id) if mistake.salary_flow_id else None
+        if flow and getattr(flow, "is_locked", False):
+            raise ValueError("对应工资流水已锁定，不能编辑工作失误")
+
+        content = _normalize_text(content)
+        amount = round(abs(_safe_float(deduct_amount)), 2)
+        if not content:
+            raise ValueError("失误内容不能为空")
+        if amount <= 0:
+            raise ValueError("扣款金额必须大于 0")
+
+        mistake.user_id = target_user.id
+        mistake.employee_name_snapshot = target_user.display_name
+        mistake.mistake_date = mistake_d
+        mistake.salary_year = mistake_d.year
+        mistake.salary_month = mistake_d.month
+        mistake.content = content
+        mistake.deduct_amount = amount
+        mistake.updated_at = datetime.now()
+        _sync_work_mistake_salary_flow(session, mistake=mistake, target_user=target_user, operator=user)
+        _refresh_salary_settlement_totals_if_exists(session, old_user_id, old_year, old_month)
+        _refresh_salary_settlement_totals_if_exists(session, target_user.id, mistake.salary_year, mistake.salary_month)
+        session.commit()
+    except ValueError as e:
+        session.rollback()
+        return RedirectResponse(
+            url=_build_my_assessment_url(
+                store,
+                assessment_user_id=assessment_user_id,
+                assessment_mistake_status=assessment_mistake_status,
+                error=str(e)
+            ),
+            status_code=303
+        )
+
+    return RedirectResponse(
+        url=_build_my_assessment_url(
+            store,
+            assessment_user_id=target_user.id,
+            assessment_mistake_status=assessment_mistake_status,
+            success="工作失误已更新"
+        ),
+        status_code=303
+    )
+
+
+@app.post("/employees/work-mistakes/withdraw/{mistake_id}")
+async def employee_work_mistake_withdraw(
+        mistake_id: int,
+        store: str = Form(""),
+        assessment_user_id: Optional[int] = Form(None),
+        assessment_mistake_status: str = Form("active"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_my_assessment_url(store, error="只有管理员可以撤回工作失误"), status_code=303)
+
+    try:
+        mistake = session.get(EmployeeWorkMistakeRecord, mistake_id)
+        if not mistake or mistake.is_deleted:
+            raise ValueError("工作失误记录不存在或已删除")
+        if mistake.status != "active":
+            raise ValueError("只有有效状态的工作失误可以撤回")
+        if _is_salary_month_paid_or_locked(session, mistake.user_id, mistake.salary_year, mistake.salary_month):
+            raise ValueError("该员工该月工资已发放或锁定，不能撤回工作失误")
+        target_user = session.get(User, mistake.user_id)
+        if not target_user:
+            raise ValueError("员工不存在")
+
+        now = datetime.now()
+        mistake.status = "withdrawn"
+        mistake.withdrawn_by_user_id = user.id
+        mistake.withdrawn_by_name = user.display_name
+        mistake.withdrawn_at = now
+        mistake.updated_at = now
+        _sync_work_mistake_salary_flow(session, mistake=mistake, target_user=target_user, operator=user)
+        _refresh_salary_settlement_totals_if_exists(session, target_user.id, mistake.salary_year, mistake.salary_month)
+        session.commit()
+    except ValueError as e:
+        session.rollback()
+        return RedirectResponse(
+            url=_build_my_assessment_url(
+                store,
+                assessment_user_id=assessment_user_id,
+                assessment_mistake_status=assessment_mistake_status,
+                error=str(e)
+            ),
+            status_code=303
+        )
+
+    return RedirectResponse(
+        url=_build_my_assessment_url(
+            store,
+            assessment_user_id=mistake.user_id,
+            assessment_mistake_status=assessment_mistake_status,
+            success="工作失误已撤回"
+        ),
+        status_code=303
+    )
+
+
+@app.post("/employees/work-mistakes/delete/{mistake_id}")
+async def employee_work_mistake_delete(
+        mistake_id: int,
+        store: str = Form(""),
+        assessment_user_id: Optional[int] = Form(None),
+        assessment_mistake_status: str = Form("active"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_my_assessment_url(store, error="只有管理员可以删除工作失误"), status_code=303)
+
+    try:
+        mistake = session.get(EmployeeWorkMistakeRecord, mistake_id)
+        if not mistake or mistake.is_deleted:
+            raise ValueError("工作失误记录不存在或已删除")
+        if _is_salary_month_paid_or_locked(session, mistake.user_id, mistake.salary_year, mistake.salary_month):
+            raise ValueError("该员工该月工资已发放或锁定，不能删除工作失误")
+        target_user = session.get(User, mistake.user_id)
+        if not target_user:
+            raise ValueError("员工不存在")
+
+        now = datetime.now()
+        mistake.status = "deleted"
+        mistake.is_deleted = True
+        mistake.deleted_by_user_id = user.id
+        mistake.deleted_by_name = user.display_name
+        mistake.deleted_at = now
+        mistake.updated_at = now
+        _sync_work_mistake_salary_flow(session, mistake=mistake, target_user=target_user, operator=user)
+        _refresh_salary_settlement_totals_if_exists(session, target_user.id, mistake.salary_year, mistake.salary_month)
+        session.commit()
+    except ValueError as e:
+        session.rollback()
+        return RedirectResponse(
+            url=_build_my_assessment_url(
+                store,
+                assessment_user_id=assessment_user_id,
+                assessment_mistake_status=assessment_mistake_status,
+                error=str(e)
+            ),
+            status_code=303
+        )
+
+    return RedirectResponse(
+        url=_build_my_assessment_url(
+            store,
+            assessment_user_id=mistake.user_id,
+            assessment_mistake_status=assessment_mistake_status,
+            success="工作失误已删除"
+        ),
+        status_code=303
+    )
+
 # =========================
 # V3 工资结算：生成 / 重算全员工资
 # =========================
@@ -9976,12 +10900,10 @@ async def employee_salary_settlement_generate_all(
 
     生成内容：
     1. 基础工资；
-    2. 个人订单提成；
-    3. 团队奖金；
-    4. 全勤奖；
-    5. 销冠奖；
-    6. 汇总已有请假扣款、迟到扣款、旷工扣款、工资调整等流水；
-    7. 写入 MonthlySalarySettlement。
+    2. 单量提成；
+    3. 全勤奖；
+    4. 汇总已有请假扣款、迟到扣款、旷工扣款、工资调整等流水；
+    5. 写入 MonthlySalarySettlement。
 
     注意：
     paid / locked 状态的工资不能重算。
@@ -11392,10 +12314,15 @@ async def employee_team_assessment_calculate(
     计算团队月度考核。
 
     说明：
-    1. 只计算并保存 TeamMonthlyAssessment；
-    2. 不在本步生成工资流水；
-    3. 团队奖金真正进入员工工资，会在后续“工资结算”模块里处理。
+    团队考核已停用，保留路由只用于兼容旧页面误提交。
     """
+    if _is_ajax_request(request):
+        return _employee_ajax_error("团队考核已停用", 410)
+    return RedirectResponse(
+        url=_build_employees_url(store, "employee_list", error="团队考核已停用"),
+        status_code=303
+    )
+
     if not user:
         if _is_ajax_request(request):
             return _employee_ajax_error("请先登录", 401)

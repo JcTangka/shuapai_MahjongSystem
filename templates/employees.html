@@ -453,15 +453,16 @@
                     <i class="bi bi-bar-chart-line"></i>激励白板
                 </a>
 
+                <a class="employee-tab-link {% if active_tab == 'my_assessment' %}active{% endif %}"
+                   href="/employees?store={{ current_store }}&tab=my_assessment">
+                    <i class="bi bi-clipboard-data"></i>我的考核
+                </a>
+
                 <a class="employee-tab-link {% if active_tab == 'salary_settlement' %}active{% endif %}"
                    href="/employees?store={{ current_store }}&tab=salary_settlement">
                     <i class="bi bi-receipt"></i>工资结算
                 </a>
 
-                <a class="employee-tab-link {% if active_tab == 'team_assessment' %}active{% endif %}"
-                   href="/employees?store={{ current_store }}&tab=team_assessment">
-                    <i class="bi bi-diagram-3"></i>团队考核
-                </a>
                 <a class="employee-tab-link {% if active_tab == 'duty_sessions' %}active{% endif %}"
                    href="/employees?store={{ current_store }}&tab=duty_sessions">
                     <i class="bi bi-clock-history"></i>员工上班情况
@@ -491,9 +492,9 @@
                    href="/employees?store={{ current_store }}&tab=whiteboard">
                     <i class="bi bi-bar-chart-line"></i>激励白板
                 </a>
-                <a class="employee-tab-link {% if active_tab == 'team_assessment' %}active{% endif %}"
-                   href="/employees?store={{ current_store }}&tab=team_assessment">
-                    <i class="bi bi-diagram-3"></i>团队考核
+                <a class="employee-tab-link {% if active_tab == 'my_assessment' %}active{% endif %}"
+                   href="/employees?store={{ current_store }}&tab=my_assessment">
+                    <i class="bi bi-clipboard-data"></i>我的考核
                 </a>
             {% endif %}
 
@@ -864,7 +865,7 @@
                     <i class="bi bi-calendar-check me-1 text-primary"></i>请假审批
                 </div>
                 <div class="small text-muted mt-1">
-                    待审批 {{ pending_leave_count or 0 }} 条；管理员可选择休班顶班、机动顶班或拒绝申请。
+                    待审批 {{ pending_leave_count or 0 }} 条；普通员工请假可安排休班顶班或机动顶班，后勤员工请假同意后直接扣固定日薪 88.5 元。
                 </div>
             </div>
         </div>
@@ -990,7 +991,21 @@
                     <td>
                         {% if item.status == 'pending_admin_review' %}
                         <div class="d-flex flex-column gap-2">
-
+                            {% if logistics_leave_map.get(item.id) %}
+                            <form action="/employees/leaves/rest-replacement/{{ item.id }}"
+                                  method="post"
+                                  data-employee-ajax-form="1"
+                                  onsubmit="return confirm('确定批准这条后勤员工请假吗？系统将直接扣除固定日薪 88.5 元，并记录考勤和工资流水。');">
+                                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                <input type="text"
+                                       name="approval_note"
+                                       class="form-control form-control-sm mb-1"
+                                       placeholder="审批备注，可不填">
+                                <button type="submit" class="btn btn-sm btn-success w-100">
+                                    <i class="bi bi-check-circle me-1"></i>批准请假（扣 88.5）
+                                </button>
+                            </form>
+                            {% else %}
                             <form action="/employees/leaves/rest-replacement/{{ item.id }}"
                                   method="post"
                                   data-employee-ajax-form="1"
@@ -1024,6 +1039,7 @@
                                     <i class="bi bi-person-gear me-1"></i>机动顶班
                                 </button>
                             </form>
+                            {% endif %}
 
                             <form action="/employees/leaves/reject/{{ item.id }}"
                                   method="post"
@@ -1212,7 +1228,7 @@
             <i class="bi bi-clipboard2-check text-primary me-1"></i>考勤记录
         </h5>
         <div class="text-muted small">
-            登记迟到、旷工、其他考勤异常；扣款金额由管理员手动填写，并会进入工资流水。工作失误请在“工资调整”中登记。
+            登记迟到、旷工、其他考勤异常；扣款金额由管理员手动填写，并会进入工资流水。工作失误请在“我的考核”中发布。
         </div>
     </div>
 
@@ -1370,7 +1386,7 @@
                             <i class="bi bi-exclamation-triangle me-1"></i>登记说明
                         </div>
                         <div class="small">
-                            迟到、旷工固定影响全勤奖；“其他”是否影响全勤由管理员判断。工作失误不属于考勤，请后续在“工资调整”中登记。
+                            迟到、旷工固定影响全勤奖；“其他”是否影响全勤由管理员判断。工作失误不属于考勤，请在“我的考核”中发布。
                         </div>
                     </div>
 
@@ -1496,7 +1512,7 @@
             <i class="bi bi-cash-coin text-primary me-1"></i>工资调整
         </h5>
         <div class="text-muted small">
-            登记顶班补贴、加班补贴、工作失误扣款、临时奖金、临时扣款和工资修正。工作失误不影响全勤奖。
+            登记顶班补贴、加班补贴、临时奖金、临时扣款和工资修正。工作失误请在“我的考核”中发布，不影响全勤奖。
         </div>
     </div>
 
@@ -1544,6 +1560,7 @@
                     data-amount="{{ item.amount }}"
                     data-title="{{ item.title|e }}"
                     data-description="{{ (item.description or '')|e }}"
+                    data-source-type="{{ item.source_type or '' }}"
                     data-visible="{{ '1' if item.is_visible_to_employee else '0' }}">
                     <td class="fw-bold text-muted">#{{ item.id }}</td>
 
@@ -1619,7 +1636,11 @@
                     </td>
 
                     <td>
-                        {% if item.is_auto %}
+                        {% if item.source_type == 'work_mistake' or item.flow_type == 'mistake_deduct' %}
+                            <button class="btn btn-sm btn-outline-secondary" disabled>
+                                请到我的考核处理
+                            </button>
+                        {% elif item.is_auto %}
                             <button class="btn btn-sm btn-outline-secondary" disabled>
                                 来源记录生成
                             </button>
@@ -1649,7 +1670,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="13" class="text-muted py-5">
+                    <td colspan="12" class="text-muted py-5">
                         <i class="bi bi-inbox fs-1 d-block mb-3"></i>
                         暂无工资调整流水
                     </td>
@@ -1683,7 +1704,7 @@
                             <i class="bi bi-info-circle me-1"></i>说明
                         </div>
                         <div class="small">
-                            这里用于登记非自动计算的工资变化，例如工作失误扣款、顶班补贴、临时奖金等。工作失误不进入考勤记录，也不影响全勤奖。
+                            这里用于登记非自动计算的工资变化，例如顶班补贴、临时奖金等。工作失误请在“我的考核”中发布，不进入考勤记录，也不影响全勤奖。
                         </div>
                     </div>
 
@@ -1719,7 +1740,6 @@
                                 class="form-select"
                                 onchange="handleSalaryFlowTypeChange()"
                                 required>
-                            <option value="mistake_deduct">工作失误扣款</option>
                             <option value="replacement_pay">顶班补贴</option>
                             <option value="overtime_pay">加班补贴</option>
                             <option value="manual_bonus">临时奖金</option>
@@ -1847,7 +1867,6 @@
                                 class="form-select"
                                 onchange="handleSalaryFlowEditTypeChange()"
                                 required>
-                            <option value="mistake_deduct">工作失误扣款</option>
                             <option value="replacement_pay">顶班补贴</option>
                             <option value="overtime_pay">加班补贴</option>
                             <option value="manual_bonus">临时奖金</option>
@@ -1920,7 +1939,7 @@
      管理员：工资结算
      说明：
      1. 管理员选择年月后，可生成/重算全员工资；
-     2. 系统自动生成基础工资、个人提成、团队奖金、全勤奖、销冠奖；
+     2. 系统自动生成基础工资、单量提成、全勤奖；
      3. 请假扣款、迟到扣款、旷工扣款、工资调整等已有流水会一起进入最终工资；
      4. 确认、发放、锁定均采用 AJAX 局部刷新。
 ========================= -->
@@ -1933,7 +1952,7 @@
         </h5>
         <div class="text-muted small">
             当前结算月份：{{ salary_settlement_data.year }}年{{ salary_settlement_data.month }}月。
-            生成工资会重算未发放、未锁定员工的基础工资、提成、团队奖金和奖金项。
+            生成工资会重算未发放、未锁定员工的基础工资、单量提成和奖金项。
         </div>
     </div>
 
@@ -2044,7 +2063,7 @@
         <div class="employee-help-note mt-3">
             <div class="fw-bold text-dark mb-1">结算口径</div>
             <div>
-                应发工资 = 基础工资 + 个人提成 + 团队奖金 + 奖金项 + 工资调整流水 - 各类扣款。
+                应发工资 = 基础工资 + 单量提成 + 奖金项 + 工资调整流水 - 各类扣款。
                 应发工资还会加上“员工社保”；实发工资 = 应发工资 - 代缴社保。员工社保和代缴社保都可由管理员在结算列表中手动填写调整。
                 其中，请假扣款、迟到扣款、旷工扣款、工作失误扣款、顶班补贴、临时奖金等都来自工资流水表。
             </div>
@@ -2066,8 +2085,8 @@
                 <tr>
                     <th>员工</th>
                     <th>基础工资</th>
-                    <th>个人提成</th>
-                    <th>团队奖金</th>
+                    <th>单量提成</th>
+                    <th>个人门店达标奖</th>
                     <th>奖金</th>
                     <th>扣款</th>
                     <th>手工调整</th>
@@ -2102,7 +2121,7 @@
                     </td>
 
                     <td>
-                        <span class="fw-bold text-success">¥{{ '%.2f'|format(item.team_commission_total or 0) }}</span>
+                        <span class="fw-bold text-success">¥{{ '%.2f'|format(item.personal_store_bonus_total or 0) }}</span>
                     </td>
 
                     <td>
@@ -2281,6 +2300,263 @@
 </div>
 {% endif %}
 
+{% elif active_tab == 'my_assessment' %}
+
+{% if my_assessment_data %}
+<div class="d-flex justify-content-between align-items-start mb-3 flex-wrap gap-2">
+    <div>
+        <h5 class="whiteboard-section-title">
+            <i class="bi bi-clipboard-data text-primary me-1"></i>我的考核
+        </h5>
+        <div class="whiteboard-section-subtitle">
+            统计周期：{{ my_assessment_data.month_start }} 至 {{ my_assessment_data.month_end }}。
+            当前员工：{{ my_assessment_data.target_user.display_name }}
+        </div>
+    </div>
+
+    <span class="badge bg-primary fs-6 px-3 py-2">
+        {{ my_assessment_data.year }}年{{ my_assessment_data.month }}月
+    </span>
+</div>
+
+{% if current_user.role == 'admin' %}
+<div class="card employee-module-card mb-4">
+    <div class="card-body">
+        <form method="get" action="/employees" class="row g-3 align-items-end">
+            <input type="hidden" name="store" value="{{ current_store }}">
+            <input type="hidden" name="tab" value="my_assessment">
+            <div class="col-md-4">
+                <label class="form-label fw-bold">员工筛选</label>
+                <select class="form-select" name="assessment_user_id">
+                    {% for emp in my_assessment_data.employee_options %}
+                    <option value="{{ emp.id }}" {% if my_assessment_data.selected_user_id == emp.id %}selected{% endif %}>
+                        {{ emp.display_name }}{% if not emp.is_active %}（已停用）{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label fw-bold">工作失误记录</label>
+                <select class="form-select" name="assessment_mistake_status">
+                    <option value="active" {% if my_assessment_data.mistake_status_filter == 'active' %}selected{% endif %}>默认：隐藏已删除</option>
+                    <option value="all" {% if my_assessment_data.mistake_status_filter == 'all' %}selected{% endif %}>全部历史</option>
+                    <option value="deleted" {% if my_assessment_data.mistake_status_filter == 'deleted' %}selected{% endif %}>仅已删除</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-primary w-100" type="submit">查看</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card employee-module-card mb-4">
+    <div class="card-header bg-white py-3">
+        <div class="fw-bold"><i class="bi bi-exclamation-triangle text-danger me-1"></i>发布工作失误</div>
+        <div class="small text-muted mt-1">工作失误会同步生成员工可见的工资流水，并在管理员工资调整中显示。</div>
+    </div>
+    <div class="card-body">
+        <form action="/employees/work-mistakes/create" method="post" class="row g-3 align-items-end">
+            <input type="hidden" name="store" value="{{ current_store }}">
+            <input type="hidden" name="assessment_user_id" value="{{ my_assessment_data.selected_user_id }}">
+            <input type="hidden" name="assessment_mistake_status" value="{{ my_assessment_data.mistake_status_filter }}">
+            <div class="col-md-3">
+                <label class="form-label fw-bold">员工</label>
+                <select class="form-select" name="user_id" required>
+                    {% for emp in my_assessment_data.employee_options %}
+                    <option value="{{ emp.id }}" {% if my_assessment_data.selected_user_id == emp.id %}selected{% endif %}>
+                        {{ emp.display_name }}{% if not emp.is_active %}（已停用）{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-bold">失误日期</label>
+                <input type="date" class="form-control" name="mistake_date" value="{{ my_assessment_data.today }}" required>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label fw-bold">失误内容</label>
+                <input type="text" class="form-control" name="content" placeholder="填写认定原因" required>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-bold">扣款金额</label>
+                <input type="number" class="form-control" name="deduct_amount" step="0.01" min="0.01" required>
+            </div>
+            <div class="col-md-1">
+                <button class="btn btn-danger w-100" type="submit">发布</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
+
+<div class="row g-3 mb-4">
+    <div class="col-md-4">
+        <div class="card whiteboard-summary-card">
+            <div class="card-body">
+                <div class="whiteboard-summary-label">本月总订单量</div>
+                <div class="whiteboard-summary-value">{{ my_assessment_data.order_count }}</div>
+                <div class="small text-muted mt-1">本账号本月所有门店 formed 订单</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card whiteboard-summary-card">
+            <div class="card-body">
+                <div class="whiteboard-summary-label">我的总扣款</div>
+                <div class="whiteboard-summary-value text-danger">¥{{ '%.2f'|format(my_assessment_data.active_mistake_deduct_total or 0) }}</div>
+                <div class="small text-muted mt-1">有效工作失误扣款合计</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card whiteboard-summary-card">
+            <div class="card-body">
+                <div class="whiteboard-summary-label">个人门店达标奖</div>
+                <div class="whiteboard-summary-value text-success">¥{{ '%.2f'|format(my_assessment_data.personal_store_bonus_total or 0) }}</div>
+                <div class="small text-muted mt-1">达标 {{ my_assessment_data.personal_store_reached_count }} 个门店，每个 100 元</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card whiteboard-chart-card mb-4">
+    <div class="card-header bg-white py-3">
+        <div class="fw-bold"><i class="bi bi-person-lines-fill text-primary me-1"></i>我的本月订单量</div>
+        <div class="small text-muted mt-1">红色竖线为个人提成关键节点：660、710、760、810、860……。</div>
+    </div>
+    <div class="card-body">
+        <div class="whiteboard-bar-row">
+            <div class="row g-3 align-items-center">
+                <div class="col-md-3">
+                    <div class="whiteboard-bar-label">{{ my_assessment_data.target_user.display_name }}</div>
+                    <div class="whiteboard-bar-meta">本月 {{ my_assessment_data.order_count }} 单</div>
+                </div>
+                <div class="col-md-7">
+                    <div class="whiteboard-bar-track">
+                        <div class="whiteboard-bar-fill warning" style="width: {{ my_assessment_data.order_bar_percent }}%;"></div>
+                        {% for node in my_assessment_data.commission_nodes %}
+                        <div class="whiteboard-node-line" style="left: {{ node.percent }}%;"></div>
+                        <div class="whiteboard-node-label" style="left: {{ node.percent }}%;">{{ node.value }}</div>
+                        {% endfor %}
+                        <div class="whiteboard-bar-value">{{ my_assessment_data.order_count }} 单</div>
+                    </div>
+                </div>
+                <div class="col-md-2 text-md-end">
+                    {% if my_assessment_data.order_count >= 660 %}
+                        <span class="badge bg-success">进入提成阶梯</span>
+                    {% else %}
+                        <span class="badge bg-light text-dark border">未到 660</span>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card whiteboard-table-card">
+    <div class="card-header bg-white py-3">
+        <div class="fw-bold"><i class="bi bi-exclamation-circle text-danger me-1"></i>我的工作失误</div>
+        <div class="small text-muted mt-1">撤回记录员工可见；删除记录员工不可见，管理员可通过筛选查看。</div>
+    </div>
+    <div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th style="width: 80px;">ID</th>
+                    {% if current_user.role == 'admin' %}<th>员工</th>{% endif %}
+                    <th>失误日期</th>
+                    <th class="text-start">失误内容</th>
+                    <th>扣款金额</th>
+                    <th>状态</th>
+                    <th>发布时间</th>
+                    {% if current_user.role == 'admin' %}<th style="width: 360px;">管理操作</th>{% endif %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in my_assessment_data.mistake_rows %}
+                <tr>
+                    <td class="fw-bold text-muted">#{{ item.id }}</td>
+                    {% if current_user.role == 'admin' %}<td>{{ item.employee_name }}</td>{% endif %}
+                    <td>{{ item.mistake_date }}</td>
+                    <td class="text-start">{{ item.content }}</td>
+                    <td><span class="fw-bold text-danger">¥{{ '%.2f'|format(item.deduct_amount or 0) }}</span></td>
+                    <td>
+                        {% if item.status == 'active' %}
+                            <span class="badge bg-danger">有效</span>
+                        {% elif item.status == 'withdrawn' %}
+                            <span class="badge bg-secondary">已撤回</span>
+                        {% else %}
+                            <span class="badge bg-dark">已删除</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div>{{ item.created_at }}</div>
+                        <div class="small text-muted">{{ item.created_by_name }}</div>
+                    </td>
+                    {% if current_user.role == 'admin' %}
+                    <td class="text-start">
+                        {% if item.status == 'active' and not item.is_deleted %}
+                        <form action="/employees/work-mistakes/edit/{{ item.id }}" method="post" class="row g-1 mb-2">
+                            <input type="hidden" name="store" value="{{ current_store }}">
+                            <input type="hidden" name="assessment_user_id" value="{{ my_assessment_data.selected_user_id }}">
+                            <input type="hidden" name="assessment_mistake_status" value="{{ my_assessment_data.mistake_status_filter }}">
+                            <div class="col-4">
+                                <select class="form-select form-select-sm" name="user_id" required>
+                                    {% for emp in my_assessment_data.employee_options %}
+                                    <option value="{{ emp.id }}" {% if item.user_id == emp.id %}selected{% endif %}>
+                                        {{ emp.display_name }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-3">
+                                <input type="date" class="form-control form-control-sm" name="mistake_date" value="{{ item.mistake_date }}" required>
+                            </div>
+                            <div class="col-3">
+                                <input type="number" class="form-control form-control-sm" name="deduct_amount" value="{{ '%.2f'|format(item.deduct_amount or 0) }}" step="0.01" min="0.01" required>
+                            </div>
+                            <div class="col-2">
+                                <button type="submit" class="btn btn-sm btn-outline-primary w-100">保存</button>
+                            </div>
+                            <div class="col-12">
+                                <input type="text" class="form-control form-control-sm" name="content" value="{{ item.content }}" required>
+                            </div>
+                        </form>
+                        <div class="d-flex gap-2">
+                            <form action="/employees/work-mistakes/withdraw/{{ item.id }}" method="post" onsubmit="return confirm('确定撤回这条工作失误吗？');">
+                                <input type="hidden" name="store" value="{{ current_store }}">
+                                <input type="hidden" name="assessment_user_id" value="{{ my_assessment_data.selected_user_id }}">
+                                <input type="hidden" name="assessment_mistake_status" value="{{ my_assessment_data.mistake_status_filter }}">
+                                <button type="submit" class="btn btn-sm btn-outline-warning">撤回</button>
+                            </form>
+                            <form action="/employees/work-mistakes/delete/{{ item.id }}" method="post" onsubmit="return confirm('确定删除这条工作失误吗？删除后员工不可见。');">
+                                <input type="hidden" name="store" value="{{ current_store }}">
+                                <input type="hidden" name="assessment_user_id" value="{{ my_assessment_data.selected_user_id }}">
+                                <input type="hidden" name="assessment_mistake_status" value="{{ my_assessment_data.mistake_status_filter }}">
+                                <button type="submit" class="btn btn-sm btn-outline-danger">删除</button>
+                            </form>
+                        </div>
+                        {% else %}
+                            <span class="text-muted small">不可操作</span>
+                        {% endif %}
+                    </td>
+                    {% endif %}
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="{% if current_user.role == 'admin' %}8{% else %}6{% endif %}" class="text-muted py-5">
+                        <i class="bi bi-inbox fs-1 d-block mb-3"></i>
+                        暂无工作失误记录
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
 {% elif active_tab == 'whiteboard' %}
 <!-- =========================
      全员：激励白板
@@ -2346,19 +2622,15 @@
     <div class="col-md-6 col-xl-3">
         <div class="card whiteboard-summary-card">
             <div class="card-body">
-                <div class="whiteboard-summary-label">当前销冠</div>
+                <div class="whiteboard-summary-label">个人达标门店</div>
                 <div class="whiteboard-summary-value">
-                    {% if whiteboard_data.top_employee %}
-                        {{ whiteboard_data.top_employee.employee_name }}
-                    {% else %}
-                        -
-                    {% endif %}
+                    {{ whiteboard_data.employee_store_reached_count }}/{{ whiteboard_data.employee_store_count }}
                 </div>
                 <div class="small text-muted mt-1">
-                    {% if whiteboard_data.top_employee %}
-                        {{ whiteboard_data.top_employee.order_count }} 单
+                    {% if whiteboard_data.employee_store_can_view_all %}
+                        全部员工达标员工-门店数
                     {% else %}
-                        暂无员工订单
+                        {{ whiteboard_data.employee_store_title_name }} 达标门店数
                     {% endif %}
                 </div>
             </div>
@@ -2423,6 +2695,107 @@
         <div class="text-muted text-center py-5">
             <i class="bi bi-inbox fs-1 d-block mb-3"></i>
             暂无门店数据
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- 我的本月门店目标订单量柱状图 -->
+<div class="card whiteboard-chart-card mb-4">
+    <div class="card-header bg-white py-3">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+            <div>
+                <div class="fw-bold">
+                    <i class="bi bi-shop-window text-primary me-1"></i>我的本月门店目标订单量对比
+                    <span class="badge bg-light text-dark border ms-2">
+                        {{ whiteboard_data.employee_store_title_name }}
+                    </span>
+                </div>
+                <div class="small text-muted mt-1">
+                    仅展示本月订单量大于 0 的门店；红色标记为该门店个人目标订单量位置。个人目标 = 门店本月目标订单量 ÷ 6。
+                    {% if whiteboard_data.employee_store_can_view_all %}
+                        管理员可查看所有员工数据。
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if whiteboard_data.employee_store_can_view_all %}
+            <form method="get" action="/employees" class="d-flex align-items-center gap-2">
+                <input type="hidden" name="store" value="{{ current_store }}">
+                <input type="hidden" name="tab" value="whiteboard">
+                <label class="small text-muted mb-0" for="whiteboardEmployeeFilter">员工筛选</label>
+                <select class="form-select form-select-sm"
+                        id="whiteboardEmployeeFilter"
+                        name="whiteboard_employee"
+                        onchange="this.form.submit()"
+                        style="min-width: 150px;">
+                    <option value="all" {% if whiteboard_data.employee_store_selected_employee == 'all' %}selected{% endif %}>
+                        全部员工
+                    </option>
+                    {% for employee_name in whiteboard_data.employee_store_employee_options %}
+                    <option value="{{ employee_name }}"
+                            {% if whiteboard_data.employee_store_selected_employee == employee_name %}selected{% endif %}>
+                        {{ employee_name }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="card-body">
+        {% for row in whiteboard_data.employee_store_rows %}
+        <div class="whiteboard-bar-row">
+            <div class="row g-3 align-items-center">
+                <div class="col-md-3">
+                    <div class="whiteboard-bar-label">
+                        {% if whiteboard_data.employee_store_can_view_all %}
+                            {{ row.employee_name }}｜{{ row.store_name }}
+                        {% else %}
+                            {{ row.store_name }}
+                        {% endif %}
+                    </div>
+                    <div class="whiteboard-bar-meta">
+                        目标 {{ '%.2f'|format(row.target_order_count) }} 单
+                    </div>
+                </div>
+
+                <div class="col-md-7">
+                    <div class="whiteboard-bar-track">
+                        <div class="whiteboard-bar-fill {% if row.is_reached %}success{% endif %}"
+                             style="width: {{ row.actual_percent }}%;"></div>
+
+                        <div class="whiteboard-target-line"
+                             style="left: {{ row.target_percent }}%;"></div>
+                        <div class="whiteboard-target-label"
+                             style="left: {{ row.target_percent }}%;">
+                            目标 {{ '%.2f'|format(row.target_order_count) }}
+                        </div>
+
+                        <div class="whiteboard-bar-value">
+                            {{ row.actual_order_count }} 单
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-md-2 text-md-end">
+                    {% if row.is_reached %}
+                        <span class="badge rounded-pill whiteboard-status-reached">
+                            已达标 {{ row.achievement_rate }}%
+                        </span>
+                    {% else %}
+                        <span class="badge rounded-pill whiteboard-status-unreached">
+                            差 {{ '%.2f'|format(row.remaining_order_count) }} 单
+                        </span>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <div class="text-muted text-center py-5">
+            <i class="bi bi-inbox fs-1 d-block mb-3"></i>
+            本月暂无门店订单量数据
         </div>
         {% endfor %}
     </div>
@@ -3292,18 +3665,9 @@
 
                 <div class="col-md-6 col-xl-3">
                     <div class="border rounded-3 p-3 bg-light h-100">
-                        <div class="small text-muted">个人提成</div>
+                        <div class="small text-muted">单量提成</div>
                         <div class="fs-5 fw-bold text-success">
                             ¥{{ '%.2f'|format(settlement.personal_commission_total or 0) }}
-                        </div>
-                    </div>
-                </div>
-
-                <div class="col-md-6 col-xl-3">
-                    <div class="border rounded-3 p-3 bg-light h-100">
-                        <div class="small text-muted">团队奖金</div>
-                        <div class="fs-5 fw-bold text-success">
-                            ¥{{ '%.2f'|format(settlement.team_commission_total or 0) }}
                         </div>
                     </div>
                 </div>
@@ -3358,7 +3722,7 @@
                 </div>
                 <div>
                     当前页面先展示已进入系统的工资流水，例如请假扣款、迟到扣款、旷工扣款、工作失误扣款、顶班补贴、临时奖金、临时扣款等。
-                    基础工资、个人提成、团队奖金、全勤奖、销冠奖等完整工资，需要后续由管理员在“工资结算”模块统一生成。
+                    基础工资、单量提成、全勤奖等完整工资，需要后续由管理员在“工资结算”模块统一生成。
                 </div>
             </div>
         {% endif %}
@@ -3566,17 +3930,23 @@
             <i class="bi bi-calendar-plus text-primary me-1"></i>我的请假
         </h5>
         <div class="text-muted small">
+            {% if current_user_is_logistics %}
+            请假需至少提前一天提交；管理员同意后直接扣除固定日薪 88.5 元，不参与顶班、换班。
+            {% else %}
             请假需至少提前一天提交；管理员审批后会安排休班顶班或机动顶班。
+            {% endif %}
         </div>
     </div>
 
     {% if current_user.role != 'admin' %}
     <div class="d-flex gap-2">
+        {% if not current_user_is_logistics %}
         <button class="btn btn-outline-primary"
                 data-bs-toggle="modal"
                 data-bs-target="#shiftSwapApplyModal">
             <i class="bi bi-arrow-left-right me-1"></i>换班申请
         </button>
+        {% endif %}
         <button class="btn btn-primary"
                 data-bs-toggle="modal"
                 data-bs-target="#leaveApplyModal">
@@ -3938,6 +4308,7 @@
     </div>
 </div>
 
+{% if not current_user_is_logistics %}
 <!-- 新增请假申请弹窗 -->
 <div class="modal fade" id="shiftSwapApplyModal" tabindex="-1">
     <div class="modal-dialog">
@@ -3950,7 +4321,7 @@
                 <div class="modal-body">
                     <input type="hidden" name="store" value="{{ current_store or '' }}">
                     <div class="alert alert-info small">
-                        换班至少提前一天申请，双方都必须有具体班次。机动类型员工和已锁定的机动顶班班次不能参与换班。
+                        换班至少提前一天申请，双方都必须有具体班次。后勤类型员工、机动类型员工和已锁定的机动顶班班次都不能参与换班。
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-bold">换班员工</label>
@@ -3982,6 +4353,7 @@
         </div>
     </div>
 </div>
+{% endif %}
 
 <div class="modal fade" id="leaveApplyModal" tabindex="-1">
     <div class="modal-dialog">
@@ -4005,7 +4377,11 @@
                             <i class="bi bi-info-circle me-1"></i>请假规则
                         </div>
                         <div class="small">
+                            {% if current_user_is_logistics %}
+                            后勤员工请假至少提前一天提交；管理员同意后直接扣除固定日薪 88.5 元，并记录到考勤和员工流水；管理员拒绝则不产生任何变动。后勤员工不参与顶班、换班。
+                            {% else %}
                             当天无法请假，至少提前一天提交。管理员审批后会安排休班员工或机动类型员工顶班；休班顶班人拒绝后，您可选择取消或坚持请假。
+                            {% endif %}
                         </div>
                     </div>
 
@@ -5192,7 +5568,9 @@ function renderSalaryFlowRow(flow) {
         ? `<span class="fw-bold text-success">+${fmtMoney(flow.amount)}</span>`
         : `<span class="fw-bold text-danger">-${fmtMoney(Math.abs(Number(flow.amount || 0)))}</span>`;
 
-    const actionHtml = flow.is_locked
+    const actionHtml = flow.source_type === "work_mistake" || flow.flow_type === "mistake_deduct"
+        ? `<button class="btn btn-sm btn-outline-secondary" disabled>请到我的考核处理</button>`
+        : flow.is_locked
         ? `<button class="btn btn-sm btn-outline-secondary" disabled>已锁定</button>`
         : `
             <div class="d-flex justify-content-center gap-1">
@@ -5222,6 +5600,7 @@ function renderSalaryFlowRow(flow) {
             data-amount="${Number(flow.amount || 0)}"
             data-title="${escapeHtml(flow.title || "")}"
             data-description="${escapeHtml(flow.description || "")}"
+            data-source-type="${escapeHtml(flow.source_type || "")}"
             data-visible="${flow.is_visible_to_employee ? "1" : "0"}">
             <td class="fw-bold text-muted">#${flow.id}</td>
             <td><span class="fw-bold">${escapeHtml(flow.employee_name)}</span></td>
@@ -5328,6 +5707,10 @@ function openSalaryFlowEditModal(flowId) {
     const row = document.getElementById(`salary-flow-row-${flowId}`);
     const form = document.getElementById("salaryFlowEditForm");
     if (!row || !form) return;
+    if (row.dataset.sourceType === "work_mistake" || row.dataset.flowType === "mistake_deduct") {
+        alert("工作失误扣款请在“我的考核”里编辑、撤回或删除。");
+        return;
+    }
 
     form.action = `/employees/salary-flows/edit/${flowId}`;
     document.getElementById("salaryFlowEditUserInput").value = row.dataset.userId || "";
@@ -5694,7 +6077,7 @@ function renderSalarySettlementRow(item) {
 
             <td><span class="fw-bold text-success">¥${Number(item.personal_commission_total || 0).toFixed(2)}</span></td>
 
-            <td><span class="fw-bold text-success">¥${Number(item.team_commission_total || 0).toFixed(2)}</span></td>
+            <td><span class="fw-bold text-success">¥${Number(item.personal_store_bonus_total || 0).toFixed(2)}</span></td>
 
             <td><span class="fw-bold text-success">¥${Number(item.bonus_total || 0).toFixed(2)}</span></td>
 
@@ -5829,7 +6212,7 @@ function syncSalaryFlowTypeInputs(typeEl, actionEl, titleEl) {
      * 根据工资调整类型自动调整金额方向和标题占位。
      *
      * 说明：
-     * 1. 工作失误扣款、临时扣款默认扣钱；
+     * 1. 工作失误扣款（历史/同步流水）、临时扣款默认扣钱；
      * 2. 顶班补贴、加班补贴、临时奖金默认加钱；
      * 3. 工资修正、其他调整允许管理员自行选择加钱/扣钱。
      */

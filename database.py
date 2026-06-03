@@ -1042,6 +1042,41 @@ class SalaryFlowRecord(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.now, index=True)
 
 
+class EmployeeWorkMistakeRecord(SQLModel, table=True):
+    """管理员发布的员工工作失误记录，同步生成一条 mistake_deduct 工资流水。"""
+    __tablename__ = "employeeworkmistakerecord"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    user_id: int = Field(foreign_key="user.id", index=True)
+    employee_name_snapshot: str = Field(index=True)
+
+    mistake_date: date = Field(index=True)
+    salary_year: int = Field(index=True)
+    salary_month: int = Field(index=True)
+
+    content: str
+    deduct_amount: float = Field(default=0.0)
+
+    # active / withdrawn / deleted
+    status: str = Field(default="active", index=True)
+    is_deleted: bool = Field(default=False, index=True)
+
+    salary_flow_id: Optional[int] = Field(default=None, index=True)
+
+    created_by_user_id: int = Field(foreign_key="user.id", index=True)
+    created_by_name: str
+    withdrawn_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    withdrawn_by_name: Optional[str] = None
+    withdrawn_at: Optional[datetime] = Field(default=None, index=True)
+    deleted_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    deleted_by_name: Optional[str] = None
+    deleted_at: Optional[datetime] = Field(default=None, index=True)
+
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+
+
 # ===================== V3 员工管理模块：月度工资结算表 =====================
 class MonthlySalarySettlement(SQLModel, table=True):
     """
@@ -1068,6 +1103,7 @@ class MonthlySalarySettlement(SQLModel, table=True):
 
     base_salary_total: float = Field(default=0.0)
     personal_commission_total: float = Field(default=0.0)
+    personal_store_bonus_total: float = Field(default=0.0)
     team_commission_total: float = Field(default=0.0)
     bonus_total: float = Field(default=0.0)
     deduction_total: float = Field(default=0.0)
@@ -2549,6 +2585,13 @@ def migrate_monthly_salary_settlement_table():
                 ADD COLUMN social_security_amount REAL NOT NULL DEFAULT 0
             """))
             print("已为 monthlysalarysettlement 表补充 social_security_amount 字段")
+
+        if "personal_store_bonus_total" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE monthlysalarysettlement
+                ADD COLUMN personal_store_bonus_total REAL NOT NULL DEFAULT 0
+            """))
+            print("已为 monthlysalarysettlement 表补充 personal_store_bonus_total 字段")
 
         employee_confirmed_added = "employee_confirmed" not in col_names
 

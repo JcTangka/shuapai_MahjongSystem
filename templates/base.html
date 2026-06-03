@@ -256,6 +256,11 @@
             {% set duty_status = request.state.duty_status|default({}) %}
             <div class="ms-auto d-flex align-items-center">
                 {% if current_user.role != 'admin' and duty_status.get('has_active_store_duty') %}
+                <button type="button" class="btn btn-sm btn-outline-light me-2"
+                        data-bs-toggle="modal"
+                        data-bs-target="#employeeDutyUpdateStoresModal">
+                    <i class="bi bi-pencil-square me-1"></i>调整门店
+                </button>
                 <form action="/employee-duty/end" method="post" class="me-2 mb-0"
                       onsubmit="return confirm('确定结束带店并记录下班时间吗？');">
                     <input type="hidden" name="current_store" value="{{ current_store or '' }}">
@@ -323,6 +328,41 @@
     </div>
 </div>
 <div class="modal-backdrop fade show"></div>
+{% endif %}
+
+{% if current_user.role != 'admin' and duty_status.get('has_active_store_duty') %}
+<div class="modal fade" id="employeeDutyUpdateStoresModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content border-0 shadow-lg">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>调整负责门店</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form action="/employee-duty/update-stores" method="post">
+                <div class="modal-body">
+                    <input type="hidden" name="current_store" value="{{ current_store or '' }}">
+                    <div class="small text-muted mb-3">
+                        可随时增减当前负责门店。移出门店前，系统会先检查该门店是否还有你未处理完的事项；未处理完就不能移出。
+                    </div>
+                    <div class="border rounded p-2" style="max-height: 220px; overflow:auto;">
+                        {% for store_name in duty_status.get('store_options', []) %}
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="store_names" value="{{ store_name }}"
+                                   id="duty_update_store_{{ loop.index }}"
+                                   {% if store_name in duty_status.get('active_store_names', []) %}checked{% endif %}>
+                            <label class="form-check-label" for="duty_update_store_{{ loop.index }}">{{ store_name }}</label>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">保存调整</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
 {% endif %}
 
 
