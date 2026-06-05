@@ -2466,8 +2466,8 @@
             return false;
         }
 
-        if (paymentMethod === '代客收款' && fee <= 0) {
-            alert('下单方式为“代客收款”时，费用必须大于 0');
+        if (paymentMethod === '代客收款' && fee < 0) {
+            alert('下单方式为“代客收款”时，费用不能小于 0');
             return false;
         }
 
@@ -2559,11 +2559,6 @@
             alert('预定金额不能小于 0');
             return false;
         }
-        if (mode === 'edit' && fee <= 0) {
-            alert('溢出单编辑时，预定金额不能为 0');
-            return false;
-        }
-
         const wechatNameMap = {};
         for (let i = 1; i <= 4; i++) {
             const nameInput = document.getElementById(`overflow_${mode}_player_${i}`);
@@ -2714,8 +2709,8 @@
         }
         const paymentMethod = (document.getElementById('edit_payment_method')?.value || '').trim();
         const fee = parseFloat(document.getElementById('edit_room_fee')?.value || 0) || 0;
-        if (paymentMethod === '代客收款' && fee <= 0) {
-            alert('支付方式为“代客收款”时，费用必须大于 0');
+        if (paymentMethod === '代客收款' && fee < 0) {
+            alert('支付方式为“代客收款”时，费用不能小于 0');
             return false;
         }
 

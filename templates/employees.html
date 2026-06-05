@@ -938,6 +938,11 @@
                         {% if item.remark %}
                         <div class="small text-muted mt-1">备注：{{ item.remark }}</div>
                         {% endif %}
+                        {% if item.trigger_personal_store_bonus_halve %}
+                        <div class="small text-danger mt-1">
+                            本月第 {{ item.month_leave_count_snapshot }} 次请假；如审批通过，本月个人门店达标奖减半
+                        </div>
+                        {% endif %}
                     </td>
 
                     <td>
@@ -1302,6 +1307,11 @@
                         <div class="fw-semibold">{{ item.reason }}</div>
                         {% if item.remark %}
                         <div class="small text-muted mt-1">备注：{{ item.remark }}</div>
+                        {% endif %}
+                        {% if item.trigger_personal_store_bonus_halve %}
+                        <div class="small text-danger mt-1">
+                            本月第 {{ item.month_leave_count_snapshot }} 次请假；审批通过后本月个人门店达标奖减半
+                        </div>
                         {% endif %}
                     </td>
 
@@ -2414,7 +2424,13 @@
             <div class="card-body">
                 <div class="whiteboard-summary-label">个人门店达标奖</div>
                 <div class="whiteboard-summary-value text-success">¥{{ '%.2f'|format(my_assessment_data.personal_store_bonus_total or 0) }}</div>
-                <div class="small text-muted mt-1">达标 {{ my_assessment_data.personal_store_reached_count }} 个门店，每个 100 元</div>
+                <div class="small text-muted mt-1">
+                    {% if my_assessment_data.personal_store_bonus_halved %}
+                        达标 {{ my_assessment_data.personal_store_reached_count }} 个门店，本月因第 4 次及以上请假已生效，奖金减半
+                    {% else %}
+                        达标 {{ my_assessment_data.personal_store_reached_count }} 个门店，每个 100 元
+                    {% endif %}
+                </div>
             </div>
         </div>
     </div>
@@ -2580,9 +2596,34 @@
         </div>
     </div>
 
-    <span class="badge bg-primary fs-6 px-3 py-2">
-        {{ whiteboard_data.year }}年{{ whiteboard_data.month }}月
-    </span>
+    <form method="get" action="/employees" class="d-flex align-items-center gap-2 flex-wrap">
+        <input type="hidden" name="store" value="{{ current_store }}">
+        <input type="hidden" name="tab" value="whiteboard">
+        <input type="hidden" name="whiteboard_employee" value="{{ whiteboard_data.employee_store_selected_employee }}">
+
+        <input type="number"
+               name="whiteboard_year"
+               class="form-control form-control-sm"
+               style="width: 100px;"
+               min="2020"
+               max="2100"
+               value="{{ whiteboard_data.year }}">
+
+        <select name="whiteboard_month"
+                class="form-select form-select-sm"
+                style="width: 90px;"
+                onchange="this.form.submit()">
+            {% for m in range(1, 13) %}
+            <option value="{{ m }}" {% if whiteboard_data.month == m %}selected{% endif %}>
+                {{ m }}月
+            </option>
+            {% endfor %}
+        </select>
+
+        <button type="submit" class="btn btn-sm btn-primary">
+            查看
+        </button>
+    </form>
 </div>
 
 <!-- 顶部概览 -->
@@ -2723,6 +2764,8 @@
             <form method="get" action="/employees" class="d-flex align-items-center gap-2">
                 <input type="hidden" name="store" value="{{ current_store }}">
                 <input type="hidden" name="tab" value="whiteboard">
+                <input type="hidden" name="whiteboard_year" value="{{ whiteboard_data.year }}">
+                <input type="hidden" name="whiteboard_month" value="{{ whiteboard_data.month }}">
                 <label class="small text-muted mb-0" for="whiteboardEmployeeFilter">员工筛选</label>
                 <select class="form-select form-select-sm"
                         id="whiteboardEmployeeFilter"
@@ -4371,6 +4414,7 @@
                   method="post">
                 <div class="modal-body">
                     <input type="hidden" name="store" value="{{ current_store or '' }}">
+                    <input type="hidden" name="confirm_excessive_leave" value="0">
 
                     <div class="alert alert-info">
                         <div class="fw-bold mb-1">
@@ -4431,6 +4475,26 @@
                     </button>
                 </div>
             </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="leaveExcessiveConfirmModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content border-0 shadow">
+            <div class="modal-header bg-warning-subtle">
+                <h5 class="modal-title text-dark">
+                    <i class="bi bi-exclamation-triangle me-2"></i>请假提醒
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                坚持请假将导致个人门店达标奖减半，是否仍要请假？
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" id="leaveExcessiveCancelBtn">撤回请假</button>
+                <button type="button" class="btn btn-warning" id="leaveExcessiveProceedBtn">坚持请假</button>
+            </div>
         </div>
     </div>
 </div>
@@ -5114,6 +5178,19 @@ function leaveStatusBadge(status, statusLabel) {
     return `<span class="badge bg-secondary">${escapeHtml(statusLabel || status || "未知")}</span>`;
 }
 
+let pendingExcessiveLeaveForm = null;
+
+function renderLeavePenaltyHint(leave, mode = "employee") {
+    if (!leave || !leave.trigger_personal_store_bonus_halve) {
+        return "";
+    }
+    const countText = leave.month_leave_count_snapshot || 4;
+    const suffix = mode === "admin"
+        ? `本月第 ${countText} 次请假；如审批通过，本月个人门店达标奖减半`
+        : `本月第 ${countText} 次请假；审批通过后本月个人门店达标奖减半`;
+    return `<div class="small text-danger mt-1">${escapeHtml(suffix)}</div>`;
+}
+
 function renderLeaveApprovalActionCell(leave) {
     if (["pending", "approved", "approved_with_flexible", "replacement_rejected_wait_employee", "force_leave_deducted"].includes(leave.status)) {
         return `
@@ -5203,6 +5280,11 @@ function updateLeaveApprovalRow(leave) {
         ? `<span class="fw-bold text-danger">${fmtMoney(leave.final_deduct_amount)}</span>`
         : `<span class="text-muted">-</span>`;
     cells[9].innerHTML = leaveStatusBadge(leave.status, leave.status_label);
+    cells[6].innerHTML = `
+        <div class="fw-semibold">${escapeHtml(leave.reason || "")}</div>
+        ${leave.remark ? `<div class="small text-muted mt-1">备注：${escapeHtml(leave.remark)}</div>` : ""}
+        ${renderLeavePenaltyHint(leave, "admin")}
+    `;
 
     if (leave.approval_note || leave.approved_by_name) {
         cells[10].innerHTML = `
@@ -5253,6 +5335,7 @@ function renderMyLeaveRow(leave) {
             <td class="text-start" style="max-width: 260px;">
                 <div class="fw-semibold">${escapeHtml(leave.reason)}</div>
                 ${leave.remark ? `<div class="small text-muted mt-1">备注：${escapeHtml(leave.remark)}</div>` : ""}
+                ${renderLeavePenaltyHint(leave, "employee")}
             </td>
             <td><span class="fw-bold text-danger">${fmtMoney(leave.estimated_deduct_amount)}</span></td>
             <td>
@@ -6475,13 +6558,20 @@ function shouldSubmitLeaveApplyForm(form) {
         return true;
     }
 
+    const confirmInput = form.querySelector("input[name='confirm_excessive_leave']");
+    if (confirmInput && confirmInput.value === "1") {
+        return confirm("确定提交请假申请吗？提交后将先通知当天休班员工确认顶班。");
+    }
+
     const currentCount = parseInt(form.dataset.currentMonthLeaveCount || "0", 10) || 0;
-    if (currentCount >= 3 && !form.dataset.fourthLeaveWarningShown) {
-        const ok = confirm("请注意！这即将是您本月的第四次请假。");
-        if (!ok) {
-            return false;
+    if (currentCount >= 3) {
+        pendingExcessiveLeaveForm = form;
+        const modalEl = document.getElementById("leaveExcessiveConfirmModal");
+        if (modalEl) {
+            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+            modal.show();
         }
-        form.dataset.fourthLeaveWarningShown = "1";
+        return false;
     }
 
     return confirm("确定提交请假申请吗？提交后将先通知当天休班员工确认顶班。");
@@ -6493,6 +6583,51 @@ document.addEventListener("DOMContentLoaded", function () {
 
     // 初始化工资调整弹窗的默认金额方向和标题提示
     handleSalaryFlowTypeChange();
+
+    const excessiveProceedBtn = document.getElementById("leaveExcessiveProceedBtn");
+    const excessiveCancelBtn = document.getElementById("leaveExcessiveCancelBtn");
+    const excessiveModalEl = document.getElementById("leaveExcessiveConfirmModal");
+    if (excessiveProceedBtn && excessiveModalEl) {
+        excessiveProceedBtn.addEventListener("click", function () {
+            if (!pendingExcessiveLeaveForm) return;
+            const confirmInput = pendingExcessiveLeaveForm.querySelector("input[name='confirm_excessive_leave']");
+            if (confirmInput) {
+                confirmInput.value = "1";
+            }
+            bootstrap.Modal.getOrCreateInstance(excessiveModalEl).hide();
+            if (!confirm("确定提交请假申请吗？提交后仍需管理员审批。")) {
+                if (confirmInput) {
+                    confirmInput.value = "0";
+                }
+                pendingExcessiveLeaveForm = null;
+                return;
+            }
+            submitEmployeeAjaxForm(pendingExcessiveLeaveForm);
+            pendingExcessiveLeaveForm = null;
+        });
+    }
+    if (excessiveCancelBtn && excessiveModalEl) {
+        excessiveCancelBtn.addEventListener("click", function () {
+            if (pendingExcessiveLeaveForm) {
+                const confirmInput = pendingExcessiveLeaveForm.querySelector("input[name='confirm_excessive_leave']");
+                if (confirmInput) {
+                    confirmInput.value = "0";
+                }
+            }
+            pendingExcessiveLeaveForm = null;
+            bootstrap.Modal.getOrCreateInstance(excessiveModalEl).hide();
+        });
+    }
+    if (excessiveModalEl) {
+        excessiveModalEl.addEventListener("hidden.bs.modal", function () {
+            if (pendingExcessiveLeaveForm) {
+                const confirmInput = pendingExcessiveLeaveForm.querySelector("input[name='confirm_excessive_leave']");
+                if (confirmInput) {
+                    confirmInput.value = "0";
+                }
+            }
+        });
+    }
 
     document.addEventListener("submit", function (event) {
         const form = event.target.closest("form[data-employee-ajax-form='1']");

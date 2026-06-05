@@ -841,6 +841,8 @@ class EmployeeLeaveRequest(SQLModel, table=True):
     # 预计扣款与最终扣款分开，避免审批时管理员修正金额
     estimated_deduct_amount: float = Field(default=0.0)
     final_deduct_amount: float = Field(default=0.0)
+    month_leave_count_snapshot: int = Field(default=1)
+    trigger_personal_store_bonus_halve: bool = Field(default=False, index=True)
 
     approved_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
     approved_by_name: Optional[str] = None
@@ -2513,6 +2515,22 @@ def migrate_employee_leave_request_table():
             CREATE INDEX IF NOT EXISTS ix_employeeleaverequest_replacement_salary_flow_id
             ON employeeleaverequest (replacement_salary_flow_id)
         """))
+
+        if "month_leave_count_snapshot" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE employeeleaverequest
+                ADD COLUMN month_leave_count_snapshot INTEGER NOT NULL DEFAULT 1
+            """))
+
+        if "trigger_personal_store_bonus_halve" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE employeeleaverequest
+                ADD COLUMN trigger_personal_store_bonus_halve INTEGER NOT NULL DEFAULT 0
+            """))
+            conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_employeeleaverequest_trigger_personal_store_bonus_halve
+                ON employeeleaverequest (trigger_personal_store_bonus_halve)
+            """))
 
 def migrate_employee_attendance_record_table():
     """

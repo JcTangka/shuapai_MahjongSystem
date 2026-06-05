@@ -627,6 +627,62 @@ def _leave_status_label(status: str) -> str:
     return mapping.get(status or "pending", status or "未知")
 
 
+LEAVE_COUNT_ACTIVE_STATUSES = {
+    "pending_admin_review",
+    "pending",
+    "replacement_rejected_wait_employee",
+    "approved",
+    "approved_with_flexible",
+    "force_leave_deducted",
+}
+
+LEAVE_PENALTY_EFFECTIVE_STATUSES = {
+    "approved",
+    "approved_with_flexible",
+    "force_leave_deducted",
+}
+
+
+def _count_employee_leave_requests_for_month(
+        session: Session,
+        user_id: int,
+        year: int,
+        month: int,
+        *,
+        exclude_leave_id: Optional[int] = None
+) -> int:
+    month_start = date(year, month, 1)
+    month_end = date(year, month, calendar.monthrange(year, month)[1])
+    query = select(EmployeeLeaveRequest).where(
+        EmployeeLeaveRequest.user_id == user_id,
+        EmployeeLeaveRequest.leave_date >= month_start,
+        EmployeeLeaveRequest.leave_date <= month_end,
+        EmployeeLeaveRequest.status.in_(list(LEAVE_COUNT_ACTIVE_STATUSES))
+    )
+    if exclude_leave_id:
+        query = query.where(EmployeeLeaveRequest.id != exclude_leave_id)
+    return len(session.exec(query).all())
+
+
+def _has_personal_store_bonus_halve_penalty(
+        session: Session,
+        user_id: int,
+        year: int,
+        month: int
+) -> bool:
+    month_start = date(year, month, 1)
+    month_end = date(year, month, calendar.monthrange(year, month)[1])
+    return session.exec(
+        select(EmployeeLeaveRequest).where(
+            EmployeeLeaveRequest.user_id == user_id,
+            EmployeeLeaveRequest.leave_date >= month_start,
+            EmployeeLeaveRequest.leave_date <= month_end,
+            EmployeeLeaveRequest.trigger_personal_store_bonus_halve == True,
+            EmployeeLeaveRequest.status.in_(list(LEAVE_PENALTY_EFFECTIVE_STATUSES))
+        )
+    ).first() is not None
+
+
 def _shift_swap_status_label(status: str) -> str:
     mapping = {
         "pending": "待对方确认",
@@ -1188,6 +1244,8 @@ def _leave_request_payload(item: EmployeeLeaveRequest) -> dict:
         "status_label": _leave_status_label(item.status),
         "estimated_deduct_amount": round(float(item.estimated_deduct_amount or 0), 2),
         "final_deduct_amount": round(float(item.final_deduct_amount or 0), 2),
+        "month_leave_count_snapshot": int(getattr(item, "month_leave_count_snapshot", 1) or 1),
+        "trigger_personal_store_bonus_halve": bool(getattr(item, "trigger_personal_store_bonus_halve", False)),
         "approved_by_name": item.approved_by_name or "",
         "approved_at": item.approved_at.strftime("%Y-%m-%d %H:%M:%S") if item.approved_at else "",
         "approval_note": item.approval_note or "",
@@ -1954,7 +2012,7 @@ def _calculate_salary_for_one_employee(
         if employee_type == "logistics"
         else _calc_personal_order_commission(personal_order_count)
     )
-    reached_personal_store_count, personal_store_bonus = _calc_personal_store_bonus(
+    reached_personal_store_count, personal_store_bonus, personal_store_bonus_halved = _calc_personal_store_bonus(
         session=session,
         employee=user_obj,
         year=year,
@@ -2025,7 +2083,14 @@ def _calculate_salary_for_one_employee(
         flow_category="personal_store_bonus",
         flow_type="personal_store_target_bonus",
         title="个人门店达标奖",
-        description=f"{year}年{month}月个人门店达标 {reached_personal_store_count} 个，每个 100 元，合计 {personal_store_bonus:.2f} 元。",
+        description=(
+            f"{year}年{month}月个人门店达标 {reached_personal_store_count} 个，"
+            + (
+                f"因本月第 4 次及以上请假已生效，个人门店达标奖减半后为 {personal_store_bonus:.2f} 元。"
+                if personal_store_bonus_halved
+                else f"每个 100 元，合计 {personal_store_bonus:.2f} 元。"
+            )
+        ),
         settlement_id=settlement.id,
         operator=operator
     )
@@ -2608,12 +2673,16 @@ def _calc_personal_store_bonus(
         employee: User,
         year: int,
         month: int
-) -> Tuple[int, float]:
+) -> Tuple[int, float, bool]:
     reached_count = len([
         row for row in _build_personal_store_target_rows(session, employee, year, month)
         if row["is_reached"]
     ])
-    return reached_count, round(reached_count * 100.0, 2)
+    bonus_amount = round(reached_count * 100.0, 2)
+    is_halved = _has_personal_store_bonus_halve_penalty(session, employee.id, year, month)
+    if is_halved:
+        bonus_amount = round(bonus_amount / 2.0, 2)
+    return reached_count, bonus_amount, is_halved
 
 
 def _work_mistake_status_label(status: str) -> str:
@@ -2740,6 +2809,9 @@ def _build_my_assessment_data(
     personal_store_rows = _build_personal_store_target_rows(session, target_user, year, month)
     reached_store_count = len([row for row in personal_store_rows if row["is_reached"]])
     personal_store_bonus_total = round(reached_store_count * 100.0, 2)
+    personal_store_bonus_halved = _has_personal_store_bonus_halve_penalty(session, target_user.id, year, month)
+    if personal_store_bonus_halved:
+        personal_store_bonus_total = round(personal_store_bonus_total / 2.0, 2)
 
     query = select(EmployeeWorkMistakeRecord).where(
         EmployeeWorkMistakeRecord.user_id == target_user.id,
@@ -2793,6 +2865,7 @@ def _build_my_assessment_data(
         "active_mistake_deduct_total": active_mistake_deduct_total,
         "personal_store_reached_count": reached_store_count,
         "personal_store_bonus_total": personal_store_bonus_total,
+        "personal_store_bonus_halved": personal_store_bonus_halved,
         "personal_store_rows": personal_store_rows,
         "mistake_rows": [_work_mistake_payload(item) for item in mistake_rows],
         "today": date.today(),
@@ -6073,8 +6146,8 @@ def _run_store_duty_info_self_check(
         return result
 
     clicked_at_text = _store_duty_order_end_filter_text(clicked_at)
-    month_start_text = _store_duty_month_start_filter_text(clicked_at)
-    month_start_date = clicked_at.date().replace(day=1)
+    week_ago_text = _store_duty_week_ago_filter_text(clicked_at)
+    week_ago_date = (clicked_at - timedelta(days=7)).date()
     clicked_at_date = clicked_at.date()
     candidate_games = session.exec(
         select(GameRecord).where(
@@ -6085,12 +6158,12 @@ def _run_store_duty_info_self_check(
                 (
                     (GameRecord.order_end_time.is_not(None)) &
                     (GameRecord.order_end_time != "") &
-                    (GameRecord.order_end_time >= month_start_text) &
+                    (GameRecord.order_end_time >= week_ago_text) &
                     (GameRecord.order_end_time <= clicked_at_text)
                 ),
                 (
                     ((GameRecord.order_end_time.is_(None)) | (GameRecord.order_end_time == "")) &
-                    (GameRecord.record_date >= month_start_date) &
+                    (GameRecord.record_date >= week_ago_date) &
                     (GameRecord.record_date <= clicked_at_date)
                 )
             )
@@ -6310,21 +6383,89 @@ def _run_store_duty_store_release_checks(
         duty: EmployeeDutySession,
         clicked_at: datetime,
         store_names: List[str]
-) -> List[str]:
+) -> dict:
     scope_duty = _build_duty_scope_session(duty, store_names)
-    messages = []
+    result = {
+        "blocking_messages": [],
+        "warning_messages": [],
+    }
 
     payment_result = _run_store_duty_payment_self_check(session, scope_duty, clicked_at)
-    messages.extend(payment_result.get("blocking_messages") or [])
-    messages.extend(
-        message.replace("请继续跟进", "请先处理完成后再移出负责门店")
+    result["blocking_messages"].extend(payment_result.get("blocking_messages") or [])
+    result["warning_messages"].extend(
+        message.replace("请继续跟进", "移出后请继续跟进")
         for message in (payment_result.get("warning_messages") or [])
     )
 
-    info_result = _run_store_duty_info_self_check(session, scope_duty, clicked_at)
-    messages.extend(info_result.get("blocking_messages") or [])
+    clicked_at_text = _store_duty_order_end_filter_text(clicked_at)
+    week_ago_text = _store_duty_week_ago_filter_text(clicked_at)
+    week_ago_date = (clicked_at - timedelta(days=7)).date()
+    clicked_at_date = clicked_at.date()
+    candidate_games = session.exec(
+        select(GameRecord).where(
+            GameRecord.store_name.in_(store_names),
+            GameRecord.status == "formed",
+            GameRecord.record_source.in_(STORE_DUTY_INFO_CHECK_ORDER_SOURCES),
+            or_(
+                (
+                    (GameRecord.order_end_time.is_not(None)) &
+                    (GameRecord.order_end_time != "") &
+                    (GameRecord.order_end_time >= week_ago_text) &
+                    (GameRecord.order_end_time <= clicked_at_text)
+                ),
+                (
+                    ((GameRecord.order_end_time.is_(None)) | (GameRecord.order_end_time == "")) &
+                    (GameRecord.record_date >= week_ago_date) &
+                    (GameRecord.record_date <= clicked_at_date)
+                )
+            )
+        ).order_by(GameRecord.record_source, GameRecord.store_name, GameRecord.order_end_time, GameRecord.id)
+    ).all()
 
-    return messages
+    blocking_items = []
+    warning_items = []
+    warning_reason_set = {
+        "订单开始时间为空",
+        "包间未指定",
+        "支付方式未指定",
+        "下单方式未指定",
+    }
+
+    for game in candidate_games:
+        reasons = _get_store_duty_info_missing_reasons(game)
+        if not reasons:
+            continue
+
+        game_blocking_reasons = []
+        game_warning_reasons = []
+        has_followup_note = _game_has_any_followup_note(game)
+
+        for reason in reasons:
+            if reason in warning_reason_set:
+                game_warning_reasons.append(reason)
+            elif reason == "费用为0且支付状态未收齐":
+                if has_followup_note:
+                    game_warning_reasons.append(reason)
+                else:
+                    game_blocking_reasons.append(reason)
+            else:
+                game_blocking_reasons.append(reason)
+
+        if game_blocking_reasons:
+            blocking_items.append(_format_store_duty_info_check_item(game, game_blocking_reasons))
+        if game_warning_reasons:
+            warning_items.append(_format_store_duty_info_check_item(game, game_warning_reasons))
+
+    if blocking_items:
+        result["blocking_messages"].append(
+            "以下订单存在信息遗漏，暂时不能移出负责范围：\n" + "\n".join(blocking_items)
+        )
+    if warning_items:
+        result["warning_messages"].append(
+            "以下订单存在信息提醒，移出后请继续跟进：\n" + "\n".join(warning_items)
+        )
+
+    return result
 
 
 def _build_daily_store_work_url(
@@ -6828,18 +6969,21 @@ async def update_employee_store_duty_stores(
 
     removed_store_names = [name for name in old_store_names if name not in clean_store_names]
     clicked_at = datetime.now()
+    release_warning_messages = []
     if removed_store_names:
-        release_messages = _run_store_duty_store_release_checks(
+        release_result = _run_store_duty_store_release_checks(
             session=session,
             duty=active,
             clicked_at=clicked_at,
             store_names=removed_store_names
         )
-        if release_messages:
+        release_blocking_messages = release_result.get("blocking_messages") or []
+        release_warning_messages = release_result.get("warning_messages") or []
+        if release_blocking_messages:
             return RedirectResponse(
                 url=_build_root_redirect_url(
                     current_store or old_store_names[0],
-                    error="以下门店仍有未完成事项，暂时不能移出负责范围：\n" + "\n".join(release_messages)
+                    error="以下门店仍有未完成事项，暂时不能移出负责范围：\n" + "\n".join(release_blocking_messages)
                 ),
                 status_code=303
             )
@@ -6865,10 +7009,13 @@ async def update_employee_store_duty_stores(
     removed_text = f"；已移出：{'、'.join(removed_store_names)}" if removed_store_names else ""
     added_store_names = [name for name in clean_store_names if name not in old_store_names]
     added_text = f"；已新增：{'、'.join(added_store_names)}" if added_store_names else ""
+    warning_text = ""
+    if release_warning_messages:
+        warning_text = "\n提醒：\n" + "\n".join(release_warning_messages)
     return RedirectResponse(
         url=_build_root_redirect_url(
             clean_store_names[0],
-            success=f"负责门店已更新，当前负责：{'、'.join(clean_store_names)}{removed_text}{added_text}"
+            success=f"负责门店已更新，当前负责：{'、'.join(clean_store_names)}{removed_text}{added_text}{warning_text}"
         ),
         status_code=303
     )
@@ -7071,6 +7218,8 @@ async def employees_page(
         # 不传时默认结算当前月份。
         settlement_year: Optional[int] = None,
         settlement_month: Optional[int] = None,
+        whiteboard_year: Optional[int] = None,
+        whiteboard_month: Optional[int] = None,
         whiteboard_employee: str = "all",
         assessment_user_id: Optional[int] = None,
         assessment_mistake_status: str = "active",
@@ -7255,16 +7404,12 @@ async def employees_page(
             and (employee.employee_type or "regular") != "logistics"
         ]
         today = date.today()
-        month_start = today.replace(day=1)
-        month_end = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
-        my_current_month_leave_count = len(session.exec(
-            select(EmployeeLeaveRequest).where(
-                EmployeeLeaveRequest.user_id == user.id,
-                EmployeeLeaveRequest.leave_date >= month_start,
-                EmployeeLeaveRequest.leave_date <= month_end,
-                EmployeeLeaveRequest.status != "cancelled"
-            )
-        ).all())
+        my_current_month_leave_count = _count_employee_leave_requests_for_month(
+            session=session,
+            user_id=user.id,
+            year=today.year,
+            month=today.month
+        )
 
     if tab == "leave_approval" and user.role == "admin":
         leave_approval_requests = session.exec(
@@ -7383,13 +7528,21 @@ async def employees_page(
             month=selected_settlement_month
         )
 
-    # 全员可见：进入“激励白板”页签时，构建本月激励数据
+    # 全员可见：进入“激励白板”页签时，构建指定月份激励数据
     if tab == "whiteboard":
         today = date.today()
+        selected_whiteboard_year = whiteboard_year or today.year
+        selected_whiteboard_month = whiteboard_month or today.month
+
+        # 月份参数兜底，避免 URL 手动传错导致页面异常。
+        if selected_whiteboard_month < 1 or selected_whiteboard_month > 12:
+            selected_whiteboard_year = today.year
+            selected_whiteboard_month = today.month
+
         whiteboard_data = _build_employee_whiteboard_data(
             session=session,
-            year=today.year,
-            month=today.month,
+            year=selected_whiteboard_year,
+            month=selected_whiteboard_month,
             current_user=user,
             selected_employee_name=whiteboard_employee
         )
@@ -8310,6 +8463,7 @@ async def employee_leave_apply(
         leave_date: str = Form(...),
         reason: str = Form(...),
         remark: str = Form(""),
+        confirm_excessive_leave: str = Form("0"),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -8400,6 +8554,24 @@ async def employee_leave_apply(
             status_code=303
         )
 
+    current_month_leave_count = _count_employee_leave_requests_for_month(
+        session=session,
+        user_id=user.id,
+        year=leave_d.year,
+        month=leave_d.month
+    )
+    month_leave_count_snapshot = current_month_leave_count + 1
+    trigger_personal_store_bonus_halve = month_leave_count_snapshot >= 4
+
+    if trigger_personal_store_bonus_halve and _normalize_text(confirm_excessive_leave) != "1":
+        message = "本月第4次及以上请假需先确认；坚持请假将导致个人门店达标奖减半"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message, 400)
+        return RedirectResponse(
+            url=_build_employees_url(store, "my_leave", error=message),
+            status_code=303
+        )
+
     now = datetime.now()
 
     leave_req = EmployeeLeaveRequest(
@@ -8415,6 +8587,8 @@ async def employee_leave_apply(
         is_before_one_day=True,
         estimated_deduct_amount=estimated_deduct,
         final_deduct_amount=0.0,
+        month_leave_count_snapshot=month_leave_count_snapshot,
+        trigger_personal_store_bonus_halve=trigger_personal_store_bonus_halve,
 
         approved_by_user_id=None,
         approved_by_name=None,
@@ -8446,7 +8620,14 @@ async def employee_leave_apply(
             target_user=admin,
             related_user=user,
             title="待审批请假",
-            content=f"{user.display_name} 申请 {leave_d} {_shift_type_label(shift_type)} 请假，请选择顶班方式或拒绝。",
+            content=(
+                f"{user.display_name} 申请 {leave_d} {_shift_type_label(shift_type)} 请假，请选择顶班方式或拒绝。"
+                + (
+                    f" 这是该员工本月第 {month_leave_count_snapshot} 次请假，如审批通过，本月个人门店达标奖减半。"
+                    if trigger_personal_store_bonus_halve
+                    else ""
+                )
+            ),
             notification_type="leave_admin_review",
             source_type="leave_request",
             source_id=leave_req.id,
@@ -8546,6 +8727,13 @@ async def employee_leave_update_pending(
             return _employee_ajax_error("当天排班为休班，无需发起顶班请假")
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="当天排班为休班，无需发起顶班请假"), status_code=303)
 
+    current_month_leave_count = _count_employee_leave_requests_for_month(
+        session=session,
+        user_id=user.id,
+        year=leave_d.year,
+        month=leave_d.month,
+        exclude_leave_id=leave_req.id
+    )
     leave_req.leave_date = leave_d
     leave_req.shift_type = shift_type
     leave_req.reason = reason
@@ -8556,6 +8744,8 @@ async def employee_leave_update_pending(
         leave_date=leave_d,
         shift_type=shift_type
     )
+    leave_req.month_leave_count_snapshot = current_month_leave_count + 1
+    leave_req.trigger_personal_store_bonus_halve = leave_req.month_leave_count_snapshot >= 4
     leave_req.updated_at = datetime.now()
     session.add(leave_req)
     session.commit()
@@ -12634,6 +12824,70 @@ async def update_game_status(
                 status_code=303
             )
 
+        room_name = _normalize_text(game.room_name)
+        if not room_name:
+            return RedirectResponse(
+                url="/?" + urlencode({
+                    "store": store,
+                    "error": "组齐前必须填写包间",
+                }),
+                status_code=303
+            )
+
+        store_obj = get_store_by_name(session, store)
+        if not store_obj:
+            return RedirectResponse(
+                url="/?" + urlencode({
+                    "store": store,
+                    "error": "当前门店不存在，无法组齐",
+                }),
+                status_code=303
+            )
+
+        room_obj = session.exec(
+            select(Room).where(
+                Room.store_id == store_obj.id,
+                Room.name == room_name,
+                Room.is_active == True
+            )
+        ).first()
+        if not room_obj:
+            room_obj = session.exec(
+                select(Room).where(
+                    Room.store_name == store,
+                    Room.name == room_name
+                )
+            ).first()
+
+        if not room_obj:
+            return RedirectResponse(
+                url="/?" + urlencode({
+                    "store": store,
+                    "error": "组齐前填写的包间不存在或不属于当前门店",
+                }),
+                status_code=303
+            )
+
+        payment_method = _normalize_text(game.payment_method)
+        if not payment_method:
+            return RedirectResponse(
+                url="/?" + urlencode({
+                    "store": store,
+                    "error": "组齐前必须填写支付方式",
+                }),
+                status_code=303
+            )
+
+        room_fee = _safe_float(game.room_fee)
+        if payment_method == "代客收款" and room_fee <= 0:
+            return RedirectResponse(
+                url="/?" + urlencode({
+                    "store": store,
+                    "error": "组齐时若支付方式为代客收款，费用必须大于0",
+                }),
+                status_code=303
+            )
+
         game.status = "formed"
 
         # V2：谁点击“组齐”，who_did 就覆盖为谁
@@ -13466,7 +13720,7 @@ async def add_self_arrival_game(
 
     final_room_fee = room_fee or 0.0
     if payment_method == "代客收款":
-        if final_room_fee <= 0:
+        if final_room_fee < 0:
             return RedirectResponse(
                 url=_build_formed_redirect_url(
                     store=store_name,
@@ -13476,7 +13730,7 @@ async def add_self_arrival_game(
                     start_date=start_date,
                     end_date=end_date,
                     payment_method_filter=payment_method_filter,
-                    error="下单方式为代客收款时，费用必须大于0"
+                    error="下单方式为代客收款时，费用不能小于0"
                 ),
                 status_code=303
             )
@@ -13833,7 +14087,7 @@ async def update_self_arrival_game(
 
     final_room_fee = room_fee or 0.0
     if payment_method == "代客收款":
-        if final_room_fee <= 0:
+        if final_room_fee < 0:
             return RedirectResponse(
                 url=_build_formed_redirect_url(
                     store=store_name,
@@ -13843,7 +14097,7 @@ async def update_self_arrival_game(
                     start_date=start_date,
                     end_date=end_date,
                     payment_method_filter=payment_method_filter,
-                    error="下单方式为代客收款时，费用必须大于0"
+                    error="下单方式为代客收款时，费用不能小于0"
                 ),
                 status_code=303
             )
@@ -14437,21 +14691,6 @@ async def update_overflow_game(
                 end_date=end_date,
                 payment_method_filter=payment_method_filter,
                 error="预定金额不能小于0"
-            ),
-            status_code=303
-        )
-
-    if final_room_fee <= 0:
-        return RedirectResponse(
-            url=_build_formed_redirect_url(
-                store=store_name,
-                source_filter=FORMED_SOURCE_OVERFLOW,
-                pay_status=pay_status,
-                date_filter=date_filter,
-                start_date=start_date,
-                end_date=end_date,
-                payment_method_filter=payment_method_filter,
-                error="预定金额不能为0"
             ),
             status_code=303
         )
@@ -15275,8 +15514,8 @@ async def update_formed_game(
     final_payment_method = _normalize_text(payment_method) or None
     final_room_fee = room_fee or 0.0
 
-    if final_payment_method == "代客收款" and final_room_fee <= 0:
-        msg = "支付方式为代客收款时，费用必须大于0"
+    if final_payment_method == "代客收款" and final_room_fee < 0:
+        msg = "支付方式为代客收款时，费用不能小于0"
         return _ajax_or_redirect_error(
             request,
             message=msg,
