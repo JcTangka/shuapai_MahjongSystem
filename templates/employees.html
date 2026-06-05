@@ -353,8 +353,8 @@
     </div>
 
     {% if current_user.role == 'admin' %}
-    <button class="btn btn-outline-primary" disabled>
-        <i class="bi bi-plus-circle me-1"></i>新增员工（后续接入）
+    <button type="button" class="btn btn-outline-primary" onclick="openEmployeeCreateModal()">
+        <i class="bi bi-plus-circle me-1"></i>新增员工
     </button>
     {% endif %}
 </div>
@@ -4877,6 +4877,67 @@
     </div>
 </div>
 
+<div class="modal fade" id="employeeCreateModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content rounded-4 border-0 shadow">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-person-plus-fill me-2"></i>新增员工</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form id="employeeCreateForm"
+                  action="/employees/create"
+                  method="post"
+                  data-employee-ajax-form="1"
+                  onsubmit="return confirm('确定创建这名员工账号吗？');">
+                <div class="modal-body">
+                    <input type="hidden" name="store" value="{{ current_store or '' }}">
+                    <input type="hidden" name="status_filter" value="{{ status_filter or 'active' }}">
+
+                    <div class="alert alert-info small">
+                        新增员工时直接设置初始员工类型。该员工首次登录后会被要求修改初始密码。
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">登录账号 <span class="text-danger">*</span></label>
+                        <input type="text" name="username" id="employeeCreateUsername" class="form-control" maxlength="50" required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">员工姓名 <span class="text-danger">*</span></label>
+                        <input type="text" name="display_name" id="employeeCreateDisplayName" class="form-control" maxlength="50" required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">初始员工类型 <span class="text-danger">*</span></label>
+                        <select name="employee_type" id="employeeCreateType" class="form-select" required>
+                            {% for value, label in employee_type_options %}
+                            <option value="{{ value }}" {% if value == 'regular' %}selected{% endif %}>{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">初始密码 <span class="text-danger">*</span></label>
+                        <input type="password" name="password" id="employeeCreatePassword" class="form-control" minlength="8" required>
+                        <div class="form-text">至少 8 位，创建成功后会再展示一次，便于告知员工。</div>
+                    </div>
+
+                    <div class="mb-0">
+                        <label class="form-label fw-bold">确认初始密码 <span class="text-danger">*</span></label>
+                        <input type="password" name="confirm_password" id="employeeCreatePasswordConfirm" class="form-control" minlength="8" required>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-check-circle me-1"></i>创建员工
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 <div class="modal fade" id="passwordResetResultModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content rounded-4 border-0 shadow">
@@ -4896,6 +4957,33 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-primary w-100" data-bs-dismiss="modal">已记录</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="employeeCreateResultModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content rounded-4 border-0 shadow">
+            <div class="modal-header bg-success text-white">
+                <h5 class="modal-title"><i class="bi bi-person-check-fill me-2"></i>员工已创建</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-warning small">
+                    初始密码只在本次弹窗中展示一次，请及时告知员工。员工首次登录后会被要求修改密码。
+                </div>
+                <div class="mb-2"><span class="fw-bold">登录账号：</span><span id="employeeCreateResultUsername">-</span></div>
+                <div class="mb-2"><span class="fw-bold">员工姓名：</span><span id="employeeCreateResultName">-</span></div>
+                <div class="mb-3"><span class="fw-bold">员工类型：</span><span id="employeeCreateResultType">-</span></div>
+                <label class="form-label fw-bold">初始密码</label>
+                <div class="input-group">
+                    <input type="text" class="form-control fw-bold" id="employeeCreateResultPassword" readonly>
+                    <button class="btn btn-outline-success" type="button" onclick="copyEmployeeCreatePassword()">复制</button>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-success w-100" data-bs-dismiss="modal">我已记录</button>
             </div>
         </div>
     </div>
@@ -5078,11 +5166,73 @@ function renderEmployeeNameCell(emp) {
     `;
 }
 
+function renderEmployeeRow(emp) {
+    return `
+        <tr id="employee-row-${emp.id}"
+            data-employee-id="${emp.id}"
+            data-display-name="${escapeHtml(emp.display_name || "")}"
+            data-employee-type="${escapeHtml(emp.employee_type || "regular")}"
+            data-pending-employee-type="${escapeHtml(emp.pending_employee_type || "")}"
+            data-pending-effective-from="${escapeHtml(emp.pending_effective_from || "")}">
+            <td class="fw-bold text-muted">#${emp.id}</td>
+            <td><span class="fw-semibold">${escapeHtml(emp.username || "")}</span></td>
+            <td>${renderEmployeeNameCell(emp)}</td>
+            <td>${emp.role === "admin"
+                ? `<span class="badge rounded-pill role-badge-admin">管理</span>`
+                : `<span class="badge rounded-pill role-badge-operator">普通员工</span>`}
+            </td>
+            <td>${renderEmployeeStatusBadge(emp)}</td>
+            <td>${emp.deleted_at
+                ? `<span class="small text-muted">${escapeHtml(emp.deleted_at)}</span>`
+                : `<span class="text-muted">-</span>`}
+            </td>
+            <td>${renderEmployeeTypeCell(emp)}</td>
+            <td>${renderEmployeeActionCell(emp)}</td>
+        </tr>
+    `;
+}
+
+function prependEmployeeRow(emp) {
+    const tbody = document.getElementById("employee-list-tbody");
+    if (!tbody || !emp) return;
+
+    const emptyRow = tbody.querySelector("tr td[colspan]");
+    if (emptyRow) {
+        tbody.innerHTML = "";
+    }
+
+    const temp = document.createElement("tbody");
+    temp.innerHTML = renderEmployeeRow(emp).trim();
+    const row = temp.firstElementChild;
+    if (!row) return;
+
+    tbody.prepend(row);
+    row.classList.add("table-warning");
+    setTimeout(() => row.classList.remove("table-warning"), 1200);
+}
+
 function showPasswordResetResult(tempPassword) {
     const input = document.getElementById("passwordResetTempInput");
     if (input) input.value = tempPassword || "";
 
     const modalEl = document.getElementById("passwordResetResultModal");
+    if (modalEl) {
+        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    }
+}
+
+function showEmployeeCreateResult(emp, tempPassword) {
+    const usernameEl = document.getElementById("employeeCreateResultUsername");
+    const nameEl = document.getElementById("employeeCreateResultName");
+    const typeEl = document.getElementById("employeeCreateResultType");
+    const passwordEl = document.getElementById("employeeCreateResultPassword");
+
+    if (usernameEl) usernameEl.textContent = emp?.username || "-";
+    if (nameEl) nameEl.textContent = emp?.display_name || "-";
+    if (typeEl) typeEl.textContent = emp?.employee_type_label || employeeTypeLabel(emp?.employee_type);
+    if (passwordEl) passwordEl.value = tempPassword || "";
+
+    const modalEl = document.getElementById("employeeCreateResultModal");
     if (modalEl) {
         bootstrap.Modal.getOrCreateInstance(modalEl).show();
     }
@@ -5105,6 +5255,23 @@ async function copyPasswordResetTemp() {
     }
 }
 
+async function copyEmployeeCreatePassword() {
+    const input = document.getElementById("employeeCreateResultPassword");
+    const value = input ? input.value : "";
+    if (!value) return;
+
+    try {
+        await navigator.clipboard.writeText(value);
+        employeeShowToast("初始密码已复制", "success");
+    } catch (e) {
+        if (input) {
+            input.focus();
+            input.select();
+        }
+        employeeShowToast("请手动复制初始密码", "error");
+    }
+}
+
 function currentEmployeeStore() {
     const params = new URLSearchParams(window.location.search);
     return params.get("store") || "";
@@ -5113,6 +5280,19 @@ function currentEmployeeStore() {
 function currentEmployeeStatusFilter() {
     const params = new URLSearchParams(window.location.search);
     return params.get("status_filter") || "active";
+}
+
+function openEmployeeCreateModal() {
+    const form = document.getElementById("employeeCreateForm");
+    if (form) form.reset();
+
+    const typeInput = document.getElementById("employeeCreateType");
+    if (typeInput) typeInput.value = "regular";
+
+    const modalEl = document.getElementById("employeeCreateModal");
+    if (modalEl) {
+        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    }
 }
 
 function openEmployeeTypeModal(employeeId) {
@@ -6358,6 +6538,24 @@ function handleEmployeeAjaxResult(result) {
     if (result.action === "employee_password_reset") {
         updateEmployeeRow(payload.employee);
         showPasswordResetResult(payload.temp_password);
+    }
+
+    if (result.action === "employee_created") {
+        updateEmployeeStatCards(payload.counts);
+
+        const statusFilter = currentEmployeeStatusFilter();
+        if (statusFilter === "active" || statusFilter === "all") {
+            prependEmployeeRow(payload.employee);
+        }
+
+        const modalEl = document.getElementById("employeeCreateModal");
+        const modal = modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
+        if (modal) modal.hide();
+
+        const form = document.getElementById("employeeCreateForm");
+        if (form) form.reset();
+
+        showEmployeeCreateResult(payload.employee, payload.temp_password);
     }
 
     if (result.action === "employee_type_updated") {

@@ -6866,6 +6866,126 @@ async def register_action(
     return RedirectResponse(url="/login", status_code=303)
 
 
+@app.post("/employees/create")
+async def create_employee(
+        request: Request,
+        username: str = Form(...),
+        display_name: str = Form(...),
+        password: str = Form(...),
+        confirm_password: str = Form(...),
+        employee_type: str = Form(...),
+        store: str = Form(""),
+        status_filter: str = Form("active"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请先登录", 401)
+        return RedirectResponse(url="/login", status_code=303)
+
+    if user.role != "admin":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("只有管理员可以新增员工", 403)
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="只有管理员可以新增员工"),
+            status_code=303
+        )
+
+    username = _normalize_text(username)
+    display_name = _normalize_text(display_name)
+    password = (password or "").strip()
+    confirm_password = (confirm_password or "").strip()
+    employee_type = _normalize_text(employee_type) or "regular"
+
+    if not username:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("登录账号不能为空")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="登录账号不能为空"),
+            status_code=303
+        )
+
+    if not display_name:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("员工姓名不能为空")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="员工姓名不能为空"),
+            status_code=303
+        )
+
+    if len(password) < 8:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("初始密码至少需要 8 位")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="初始密码至少需要 8 位"),
+            status_code=303
+        )
+
+    if password != confirm_password:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("两次输入的初始密码不一致")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="两次输入的初始密码不一致"),
+            status_code=303
+        )
+
+    if employee_type not in ALLOWED_OPERATOR_EMPLOYEE_TYPES:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("员工类型不正确")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="员工类型不正确"),
+            status_code=303
+        )
+
+    if session.exec(select(User).where(User.username == username)).first():
+        if _is_ajax_request(request):
+            return _employee_ajax_error("登录账号已存在，请更换后重试")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="登录账号已存在，请更换后重试"),
+            status_code=303
+        )
+
+    if session.exec(select(User).where(User.display_name == display_name)).first():
+        if _is_ajax_request(request):
+            return _employee_ajax_error("员工姓名已存在，请使用唯一姓名")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="员工姓名已存在，请使用唯一姓名"),
+            status_code=303
+        )
+
+    new_user = User(
+        username=username,
+        hashed_password=get_password_hash(password),
+        display_name=display_name,
+        role="operator",
+        employee_type=employee_type,
+        must_change_password=True
+    )
+    session.add(new_user)
+    session.commit()
+    session.refresh(new_user)
+    _create_initial_employee_type_record(session, new_user)
+    session.refresh(new_user)
+
+    message = f"已新增员工 {new_user.display_name}"
+    if _is_ajax_request(request):
+        return _employee_ajax_success(
+            message=message,
+            action="employee_created",
+            payload={
+                "employee": _employee_user_payload(new_user, user, session),
+                "counts": _employee_module_counts_payload(session),
+                "temp_password": password
+            }
+        )
+
+    return RedirectResponse(
+        url=_build_employees_url(store, "employee_list", status_filter="active", success=message),
+        status_code=303
+    )
+
+
 @app.get("/logout")
 async def logout(
         request: Request,
