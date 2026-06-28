@@ -13,7 +13,7 @@ import json
 import secrets
 import string
 from sqlmodel import Session, select
-from sqlalchemy import func, or_, delete, text  # 用于搜索逻辑；text 用于团队硬删除时兼容清理工资结算表
+from sqlalchemy import func, or_, and_, delete, text  # 用于搜索逻辑；text 用于团队硬删除时兼容清理工资结算表
 from datetime import date, datetime,timedelta,time
 from typing import Optional, List, Tuple
 import itertools
@@ -729,6 +729,58 @@ def _is_locked_flexible_replacement_shift(
     ).first() is not None
 
 
+def _has_effective_leave_or_replacement_record(
+        session: Session,
+        *,
+        user_id: int,
+        work_date: date
+) -> bool:
+    """
+    判断员工当天是否已有生效请假或顶班记录。
+
+    用于当天换班保护：
+    - 请假本人：已生效请假会改变当天应出勤关系，不能再参与换班；
+    - 顶班人：已同意休班顶班或已安排机动顶班后，不能再参与换班。
+    """
+    return session.exec(
+        select(EmployeeLeaveRequest).where(
+            EmployeeLeaveRequest.leave_date == work_date,
+            or_(
+                and_(
+                    EmployeeLeaveRequest.user_id == user_id,
+                    EmployeeLeaveRequest.status.in_(list(LEAVE_PENALTY_EFFECTIVE_STATUSES))
+                ),
+                and_(
+                    EmployeeLeaveRequest.replacement_user_id == user_id,
+                    or_(
+                        and_(
+                            EmployeeLeaveRequest.status == "approved",
+                            EmployeeLeaveRequest.replacement_response == "accepted"
+                        ),
+                        EmployeeLeaveRequest.status == "approved_with_flexible"
+                    )
+                )
+            )
+        )
+    ).first() is not None
+
+
+def _shift_swap_has_effective_leave_or_replacement_conflict(
+        session: Session,
+        *,
+        user_ids: List[int],
+        swap_date: date
+) -> bool:
+    return any(
+        _has_effective_leave_or_replacement_record(
+            session=session,
+            user_id=user_id,
+            work_date=swap_date
+        )
+        for user_id in user_ids
+    )
+
+
 def _shift_swap_has_conflict(
         session: Session,
         *,
@@ -1202,6 +1254,12 @@ def _employee_user_payload(emp: User, current_user: User, session: Optional[Sess
     """
     pending_change = _pending_employee_type_change(session, emp.id) if session else None
     employee_type = "management" if emp.role == "admin" else (emp.employee_type or "regular")
+    is_resigned = _is_resigned_employee(emp)
+    status_label = (
+        _employee_resignation_label(emp)
+        if is_resigned
+        else ("在职" if getattr(emp, "is_active", True) else "已停用")
+    )
 
     return {
         "id": emp.id,
@@ -1215,7 +1273,10 @@ def _employee_user_payload(emp: User, current_user: User, session: Optional[Sess
         "pending_effective_from": str(pending_change.effective_from) if pending_change else "",
         "role_label": "管理员" if emp.role == "admin" else "普通员工",
         "is_active": bool(getattr(emp, "is_active", True)),
-        "status_label": "在职" if getattr(emp, "is_active", True) else "已停用",
+        "employment_status": getattr(emp, "employment_status", "active") or "active",
+        "is_resigned": is_resigned,
+        "resignation_date": str(getattr(emp, "resignation_date", "") or ""),
+        "status_label": status_label,
         "deleted_at": emp.deleted_at.strftime("%Y-%m-%d %H:%M:%S") if getattr(emp, "deleted_at", None) else "",
         "is_current_user": emp.id == current_user.id,
         "must_change_password": bool(getattr(emp, "must_change_password", False)),
@@ -1393,6 +1454,31 @@ def _salary_flow_payload(item: SalaryFlowRecord) -> dict:
         "created_by_name": item.created_by_name or "",
         "created_at": item.created_at.strftime("%Y-%m-%d %H:%M:%S") if item.created_at else "",
     }
+
+
+def _salary_flow_payload_map_for_month(
+        session: Session,
+        year: int,
+        month: int
+) -> dict[int, list[dict]]:
+    """
+    按员工聚合某月全部工资流水，供管理员工资结算页展开查看明细。
+    """
+    flows = session.exec(
+        select(SalaryFlowRecord).where(
+            SalaryFlowRecord.salary_year == year,
+            SalaryFlowRecord.salary_month == month
+        ).order_by(
+            SalaryFlowRecord.flow_date.desc(),
+            SalaryFlowRecord.id.desc()
+        )
+    ).all()
+
+    flow_map: dict[int, list[dict]] = {}
+    for flow in flows:
+        flow_map.setdefault(flow.user_id, []).append(_salary_flow_payload(flow))
+    return flow_map
+
 
 # =========================
 # V3 员工管理：我的工资辅助函数
@@ -1592,6 +1678,49 @@ def _calc_personal_order_commission(order_count: int) -> float:
     return round(total, 2)
 
 
+def _is_resigned_employee(user: Optional[User]) -> bool:
+    return bool(user and getattr(user, "employment_status", "active") == "resigned")
+
+
+def _is_resignation_month(user: Optional[User], year: int, month: int) -> bool:
+    resignation_date = getattr(user, "resignation_date", None) if user else None
+    return bool(
+        _is_resigned_employee(user)
+        and resignation_date
+        and resignation_date.year == year
+        and resignation_date.month == month
+    )
+
+
+def _can_resigned_employee_login(user: Optional[User], today: Optional[date] = None) -> bool:
+    if not _is_resigned_employee(user):
+        return False
+    resignation_date = getattr(user, "resignation_date", None)
+    if not resignation_date:
+        return False
+    today = today or date.today()
+    return today.year == resignation_date.year and today.month == resignation_date.month
+
+
+def _employee_can_authenticate(user: Optional[User], today: Optional[date] = None) -> bool:
+    if not user:
+        return False
+    if getattr(user, "is_active", True):
+        return True
+    return _can_resigned_employee_login(user, today=today)
+
+
+def _is_resigned_read_only_user(user: Optional[User], today: Optional[date] = None) -> bool:
+    return bool(user and not getattr(user, "is_active", True) and _can_resigned_employee_login(user, today=today))
+
+
+def _employee_resignation_label(user: Optional[User]) -> str:
+    if not _is_resigned_employee(user):
+        return ""
+    resignation_date = getattr(user, "resignation_date", None)
+    return f"离职（{resignation_date}）" if resignation_date else "离职"
+
+
 def _get_employee_order_count_for_month(
         session: Session,
         employee_name: str,
@@ -1615,6 +1744,24 @@ def _get_employee_order_count_for_month(
             GameRecord.who_did == employee_name,
             GameRecord.record_date >= month_start,
             GameRecord.record_date <= month_end
+        )
+    ).all())
+
+
+def _get_employee_order_count_for_period(
+        session: Session,
+        employee_name: str,
+        start_date: date,
+        end_date: date
+) -> int:
+    if end_date < start_date:
+        return 0
+    return len(session.exec(
+        select(GameRecord).where(
+            GameRecord.status == "formed",
+            GameRecord.who_did == employee_name,
+            GameRecord.record_date >= start_date,
+            GameRecord.record_date <= end_date
         )
     ).all())
 
@@ -1650,6 +1797,56 @@ def _build_employee_order_count_map(
         count_map[name] = count_map.get(name, 0) + 1
 
     return count_map
+
+
+def _calc_resigned_employee_shift_salary(
+        session: Session,
+        *,
+        user_id: int,
+        employee_name: str,
+        year: int,
+        month: int,
+        resignation_date: date
+) -> Tuple[float, int, int]:
+    month_start, month_end = _get_month_start_end(year, month)
+    end_date = min(resignation_date, month_end)
+    if end_date < month_start:
+        return 0.0, 0, 0
+
+    shifts = session.exec(
+        select(ShiftSchedule).where(
+            ShiftSchedule.operator_name == employee_name,
+            ShiftSchedule.work_date >= month_start,
+            ShiftSchedule.work_date <= end_date,
+            ShiftSchedule.shift_type != "off"
+        )
+    ).all()
+
+    active_leave_dates = {
+        item.leave_date
+        for item in session.exec(
+            select(EmployeeLeaveRequest).where(
+                EmployeeLeaveRequest.user_id == user_id,
+                EmployeeLeaveRequest.leave_date >= month_start,
+                EmployeeLeaveRequest.leave_date <= end_date,
+                EmployeeLeaveRequest.status.in_(list(LEAVE_PENALTY_EFFECTIVE_STATUSES))
+            )
+        ).all()
+    }
+
+    normal_count = 0
+    bigmid_count = 0
+    for shift in shifts:
+        if shift.work_date in active_leave_dates:
+            continue
+        shift_type = normalize_shift_type(shift.shift_type or "off")
+        if shift_type == "bigmid":
+            bigmid_count += 1
+        elif _is_daily_shift(shift_type):
+            normal_count += 1
+
+    amount = round(normal_count * NORMAL_DAILY_SALARY + bigmid_count * BIGMID_DAILY_SALARY, 2)
+    return amount, normal_count, bigmid_count
 
 
 def _employee_has_full_attendance_bonus(
@@ -1827,7 +2024,8 @@ def _sum_salary_flows_for_settlement(
         session: Session,
         user_id: int,
         year: int,
-        month: int
+        month: int,
+        exclude_leave_deduct: bool = False
 ) -> dict:
     """
     汇总员工某月全部工资流水，用于写入 MonthlySalarySettlement。
@@ -1857,6 +2055,11 @@ def _sum_salary_flows_for_settlement(
     }
 
     for f in flows:
+        if exclude_leave_deduct and f.flow_type == "leave_deduct" and f.source_type == "leave_request":
+            leave_req = session.get(EmployeeLeaveRequest, f.source_id) if f.source_id else None
+            if leave_req and leave_req.user_id == user_id:
+                continue
+
         amount = round(float(f.amount or 0), 2)
         category = f.flow_category or ""
 
@@ -1885,13 +2088,24 @@ def _sum_salary_flows_for_settlement(
     return result
 
 
-def _salary_settlement_payload(item: MonthlySalarySettlement) -> dict:
+def _salary_settlement_payload(
+        session: Session,
+        item: MonthlySalarySettlement,
+        salary_flows: Optional[list[dict]] = None
+) -> dict:
     """
     工资结算行局部刷新数据。
 
     用途：
     管理员生成、确认、发放、锁定工资后，前端只更新当前员工这一行。
     """
+    if salary_flows is None:
+        salary_flows = _salary_flow_payload_map_for_month(
+            session=session,
+            year=item.salary_year,
+            month=item.salary_month
+        ).get(item.user_id, [])
+
     final_salary = round(float(item.final_salary or 0), 2)
     employee_social_security_amount = round(float(getattr(item, "employee_social_security_amount", 0) or 0), 2)
     social_security_amount = round(float(getattr(item, "social_security_amount", 0) or 0), 2)
@@ -1917,6 +2131,8 @@ def _salary_settlement_payload(item: MonthlySalarySettlement) -> dict:
         "payable_salary": payable_salary,
         "social_security_amount": social_security_amount,
         "actual_salary": actual_salary,
+        "salary_flows": salary_flows,
+        "salary_flow_count": len(salary_flows),
 
         "personal_order_count": item.personal_order_count or 0,
 
@@ -2006,18 +2222,38 @@ def _calculate_salary_for_one_employee(
     )
 
     employee_type = _employee_salary_type(user_obj)
-    personal_order_count = all_order_count_map.get(user_obj.display_name, 0)
+    resignation_date = getattr(user_obj, "resignation_date", None)
+    is_resignation_month = _is_resignation_month(user_obj, year, month)
+    month_start, month_end = _get_month_start_end(year, month)
+
+    if is_resignation_month and resignation_date:
+        commission_end_date = min(resignation_date, month_end)
+        personal_order_count = _get_employee_order_count_for_period(
+            session=session,
+            employee_name=user_obj.display_name,
+            start_date=month_start,
+            end_date=commission_end_date
+        )
+    else:
+        personal_order_count = all_order_count_map.get(user_obj.display_name, 0)
+
     personal_commission = (
         0.0
         if employee_type == "logistics"
         else _calc_personal_order_commission(personal_order_count)
     )
-    reached_personal_store_count, personal_store_bonus, personal_store_bonus_halved = _calc_personal_store_bonus(
-        session=session,
-        employee=user_obj,
-        year=year,
-        month=month
-    )
+
+    if is_resignation_month:
+        reached_personal_store_count = 0
+        personal_store_bonus = 0.0
+        personal_store_bonus_halved = False
+    else:
+        reached_personal_store_count, personal_store_bonus, personal_store_bonus_halved = _calc_personal_store_bonus(
+            session=session,
+            employee=user_obj,
+            year=year,
+            month=month
+        )
 
     is_flexible_employee = employee_type == "flexible"
     if is_flexible_employee:
@@ -2041,10 +2277,25 @@ def _calculate_salary_for_one_employee(
         year=year,
         month=month
     )
-    full_attendance_bonus = 200.0 if has_full_attendance else 0.0
+    full_attendance_bonus = 0.0 if is_resignation_month else (200.0 if has_full_attendance else 0.0)
 
     # ===== 生成自动工资流水 =====
-    if employee_type == "flexible":
+    if is_resignation_month and resignation_date:
+        base_salary, normal_shift_count, bigmid_shift_count = _calc_resigned_employee_shift_salary(
+            session=session,
+            user_id=user_obj.id,
+            employee_name=user_obj.display_name,
+            year=year,
+            month=month,
+            resignation_date=resignation_date
+        )
+        base_salary_description = (
+            f"{year}年{month}月离职员工基础工资按 {month_start} 至 {min(resignation_date, month_end)} "
+            f"排班非休息班次计算：日常班 {normal_shift_count} 天 × {NORMAL_DAILY_SALARY:.0f} 元，"
+            f"大中班 {bigmid_shift_count} 天 × {BIGMID_DAILY_SALARY:.0f} 元。"
+            "已生效请假班次不计基础工资，请假扣款不重复计入结算。"
+        )
+    elif employee_type == "flexible":
         base_salary = FLEXIBLE_BASE_SALARY
         base_salary_description = f"{year}年{month}月机动类型员工基础工资 1500 元，包含本月前 15 次非休息班次的普通班工资。"
     elif employee_type == "logistics":
@@ -2104,7 +2355,11 @@ def _calculate_salary_for_one_employee(
         flow_category="personal_commission",
         flow_type="personal_order_commission",
         title="单量提成",
-        description=f"{year}年{month}月个人订单 {personal_order_count} 单，对应单量提成 {personal_commission:.2f} 元。",
+        description=(
+            f"{year}年{month}月个人订单 {personal_order_count} 单，对应单量提成 {personal_commission:.2f} 元。"
+            if not is_resignation_month
+            else f"{year}年{month}月离职员工单量提成统计至 {resignation_date}：{personal_order_count} 单，对应 {personal_commission:.2f} 元。"
+        ),
         settlement_id=settlement.id,
         operator=operator
     )
@@ -2129,7 +2384,8 @@ def _calculate_salary_for_one_employee(
         session=session,
         user_id=user_obj.id,
         year=year,
-        month=month
+        month=month,
+        exclude_leave_deduct=is_resignation_month
     )
 
     settlement.employee_name_snapshot = user_obj.display_name
@@ -2170,14 +2426,24 @@ def _build_salary_settlement_data(
     构建管理员“工资结算”页面数据。
 
     说明：
-    1. 展示所有在职员工；
+    1. 展示所有在职员工，以及结算月份内离职的员工；
     2. 如果某员工已有本月结算记录，则展示结算数据；
     3. 如果还没有生成结算，前端显示“未生成”。
     """
+    month_start, month_end = _get_month_start_end(year, month)
     employees = session.exec(
         select(User).where(
-            User.is_active == True,
-            User.hide_from_schedule_performance == False
+            or_(
+                and_(
+                    User.is_active == True,
+                    User.hide_from_schedule_performance == False
+                ),
+                and_(
+                    User.employment_status == "resigned",
+                    User.resignation_date >= month_start,
+                    User.resignation_date <= month_end
+                )
+            )
         ).order_by(User.role, User.id)
     ).all()
 
@@ -2189,6 +2455,11 @@ def _build_salary_settlement_data(
     ).all()
 
     settlement_map = {s.user_id: s for s in settlements}
+    salary_flow_map = _salary_flow_payload_map_for_month(
+        session=session,
+        year=year,
+        month=month
+    )
 
     rows = []
 
@@ -2197,7 +2468,11 @@ def _build_salary_settlement_data(
         rows.append({
             "employee": emp,
             "settlement": item,
-            "payload": _salary_settlement_payload(item) if item else None,
+            "payload": _salary_settlement_payload(
+                session=session,
+                item=item,
+                salary_flows=salary_flow_map.get(emp.id, [])
+            ) if item else None,
         })
 
     generated_count = len([r for r in rows if r["settlement"]])
@@ -2444,7 +2719,7 @@ def _build_employee_whiteboard_data(
     elif selected_employee_name and selected_employee_name != "all" and selected_employee_name not in available_employee_store_names:
         selected_employee_name = "all"
 
-    employee_store_rows = []
+    all_employee_store_rows = []
     for (employee_name, store_name), order_count in employee_store_order_count_map.items():
         if order_count <= 0:
             continue
@@ -2452,17 +2727,13 @@ def _build_employee_whiteboard_data(
             continue
         if employee_name not in eligible_employee_store_names:
             continue
-        if not can_view_all_employee_store_rows and employee_name != current_employee_name:
-            continue
-        if can_view_all_employee_store_rows and selected_employee_name != "all" and employee_name != selected_employee_name:
-            continue
 
         target_order_count = round((store_target_map.get(store_name, 0) or 0) / 6, 2)
         achievement_rate = 0.0
         if target_order_count > 0:
             achievement_rate = round(order_count / target_order_count * 100, 2)
 
-        employee_store_rows.append({
+        all_employee_store_rows.append({
             "employee_name": employee_name,
             "store_name": store_name,
             "target_order_count": target_order_count,
@@ -2471,6 +2742,17 @@ def _build_employee_whiteboard_data(
             "is_reached": order_count >= target_order_count if target_order_count > 0 else False,
             "achievement_rate": achievement_rate,
         })
+
+    employee_store_rows = [
+        row for row in all_employee_store_rows
+        if (
+            (not can_view_all_employee_store_rows and row["employee_name"] == current_employee_name)
+            or (
+                can_view_all_employee_store_rows
+                and (selected_employee_name == "all" or row["employee_name"] == selected_employee_name)
+            )
+        )
+    ]
 
     employee_store_rows.sort(
         key=lambda x: (
@@ -2481,11 +2763,20 @@ def _build_employee_whiteboard_data(
         )
     )
 
-    max_employee_store_bar_value = max(
-        [max(row["actual_order_count"], row["target_order_count"]) for row in employee_store_rows] or [1]
+    all_employee_store_rows.sort(
+        key=lambda x: (
+            x["employee_name"],
+            -x["actual_order_count"],
+            -x["target_order_count"],
+            x["store_name"],
+        )
     )
 
-    for row in employee_store_rows:
+    max_employee_store_bar_value = max(
+        [max(row["actual_order_count"], row["target_order_count"]) for row in all_employee_store_rows] or [1]
+    )
+
+    for row in all_employee_store_rows:
         row["actual_percent"] = (
             round(row["actual_order_count"] / max_employee_store_bar_value * 100, 2)
             if max_employee_store_bar_value else 0
@@ -2494,6 +2785,10 @@ def _build_employee_whiteboard_data(
             round(row["target_order_count"] / max_employee_store_bar_value * 100, 2)
             if max_employee_store_bar_value else 0
         )
+
+    employee_store_rows_by_employee = {}
+    for row in all_employee_store_rows:
+        employee_store_rows_by_employee.setdefault(row["employee_name"], []).append(row)
 
     # ===== 2. 员工订单量 =====
     employee_rows = []
@@ -2510,6 +2805,8 @@ def _build_employee_whiteboard_data(
             "employee_name": employee_name,
             "order_count": order_count,
             "is_visible_employee": employee_name in visible_employee_names,
+            "store_rows": employee_store_rows_by_employee.get(employee_name, []),
+            "store_row_count": len(employee_store_rows_by_employee.get(employee_name, [])),
         })
 
     employee_rows.sort(key=lambda x: x["order_count"], reverse=True)
@@ -5685,8 +5982,8 @@ async def get_current_user(
     if not user:
         return None
 
-    # V3 员工管理：已停用账号视为未登录
-    if not getattr(user, "is_active", True):
+    # 停用账号视为未登录；离职员工仅离职当月可只读登录。
+    if not _employee_can_authenticate(user):
         return None
 
     return user
@@ -5695,11 +5992,19 @@ async def get_current_user(
 DUTY_ACTION_STORE = "store_duty"
 DUTY_ACTION_REVIEW = "review_info"
 DUTY_ACTION_LOGIN = "login_duty"
+DUTY_WORK_ACTION_TYPES = {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN}
 DUTY_REVIEW_SESSION_COOKIE = "employee_review_session_id"
 
 
 def _is_logistics_employee(user: Optional[User]) -> bool:
     return bool(user and user.role != "admin" and (user.employee_type or "regular") == "logistics")
+
+
+def _format_minutes_duration(total_minutes: int) -> str:
+    total_minutes = max(int(total_minutes or 0), 0)
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    return f"{hours}小时{minutes}分钟"
 
 
 def _encode_duty_store_names(store_names: List[str]) -> str:
@@ -6170,15 +6475,35 @@ def _run_store_duty_info_self_check(
         ).order_by(GameRecord.record_source, GameRecord.store_name, GameRecord.order_end_time, GameRecord.id)
     ).all()
 
-    missing_items = []
+    blocking_items = []
+    warning_items = []
     for game in candidate_games:
         reasons = _get_store_duty_info_missing_reasons(game)
-        if reasons:
-            missing_items.append(_format_store_duty_info_check_item(game, reasons))
+        if not reasons:
+            continue
 
-    if missing_items:
+        game_blocking_reasons = []
+        game_warning_reasons = []
+        has_followup_note = _game_has_any_followup_note(game)
+
+        for reason in reasons:
+            if reason == "订单开始时间为空" and has_followup_note:
+                game_warning_reasons.append(reason)
+            else:
+                game_blocking_reasons.append(reason)
+
+        if game_blocking_reasons:
+            blocking_items.append(_format_store_duty_info_check_item(game, game_blocking_reasons))
+        if game_warning_reasons:
+            warning_items.append(_format_store_duty_info_check_item(game, game_warning_reasons))
+
+    if blocking_items:
         result["blocking_messages"].append(
-            "以下订单存在信息遗漏，无法结束带店：\n" + "\n".join(missing_items)
+            "以下订单存在信息遗漏，无法结束带店：\n" + "\n".join(blocking_items)
+        )
+    if warning_items:
+        result["warning_messages"].append(
+            "以下订单存在信息提醒，请继续跟进：\n" + "\n".join(warning_items)
         )
 
     return result
@@ -6645,10 +6970,46 @@ async def enforce_password_change(request: Request, call_next):
                 user = session.get(User, user_id_int)
                 if (
                     user
-                    and getattr(user, "is_active", True)
+                    and _employee_can_authenticate(user)
+                    and not _is_resigned_read_only_user(user)
                     and getattr(user, "must_change_password", False)
                 ):
                     return RedirectResponse(url="/change-password", status_code=303)
+
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def enforce_resigned_employee_read_only(request: Request, call_next):
+    path = request.url.path
+    allowed_prefixes = ("/static",)
+    allowed_paths = {"/login", "/logout"}
+
+    if path in allowed_paths or any(path.startswith(prefix) for prefix in allowed_prefixes):
+        return await call_next(request)
+
+    user_id = request.cookies.get("user_id")
+    if not user_id:
+        return await call_next(request)
+
+    try:
+        user_id_int = int(user_id)
+    except Exception:
+        return await call_next(request)
+
+    with Session(engine) as session:
+        user = session.get(User, user_id_int)
+        if _is_resigned_read_only_user(user):
+            if request.method in {"GET", "HEAD", "OPTIONS"}:
+                if path == "/employees":
+                    return await call_next(request)
+                return RedirectResponse(url="/employees?tab=my_salary&error=离职员工本月仅可查看历史工资", status_code=303)
+            if _is_ajax_request(request):
+                return JSONResponse(
+                    {"ok": False, "message": "离职员工本月仅可查看历史信息，不能进行操作"},
+                    status_code=403
+                )
+            return RedirectResponse(url="/employees?tab=my_salary&error=离职员工本月仅可查看历史信息，不能进行操作", status_code=303)
 
     return await call_next(request)
 
@@ -6682,7 +7043,9 @@ async def enforce_employee_duty_release(request: Request, call_next):
 
     with Session(engine) as session:
         user = session.get(User, user_id_int)
-        if not user or not getattr(user, "is_active", True):
+        if not user or not _employee_can_authenticate(user):
+            return await call_next(request)
+        if _is_resigned_read_only_user(user):
             return await call_next(request)
         if getattr(user, "must_change_password", False):
             return await call_next(request)
@@ -6821,14 +7184,20 @@ async def login_action(
             status_code=303
         )
 
-    # V3 员工管理：停用员工不允许登录
-    if not getattr(user, "is_active", True):
+    # 停用员工不允许登录；离职员工仅离职当月可只读登录。
+    if not _employee_can_authenticate(user):
+        error_message = "离职员工仅离职当月可登录查看历史工资" if _is_resigned_employee(user) else "该员工账号已停用，请联系管理员"
         return RedirectResponse(
-            url="/login?error=该员工账号已停用，请联系管理员",
+            url="/login?" + urlencode({"error": error_message}),
             status_code=303
         )
 
-    target_url = "/change-password" if getattr(user, "must_change_password", False) else "/"
+    is_resigned_read_only = _is_resigned_read_only_user(user)
+    target_url = (
+        "/employees?tab=my_salary"
+        if is_resigned_read_only
+        else "/change-password" if getattr(user, "must_change_password", False) else "/"
+    )
     response = RedirectResponse(url=target_url, status_code=303)
     response.set_cookie(
         key="user_id",
@@ -6836,7 +7205,7 @@ async def login_action(
         max_age=60 * 60 * 24 * 7
     )
     response.delete_cookie(DUTY_REVIEW_SESSION_COOKIE)
-    if _is_logistics_employee(user):
+    if _is_logistics_employee(user) and not is_resigned_read_only:
         _start_logistics_login_duty(session, user)
     return response
 
@@ -7397,7 +7766,10 @@ async def employees_page(
         "my_salary",
     ]
 
-    if user.role == "admin":
+    if _is_resigned_read_only_user(user):
+        allowed_tabs = ["my_salary"]
+        default_tab = "my_salary"
+    elif user.role == "admin":
         allowed_tabs = admin_tabs
         default_tab = "employee_list"
     else:
@@ -7471,6 +7843,7 @@ async def employees_page(
     team_management_data = None
     duty_session_rows = []
     current_duty_rows = []
+    duty_summary_rows = []
     duty_filters = {
         "date_filter": duty_date_filter,
         "start_date": duty_start_date,
@@ -7707,7 +8080,7 @@ async def employees_page(
                     "action_label": "开始带店",
                     "store_names": "、".join(_decode_duty_store_names(store_session.store_names_json)) or "-",
                     "action_time": store_session.started_at,
-                    "duration_text": f"{total_minutes // 60}小时{total_minutes % 60}分钟" if store_session.started_at else "-",
+                    "duration_text": _format_minutes_duration(total_minutes) if store_session.started_at else "-",
                 })
             elif login_session:
                 total_minutes = max(int((now - login_session.started_at).total_seconds() // 60), 0) if login_session.started_at else 0
@@ -7717,7 +8090,7 @@ async def employees_page(
                     "action_label": "登录上班",
                     "store_names": "-",
                     "action_time": login_session.started_at,
-                    "duration_text": f"{total_minutes // 60}小时{total_minutes % 60}分钟" if login_session.started_at else "-",
+                    "duration_text": _format_minutes_duration(total_minutes) if login_session.started_at else "-",
                 })
             elif review_session:
                 current_duty_rows.append({
@@ -7790,7 +8163,7 @@ async def employees_page(
             if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN} and action_time:
                 end_for_calc = end_time or now
                 total_minutes = max(int((end_for_calc - action_time).total_seconds() // 60), 0)
-                duration_text = f"{total_minutes // 60}小时{total_minutes % 60}分钟"
+                duration_text = _format_minutes_duration(total_minutes)
 
             duty_session_rows.append({
                 "record": item,
@@ -7808,6 +8181,54 @@ async def employees_page(
             if item.action_type == DUTY_ACTION_LOGIN:
                 duty_session_rows[-1]["action_label"] = "登录上班"
                 duty_session_rows[-1]["status_label"] = _employee_duty_status_label(item)
+
+        summary_map = {}
+        for row in duty_session_rows:
+            record = row["record"]
+            action_time = row.get("action_time")
+            end_time = row.get("end_time")
+            if record.action_type not in DUTY_WORK_ACTION_TYPES:
+                continue
+            if not action_time or not end_time or end_time < action_time:
+                continue
+
+            user_summary = summary_map.setdefault(record.user_id, {
+                "user_id": record.user_id,
+                "employee_name": record.employee_name,
+                "work_days": set(),
+                "total_minutes": 0,
+                "completed_record_count": 0,
+            })
+            user_summary["total_minutes"] += max(int((end_time - action_time).total_seconds() // 60), 0)
+            user_summary["completed_record_count"] += 1
+            user_summary["work_days"].add(action_time.date())
+
+        duty_summary_rows = []
+        for item in summary_map.values():
+            duty_summary_rows.append({
+                "user_id": item["user_id"],
+                "employee_name": item["employee_name"],
+                "work_day_count": len(item["work_days"]),
+                "total_minutes": item["total_minutes"],
+                "total_duration_text": _format_minutes_duration(item["total_minutes"]),
+                "completed_record_count": item["completed_record_count"],
+            })
+        duty_summary_rows.sort(
+            key=lambda item: (item["total_minutes"], item["work_day_count"], item["completed_record_count"]),
+            reverse=True
+        )
+
+        if duty_employee != "all":
+            selected_emp = session.get(User, int(duty_employee)) if str(duty_employee).isdigit() else None
+            if selected_emp and selected_emp.id not in summary_map:
+                duty_summary_rows.append({
+                    "user_id": selected_emp.id,
+                    "employee_name": selected_emp.display_name,
+                    "work_day_count": 0,
+                    "total_minutes": 0,
+                    "total_duration_text": _format_minutes_duration(0),
+                    "completed_record_count": 0,
+                })
 
         duty_filters.update({
             "date_filter": duty_date_filter,
@@ -7837,6 +8258,7 @@ async def employees_page(
         "status_filter": status_filter,
         "employee_type_options": EMPLOYEE_TYPE_OPTIONS,
         "employee_type_label": _employee_type_label,
+        "employee_resignation_label": _employee_resignation_label,
         "employee_type_change_map": employee_type_change_map,
 
         # 顶部统计数据
@@ -7899,6 +8321,7 @@ async def employees_page(
         "duty_session_rows": duty_session_rows,
         "current_duty_rows": current_duty_rows,
         "duty_filters": duty_filters,
+        "duty_summary_rows": duty_summary_rows,
     })
 
 
@@ -7977,6 +8400,7 @@ async def delete_employee(
 
     employee.is_active = False
     employee.deleted_at = datetime.now()
+    employee.employment_status = "inactive"
 
     session.add(employee)
     session.commit()
@@ -7994,6 +8418,116 @@ async def delete_employee(
 
     return RedirectResponse(
         url=f"/employees?store={store}&tab=employee_list&status_filter=inactive&success=员工已停用，历史业绩和订单记录已保留",
+        status_code=303
+    )
+
+
+# =========================
+# V4 员工离职：本月只读登录，离职当月工资特殊核算
+# =========================
+@app.post("/employees/resign/{employee_id}")
+async def resign_employee(
+        request: Request,
+        employee_id: int,
+        store: str = Form(""),
+        status_filter: str = Form("active"),
+        resignation_date: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请先登录", 401)
+        return RedirectResponse(url="/login", status_code=303)
+
+    if user.role != "admin":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("只有管理员可以办理员工离职", 403)
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="只有管理员可以办理员工离职"),
+            status_code=303
+        )
+
+    employee = session.get(User, employee_id)
+    if not employee:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("员工不存在", 404)
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="员工不存在"),
+            status_code=303
+        )
+    if employee.id == user.id:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("不能将当前登录账号设为离职")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="不能将当前登录账号设为离职"),
+            status_code=303
+        )
+    if employee.role == "admin":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("管理员账号不能通过员工离职处理")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="管理员账号不能通过员工离职处理"),
+            status_code=303
+        )
+    if _is_resigned_employee(employee):
+        if _is_ajax_request(request):
+            return _employee_ajax_error("该员工已经是离职状态")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="该员工已经是离职状态"),
+            status_code=303
+        )
+    if not getattr(employee, "is_active", True):
+        if _is_ajax_request(request):
+            return _employee_ajax_error("已停用员工不能办理离职")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="已停用员工不能办理离职"),
+            status_code=303
+        )
+
+    try:
+        resign_d = _parse_form_date(resignation_date, date.today())
+    except ValueError:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("离职日期格式不正确")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="离职日期格式不正确"),
+            status_code=303
+        )
+    if resign_d > date.today():
+        if _is_ajax_request(request):
+            return _employee_ajax_error("离职日期不能晚于今天")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="离职日期不能晚于今天"),
+            status_code=303
+        )
+
+    now = datetime.now()
+    employee.is_active = False
+    employee.deleted_at = now
+    employee.employment_status = "resigned"
+    employee.resignation_date = resign_d
+    employee.resigned_at = now
+    employee.resigned_by_user_id = user.id
+    employee.resigned_by_name = user.display_name
+    employee.hide_from_schedule_performance = True
+
+    session.add(employee)
+    session.commit()
+    session.refresh(employee)
+
+    if _is_ajax_request(request):
+        return _employee_ajax_success(
+            message="员工已标记离职，本月仅可查看历史工资",
+            action="employee_resigned",
+            payload={
+                "employee": _employee_user_payload(employee, user, session),
+                "counts": _employee_module_counts_payload(session)
+            }
+        )
+
+    return RedirectResponse(
+        url=_build_employees_url(store, "employee_list", status_filter="inactive", success="员工已标记离职，本月仅可查看历史工资"),
         status_code=303
     )
 
@@ -8049,6 +8583,12 @@ async def restore_employee(
 
     employee.is_active = True
     employee.deleted_at = None
+    employee.employment_status = "active"
+    employee.resignation_date = None
+    employee.resigned_at = None
+    employee.resigned_by_user_id = None
+    employee.resigned_by_name = None
+    employee.hide_from_schedule_performance = False
 
     session.add(employee)
     session.commit()
@@ -8284,8 +8824,8 @@ async def employee_shift_swap_apply(
         swap_d = datetime.strptime(swap_date, "%Y-%m-%d").date()
     except Exception:
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="换班日期格式不正确"), status_code=303)
-    if swap_d <= date.today():
-        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="换班需至少提前一天申请"), status_code=303)
+    if swap_d < date.today():
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="换班日期不能早于今天"), status_code=303)
 
     target = session.get(User, target_user_id)
     if not target or not target.is_active or target.id == user.id:
@@ -8308,6 +8848,12 @@ async def employee_shift_swap_apply(
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="已锁定的机动顶班班次不能参与换班"), status_code=303)
     if _shift_swap_has_conflict(session, user_ids=[user.id, target.id], swap_date=swap_d):
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天已有待处理或已生效的换班记录"), status_code=303)
+    if _shift_swap_has_effective_leave_or_replacement_conflict(
+        session,
+        user_ids=[user.id, target.id],
+        swap_date=swap_d
+    ):
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天已有已生效请假或顶班记录，不能换班"), status_code=303)
 
     now = datetime.now()
     item = EmployeeShiftSwapRequest(
@@ -8398,6 +8944,12 @@ async def employee_shift_swap_respond(
         exclude_swap_id=item.id
     ):
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天已有其他待处理或已生效的换班记录"), status_code=303)
+    if _shift_swap_has_effective_leave_or_replacement_conflict(
+        session,
+        user_ids=[applicant.id, user.id],
+        swap_date=item.swap_date
+    ):
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天已有已生效请假或顶班记录，不能同意本次换班"), status_code=303)
 
     upsert_shift(session, applicant.display_name, item.swap_date, item.target_original_shift_type)
     upsert_shift(session, user.display_name, item.swap_date, item.applicant_original_shift_type)
@@ -9987,29 +10539,18 @@ async def employee_hourly_subsidy_cancel(
     return RedirectResponse(url=_build_employees_url(store, "my_hourly_subsidy", success="时薪补贴申请已撤销"), status_code=303)
 
 
-@app.post("/employees/hourly-subsidies/approve/{request_id}")
-async def employee_hourly_subsidy_approve(
-        request: Request,
-        request_id: int,
-        store: str = Form(""),
-        approval_note: str = Form(""),
-        session: Session = Depends(get_session),
-        user: Optional[User] = Depends(get_current_user)
-):
-    if not user:
-        return RedirectResponse(url="/login", status_code=303)
-    if user.role != "admin":
-        return RedirectResponse(url=_build_employees_url(store, "my_hourly_subsidy", error="只有管理员可以审批时薪补贴"), status_code=303)
-
-    request_row = session.get(EmployeeHourlySubsidyRequest, request_id)
-    if not request_row:
-        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="时薪补贴申请不存在"), status_code=303)
+def _approve_hourly_subsidy_request(
+        session: Session,
+        request_row: EmployeeHourlySubsidyRequest,
+        operator: User,
+        approval_note: str = ""
+) -> Tuple[bool, str]:
     if request_row.status != "pending":
-        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="只有待审批的时薪补贴申请可以同意"), status_code=303)
+        return False, f"#{request_row.id} 不是待审批状态"
 
     target_user = session.get(User, request_row.user_id)
     if not target_user:
-        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="申请员工账号不存在"), status_code=303)
+        return False, f"#{request_row.id} 申请员工账号不存在"
 
     amount = round(float(request_row.amount or request_row.hours * request_row.hourly_rate), 2)
     now = datetime.now()
@@ -10034,8 +10575,8 @@ async def employee_hourly_subsidy_approve(
         is_auto=True,
         is_locked=False,
         is_visible_to_employee=True,
-        created_by_user_id=user.id,
-        created_by_name=user.display_name,
+        created_by_user_id=operator.id,
+        created_by_name=operator.display_name,
         created_at=now,
         updated_at=now
     )
@@ -10043,8 +10584,8 @@ async def employee_hourly_subsidy_approve(
     session.flush()
 
     request_row.status = "approved"
-    request_row.approved_by_user_id = user.id
-    request_row.approved_by_name = user.display_name
+    request_row.approved_by_user_id = operator.id
+    request_row.approved_by_name = operator.display_name
     request_row.approved_at = now
     request_row.approval_note = note or None
     request_row.salary_flow_id = salary_flow.id
@@ -10054,7 +10595,7 @@ async def employee_hourly_subsidy_approve(
     _create_employee_notification(
         session=session,
         target_user=target_user,
-        related_user=user,
+        related_user=operator,
         title="时薪补贴已通过",
         content=f"您 {request_row.work_date} 的时薪补贴申请已通过，{request_row.hours} 小时，金额 {amount:.2f} 元。",
         notification_type="hourly_subsidy_approved",
@@ -10062,6 +10603,65 @@ async def employee_hourly_subsidy_approve(
         source_id=request_row.id,
         created_at=now
     )
+    return True, f"#{request_row.id} 已同意"
+
+
+def _reject_hourly_subsidy_request(
+        session: Session,
+        request_row: EmployeeHourlySubsidyRequest,
+        operator: User,
+        approval_note: str = ""
+) -> Tuple[bool, str]:
+    if request_row.status != "pending":
+        return False, f"#{request_row.id} 不是待审批状态"
+
+    target_user = session.get(User, request_row.user_id)
+    now = datetime.now()
+    note = _normalize_text(approval_note)
+
+    request_row.status = "rejected"
+    request_row.approved_by_user_id = operator.id
+    request_row.approved_by_name = operator.display_name
+    request_row.approved_at = now
+    request_row.approval_note = note or None
+    request_row.updated_at = now
+    session.add(request_row)
+
+    if target_user:
+        _create_employee_notification(
+            session=session,
+            target_user=target_user,
+            related_user=operator,
+            title="时薪补贴已拒绝",
+            content=f"您 {request_row.work_date} 的时薪补贴申请已被拒绝。" + (f"原因：{note}" if note else ""),
+            notification_type="hourly_subsidy_rejected",
+            source_type="hourly_subsidy_request",
+            source_id=request_row.id,
+            created_at=now
+        )
+    return True, f"#{request_row.id} 已拒绝"
+
+
+@app.post("/employees/hourly-subsidies/approve/{request_id}")
+async def employee_hourly_subsidy_approve(
+        request: Request,
+        request_id: int,
+        store: str = Form(""),
+        approval_note: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_employees_url(store, "my_hourly_subsidy", error="只有管理员可以审批时薪补贴"), status_code=303)
+
+    request_row = session.get(EmployeeHourlySubsidyRequest, request_id)
+    if not request_row:
+        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="时薪补贴申请不存在"), status_code=303)
+    ok, message = _approve_hourly_subsidy_request(session, request_row, user, approval_note)
+    if not ok:
+        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error=message), status_code=303)
 
     session.commit()
     return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", success="时薪补贴已同意，工资流水已同步"), status_code=303)
@@ -10084,36 +10684,84 @@ async def employee_hourly_subsidy_reject(
     request_row = session.get(EmployeeHourlySubsidyRequest, request_id)
     if not request_row:
         return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="时薪补贴申请不存在"), status_code=303)
-    if request_row.status != "pending":
-        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="只有待审批的时薪补贴申请可以拒绝"), status_code=303)
-
-    target_user = session.get(User, request_row.user_id)
-    now = datetime.now()
-    note = _normalize_text(approval_note)
-
-    request_row.status = "rejected"
-    request_row.approved_by_user_id = user.id
-    request_row.approved_by_name = user.display_name
-    request_row.approved_at = now
-    request_row.approval_note = note or None
-    request_row.updated_at = now
-    session.add(request_row)
-
-    if target_user:
-        _create_employee_notification(
-            session=session,
-            target_user=target_user,
-            related_user=user,
-            title="时薪补贴已拒绝",
-            content=f"您 {request_row.work_date} 的时薪补贴申请已被拒绝。" + (f"原因：{note}" if note else ""),
-            notification_type="hourly_subsidy_rejected",
-            source_type="hourly_subsidy_request",
-            source_id=request_row.id,
-            created_at=now
-        )
+    ok, message = _reject_hourly_subsidy_request(session, request_row, user, approval_note)
+    if not ok:
+        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error=message), status_code=303)
 
     session.commit()
     return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", success="时薪补贴申请已拒绝"), status_code=303)
+
+
+@app.post("/employees/hourly-subsidies/batch-approve")
+async def employee_hourly_subsidy_batch_approve(
+        request: Request,
+        store: str = Form(""),
+        request_ids: List[int] = Form([]),
+        approval_note: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_employees_url(store, "my_hourly_subsidy", error="只有管理员可以审批时薪补贴"), status_code=303)
+    if not request_ids:
+        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="请先勾选要同意的时薪补贴申请"), status_code=303)
+
+    success_count = 0
+    skipped_messages = []
+    for request_id in dict.fromkeys(request_ids):
+        request_row = session.get(EmployeeHourlySubsidyRequest, request_id)
+        if not request_row:
+            skipped_messages.append(f"#{request_id} 不存在")
+            continue
+        ok, message = _approve_hourly_subsidy_request(session, request_row, user, approval_note)
+        if ok:
+            success_count += 1
+        else:
+            skipped_messages.append(message)
+
+    session.commit()
+    message = f"批量同意完成：成功 {success_count} 条"
+    if skipped_messages:
+        message += f"，跳过 {len(skipped_messages)} 条"
+    return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", success=message), status_code=303)
+
+
+@app.post("/employees/hourly-subsidies/batch-reject")
+async def employee_hourly_subsidy_batch_reject(
+        request: Request,
+        store: str = Form(""),
+        request_ids: List[int] = Form([]),
+        approval_note: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_employees_url(store, "my_hourly_subsidy", error="只有管理员可以审批时薪补贴"), status_code=303)
+    if not request_ids:
+        return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", error="请先勾选要拒绝的时薪补贴申请"), status_code=303)
+
+    success_count = 0
+    skipped_messages = []
+    for request_id in dict.fromkeys(request_ids):
+        request_row = session.get(EmployeeHourlySubsidyRequest, request_id)
+        if not request_row:
+            skipped_messages.append(f"#{request_id} 不存在")
+            continue
+        ok, message = _reject_hourly_subsidy_request(session, request_row, user, approval_note)
+        if ok:
+            success_count += 1
+        else:
+            skipped_messages.append(message)
+
+    session.commit()
+    message = f"批量拒绝完成：成功 {success_count} 条"
+    if skipped_messages:
+        message += f"，跳过 {len(skipped_messages)} 条"
+    return RedirectResponse(url=_build_employees_url(store, "hourly_subsidy_approval", success=message), status_code=303)
 
 
 # =========================
@@ -10928,72 +11576,22 @@ async def employee_work_mistake_create(
         store: str = Form(""),
         assessment_user_id: Optional[int] = Form(None),
         assessment_mistake_status: str = Form("active"),
-        user_id: int = Form(...),
+        user_id: Optional[int] = Form(None),
         mistake_date: str = Form(""),
         content: str = Form(""),
-        deduct_amount: float = Form(...),
+        deduct_amount: Optional[float] = Form(None),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
     if not user:
         return RedirectResponse(url="/login", status_code=303)
-    if user.role != "admin":
-        return RedirectResponse(
-            url=_build_my_assessment_url(store, error="只有管理员可以发布工作失误"),
-            status_code=303
-        )
-
-    try:
-        target_user = _get_admin_work_mistake_target(session, user_id)
-        mistake_d = _parse_form_date(mistake_date, date.today())
-        content = _normalize_text(content)
-        amount = round(abs(_safe_float(deduct_amount)), 2)
-        if not content:
-            raise ValueError("失误内容不能为空")
-        if amount <= 0:
-            raise ValueError("扣款金额必须大于 0")
-        if _is_salary_month_paid_or_locked(session, target_user.id, mistake_d.year, mistake_d.month):
-            raise ValueError("该员工该月工资已发放或锁定，不能发布工作失误")
-
-        now = datetime.now()
-        mistake = EmployeeWorkMistakeRecord(
-            user_id=target_user.id,
-            employee_name_snapshot=target_user.display_name,
-            mistake_date=mistake_d,
-            salary_year=mistake_d.year,
-            salary_month=mistake_d.month,
-            content=content,
-            deduct_amount=amount,
-            status="active",
-            is_deleted=False,
-            created_by_user_id=user.id,
-            created_by_name=user.display_name,
-            created_at=now,
-            updated_at=now
-        )
-        session.add(mistake)
-        session.flush()
-        _sync_work_mistake_salary_flow(session, mistake=mistake, target_user=target_user, operator=user)
-        _refresh_salary_settlement_totals_if_exists(session, target_user.id, mistake.salary_year, mistake.salary_month)
-        session.commit()
-    except ValueError as e:
-        session.rollback()
-        return RedirectResponse(
-            url=_build_my_assessment_url(
-                store,
-                assessment_user_id=assessment_user_id,
-                assessment_mistake_status=assessment_mistake_status,
-                error=str(e)
-            ),
-            status_code=303
-        )
 
     return RedirectResponse(
         url=_build_my_assessment_url(
             store,
-            assessment_user_id=target_user.id,
+            assessment_user_id=assessment_user_id,
             assessment_mistake_status=assessment_mistake_status,
-            success="工作失误已发布"
+            error="工作失误发布功能已关闭"
         ),
         status_code=303
     )
@@ -11239,10 +11837,20 @@ async def employee_salary_settlement_generate_all(
             status_code=303
         )
 
+    month_start, month_end = _get_month_start_end(salary_year, salary_month)
     active_users = session.exec(
         select(User).where(
-            User.is_active == True,
-            User.hide_from_schedule_performance == False
+            or_(
+                and_(
+                    User.is_active == True,
+                    User.hide_from_schedule_performance == False
+                ),
+                and_(
+                    User.employment_status == "resigned",
+                    User.resignation_date >= month_start,
+                    User.resignation_date <= month_end
+                )
+            )
         ).order_by(User.role, User.id)
     ).all()
 
@@ -11270,7 +11878,7 @@ async def employee_salary_settlement_generate_all(
             ).first()
 
             if existing_settlement and existing_settlement.status in {"confirmed", "paid", "locked"}:
-                updated_rows.append(_salary_settlement_payload(existing_settlement))
+                updated_rows.append(_salary_settlement_payload(session, existing_settlement))
                 continue
 
             settlement = _calculate_salary_for_one_employee(
@@ -11281,7 +11889,7 @@ async def employee_salary_settlement_generate_all(
                 operator=user,
                 all_order_count_map=all_order_count_map
             )
-            updated_rows.append(_salary_settlement_payload(settlement))
+            updated_rows.append(_salary_settlement_payload(session, settlement))
 
         session.commit()
 
@@ -11414,7 +12022,7 @@ async def employee_salary_settlement_social_security_update(
             message="社保金额已保存",
             action="salary_settlement_updated",
             payload={
-                "settlement": _salary_settlement_payload(settlement)
+                "settlement": _salary_settlement_payload(session, settlement)
             }
         )
 
@@ -11576,7 +12184,7 @@ async def employee_salary_settlement_confirm(
             message="工资已确认",
             action="salary_settlement_updated",
             payload={
-                "settlement": _salary_settlement_payload(settlement)
+                "settlement": _salary_settlement_payload(session, settlement)
             }
         )
 
@@ -11658,7 +12266,7 @@ async def employee_salary_settlement_back_to_draft(
             message="工资已退回草稿",
             action="salary_settlement_updated",
             payload={
-                "settlement": _salary_settlement_payload(settlement)
+                "settlement": _salary_settlement_payload(session, settlement)
             }
         )
 
@@ -11748,7 +12356,7 @@ async def employee_salary_settlement_paid(
             message="工资已发放并锁定",
             action="salary_settlement_updated",
             payload={
-                "settlement": _salary_settlement_payload(settlement)
+                "settlement": _salary_settlement_payload(session, settlement)
             }
         )
 
@@ -11828,7 +12436,7 @@ async def employee_salary_settlement_lock(
             message="工资已发放并锁定",
             action="salary_settlement_updated",
             payload={
-                "settlement": _salary_settlement_payload(settlement)
+                "settlement": _salary_settlement_payload(session, settlement)
             }
         )
 

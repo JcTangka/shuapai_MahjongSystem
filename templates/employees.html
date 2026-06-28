@@ -156,6 +156,109 @@
         font-size: 0.9rem;
     }
 
+    .salary-settlement-main-row > td {
+        vertical-align: middle;
+    }
+
+    .salary-settlement-toggle {
+        width: 100%;
+        border: 0;
+        background: transparent;
+        padding: 0;
+        text-align: left;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        color: inherit;
+    }
+
+    .salary-settlement-toggle:hover .fw-bold {
+        color: #0d6efd;
+    }
+
+    .salary-settlement-chevron {
+        width: 28px;
+        height: 28px;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: #0d6efd;
+        background: rgba(13, 110, 253, 0.10);
+        transition: transform 0.18s ease, background-color 0.18s ease;
+        flex-shrink: 0;
+    }
+
+    .salary-settlement-toggle[aria-expanded="true"] .salary-settlement-chevron {
+        transform: rotate(180deg);
+        background: rgba(13, 110, 253, 0.18);
+    }
+
+    .salary-settlement-detail-row > td {
+        padding: 0 !important;
+        border-top: 0;
+        background: #f8fbff;
+    }
+
+    .salary-settlement-drawer {
+        border-top: 1px solid #e0ebff;
+        padding: 18px 20px;
+    }
+
+    .salary-settlement-drawer-summary {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 14px;
+        flex-wrap: wrap;
+    }
+
+    .salary-settlement-flow-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .salary-settlement-flow-item {
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        background: #fff;
+        padding: 12px 14px;
+    }
+
+    .salary-settlement-flow-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        margin-bottom: 6px;
+    }
+
+    .salary-settlement-flow-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 6px;
+    }
+
+    .salary-settlement-flow-desc {
+        color: #64748b;
+        font-size: 0.88rem;
+        line-height: 1.5;
+    }
+
+    @media (max-width: 768px) {
+        .salary-settlement-flow-head {
+            flex-direction: column;
+        }
+
+        .salary-settlement-drawer {
+            padding: 14px;
+        }
+    }
+
     /* =========================
        激励白板样式
        说明：
@@ -326,6 +429,52 @@
         box-shadow: 0 0.125rem 0.75rem rgba(0,0,0,0.06);
         overflow: hidden;
     }
+
+    .whiteboard-employee-toggle {
+        border: 0;
+        background: transparent;
+        padding: 0;
+        text-align: left;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: #1f2937;
+        font-weight: 800;
+    }
+
+    .whiteboard-employee-toggle .bi {
+        transition: transform 0.2s ease;
+        color: #64748b;
+    }
+
+    .whiteboard-employee-toggle[aria-expanded="true"] .bi {
+        transform: rotate(180deg);
+    }
+
+    .whiteboard-store-drawer {
+        margin-top: 12px;
+        margin-left: min(32px, 4vw);
+        padding: 16px;
+        border-radius: 16px;
+        background: linear-gradient(135deg, #f8fafc, #eef6ff);
+        border: 1px solid #dbeafe;
+    }
+
+    .whiteboard-store-drawer-title {
+        font-weight: 800;
+        color: #0f172a;
+        margin-bottom: 12px;
+    }
+
+    .whiteboard-store-row {
+        padding: 14px 0;
+        border-top: 1px solid rgba(148, 163, 184, 0.28);
+    }
+
+    .whiteboard-store-row:first-of-type {
+        border-top: 0;
+        padding-top: 0;
+    }
 </style>
 
 {% if request.query_params.get('success') %}
@@ -387,7 +536,7 @@
     <div class="col-md-4 col-xl">
         <div class="card employee-stat-card">
             <div class="card-body">
-                <div class="employee-stat-label">已停用</div>
+                <div class="employee-stat-label">已停用/离职</div>
                 <div class="employee-stat-value">{{ inactive_count }}</div>
             </div>
         </div>
@@ -620,6 +769,38 @@
         </div>
 
         <div class="fw-bold mb-3">历史记录</div>
+        <div class="border rounded-3 overflow-hidden mb-3">
+            <table class="table table-sm align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>员工</th>
+                        <th>上班次数</th>
+                        <th>上班天数</th>
+                        <th>在岗时间</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in duty_summary_rows %}
+                    <tr>
+                        <td class="fw-bold">{{ item.employee_name }}</td>
+                        <td>{{ item.completed_record_count }}</td>
+                        <td>
+                            <span class="fw-bold text-primary">{{ item.work_day_count }}</span>
+                            <span class="small text-muted ms-1">天</span>
+                        </td>
+                        <td class="fw-bold text-success">{{ item.total_duration_text }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="4" class="text-center text-muted py-3">当前筛选范围内暂无已下班的上班记录</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <div class="small text-muted px-3 py-2 bg-light border-top">
+                统计口径：仅统计已下班的开始带店/登录上班记录；上班天数按每名员工的自然日去重，同一天多段上班时长累计。
+            </div>
+        </div>
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0">
                 <thead class="table-light">
@@ -674,8 +855,8 @@
      管理员：员工列表
      说明：
      当前真实可用功能：
-     1. 查看在职 / 已停用 / 全部员工
-     2. 停用员工
+     1. 查看在职 / 已停用或离职 / 全部员工
+     2. 停用、离职员工
      3. 恢复员工
 ========================= -->
 <div class="card employee-module-card">
@@ -692,7 +873,7 @@
                 </a>
                 <a class="employee-filter-link {% if status_filter == 'inactive' %}active{% endif %}"
                    href="/employees?store={{ current_store }}&tab=employee_list&status_filter=inactive">
-                    已停用员工
+                    已停用/离职员工
                 </a>
                 <a class="employee-filter-link {% if status_filter == 'all' %}active{% endif %}"
                    href="/employees?store={{ current_store }}&tab=employee_list&status_filter=all">
@@ -711,7 +892,7 @@
                     <th>员工姓名</th>
                     <th>系统角色</th>
                     <th>账号状态</th>
-                    <th>停用时间</th>
+                    <th>停用/离职时间</th>
                     <th>员工类型</th>
                     <th style="width: 420px;">操作</th>
                 </tr>
@@ -751,7 +932,9 @@
                     </td>
 
                     <td>
-                        {% if emp.is_active %}
+                        {% if emp.employment_status == 'resigned' %}
+                            <span class="badge rounded-pill employee-status-inactive">{{ employee_resignation_label(emp) }}</span>
+                        {% elif emp.is_active %}
                             <span class="badge rounded-pill employee-status-active">在职</span>
                         {% else %}
                             <span class="badge rounded-pill employee-status-inactive">已停用</span>
@@ -803,6 +986,26 @@
                                         <input type="hidden" name="status_filter" value="{{ status_filter or 'active' }}">
                                         <button type="submit" class="btn btn-sm btn-outline-primary">
                                             <i class="bi bi-key me-1"></i>重置密码
+                                        </button>
+                                    </form>
+                                    {% endif %}
+                                    {% if emp.role != 'admin' %}
+                                    <form action="/employees/resign/{{ emp.id }}"
+                                          method="post"
+                                          class="d-inline"
+                                          data-employee-ajax-form="1"
+                                          onsubmit="return confirm('确定要将【{{ emp.display_name }}】标记为离职吗？离职员工本月只能查看历史工资，不能进行任何操作。');">
+                                        <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                        <input type="hidden" name="status_filter" value="{{ status_filter or 'active' }}">
+                                        <input type="date"
+                                               name="resignation_date"
+                                               value="{{ today_date }}"
+                                               max="{{ today_date }}"
+                                               class="form-control form-control-sm d-inline-block"
+                                               style="width: 138px;"
+                                               required>
+                                        <button type="submit" class="btn btn-sm btn-outline-warning">
+                                            <i class="bi bi-door-open me-1"></i>离职
                                         </button>
                                     </form>
                                     {% endif %}
@@ -1107,10 +1310,58 @@
         </div>
     </div>
 
+    <div class="card-body border-bottom">
+        <div class="d-flex flex-wrap align-items-end gap-2">
+            <form id="hourlySubsidyBatchApproveForm"
+                  action="/employees/hourly-subsidies/batch-approve"
+                  method="post"
+                  class="d-flex flex-wrap align-items-end gap-2"
+                  onsubmit="return prepareHourlySubsidyBatchForm(this, '同意');">
+                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                <div>
+                    <label class="form-label fw-bold small mb-1">批量审批备注</label>
+                    <input type="text"
+                           name="approval_note"
+                           class="form-control form-control-sm"
+                           style="min-width: 240px;"
+                           placeholder="统一备注，可不填">
+                </div>
+                <button type="submit" class="btn btn-sm btn-success">
+                    <i class="bi bi-check2-circle me-1"></i>批量同意
+                </button>
+            </form>
+
+            <form id="hourlySubsidyBatchRejectForm"
+                  action="/employees/hourly-subsidies/batch-reject"
+                  method="post"
+                  class="d-flex flex-wrap align-items-end gap-2"
+                  onsubmit="return prepareHourlySubsidyBatchForm(this, '拒绝');">
+                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                <div>
+                    <label class="form-label fw-bold small mb-1">批量拒绝原因</label>
+                    <input type="text"
+                           name="approval_note"
+                           class="form-control form-control-sm"
+                           style="min-width: 240px;"
+                           placeholder="统一拒绝原因，建议填写">
+                </div>
+                <button type="submit" class="btn btn-sm btn-outline-danger">
+                    <i class="bi bi-x-circle me-1"></i>批量拒绝
+                </button>
+            </form>
+        </div>
+    </div>
+
     <div class="card-body p-0">
         <table class="table table-hover align-middle mb-0 text-center">
             <thead class="table-light">
                 <tr>
+                    <th style="width: 48px;">
+                        <input type="checkbox"
+                               class="form-check-input"
+                               id="hourlySubsidySelectAll"
+                               title="全选待审批">
+                    </th>
                     <th style="width: 70px;">ID</th>
                     <th>员工</th>
                     <th>申请日期</th>
@@ -1126,6 +1377,16 @@
             <tbody>
                 {% for item in hourly_subsidy_approval_requests %}
                 <tr>
+                    <td>
+                        {% if item.status == 'pending' %}
+                        <input type="checkbox"
+                               class="form-check-input hourly-subsidy-batch-checkbox"
+                               value="{{ item.id }}"
+                               aria-label="选择时薪补贴申请 #{{ item.id }}">
+                        {% else %}
+                        <input type="checkbox" class="form-check-input" disabled>
+                        {% endif %}
+                    </td>
                     <td class="fw-bold text-muted">#{{ item.id }}</td>
                     <td><span class="fw-bold">{{ item.employee_name_snapshot }}</span></td>
                     <td><span class="text-muted small">{{ item.apply_date }}</span></td>
@@ -1206,7 +1467,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="10" class="text-muted py-5">
+                    <td colspan="11" class="text-muted py-5">
                         <i class="bi bi-inbox fs-1 d-block mb-3"></i>
                         暂无时薪补贴申请
                     </td>
@@ -2113,7 +2374,9 @@
                 {% for row in salary_settlement_data.rows %}
                 {% set emp = row.employee %}
                 {% set item = row.settlement %}
+                {% set payload = row.payload %}
                 <tr id="salary-settlement-row-user-{{ emp.id }}"
+                    class="salary-settlement-main-row"
                     data-user-id="{{ emp.id }}"
                     {% if item %}data-settlement-id="{{ item.id }}"{% endif %}>
                     <td>
@@ -2301,6 +2564,24 @@
     </div>
 </div>
 
+<script id="salary-settlement-initial-data" type="application/json">
+[
+{% set salary_init_ns = namespace(first=true) %}
+{% for row in salary_settlement_data.rows %}
+    {% if row.payload %}
+    {% if not salary_init_ns.first %},{% endif %}
+    {
+        "user_id": {{ row.employee.id }},
+        "employee_name": {{ row.employee.display_name|tojson }},
+        "role_label": {{ ('管理员' if row.employee.role == 'admin' else '普通员工')|tojson }},
+        "settlement": {{ row.payload|tojson }}
+    }
+    {% set salary_init_ns.first = false %}
+    {% endif %}
+{% endfor %}
+]
+</script>
+
 {% else %}
 <div class="todo-placeholder">
     <div class="todo-placeholder-title">
@@ -2360,44 +2641,6 @@
     </div>
 </div>
 
-<div class="card employee-module-card mb-4">
-    <div class="card-header bg-white py-3">
-        <div class="fw-bold"><i class="bi bi-exclamation-triangle text-danger me-1"></i>发布工作失误</div>
-        <div class="small text-muted mt-1">工作失误会同步生成员工可见的工资流水，并在管理员工资调整中显示。</div>
-    </div>
-    <div class="card-body">
-        <form action="/employees/work-mistakes/create" method="post" class="row g-3 align-items-end">
-            <input type="hidden" name="store" value="{{ current_store }}">
-            <input type="hidden" name="assessment_user_id" value="{{ my_assessment_data.selected_user_id }}">
-            <input type="hidden" name="assessment_mistake_status" value="{{ my_assessment_data.mistake_status_filter }}">
-            <div class="col-md-3">
-                <label class="form-label fw-bold">员工</label>
-                <select class="form-select" name="user_id" required>
-                    {% for emp in my_assessment_data.employee_options %}
-                    <option value="{{ emp.id }}" {% if my_assessment_data.selected_user_id == emp.id %}selected{% endif %}>
-                        {{ emp.display_name }}{% if not emp.is_active %}（已停用）{% endif %}
-                    </option>
-                    {% endfor %}
-                </select>
-            </div>
-            <div class="col-md-2">
-                <label class="form-label fw-bold">失误日期</label>
-                <input type="date" class="form-control" name="mistake_date" value="{{ my_assessment_data.today }}" required>
-            </div>
-            <div class="col-md-4">
-                <label class="form-label fw-bold">失误内容</label>
-                <input type="text" class="form-control" name="content" placeholder="填写认定原因" required>
-            </div>
-            <div class="col-md-2">
-                <label class="form-label fw-bold">扣款金额</label>
-                <input type="number" class="form-control" name="deduct_amount" step="0.01" min="0.01" required>
-            </div>
-            <div class="col-md-1">
-                <button class="btn btn-danger w-100" type="submit">发布</button>
-            </div>
-        </form>
-    </div>
-</div>
 {% endif %}
 
 <div class="row g-3 mb-4">
@@ -2476,6 +2719,7 @@
         <div class="small text-muted mt-1">撤回记录员工可见；删除记录员工不可见，管理员可通过筛选查看。</div>
     </div>
     <div class="card-body p-0">
+        <div class="table-responsive">
         <table class="table table-hover align-middle mb-0 text-center">
             <thead class="table-light">
                 <tr>
@@ -2569,6 +2813,7 @@
                 {% endfor %}
             </tbody>
         </table>
+        </div>
     </div>
 </div>
 {% endif %}
@@ -2741,109 +2986,6 @@
     </div>
 </div>
 
-<!-- 我的本月门店目标订单量柱状图 -->
-<div class="card whiteboard-chart-card mb-4">
-    <div class="card-header bg-white py-3">
-        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
-            <div>
-                <div class="fw-bold">
-                    <i class="bi bi-shop-window text-primary me-1"></i>我的本月门店目标订单量对比
-                    <span class="badge bg-light text-dark border ms-2">
-                        {{ whiteboard_data.employee_store_title_name }}
-                    </span>
-                </div>
-                <div class="small text-muted mt-1">
-                    仅展示本月订单量大于 0 的门店；红色标记为该门店个人目标订单量位置。个人目标 = 门店本月目标订单量 ÷ 6。
-                    {% if whiteboard_data.employee_store_can_view_all %}
-                        管理员可查看所有员工数据。
-                    {% endif %}
-                </div>
-            </div>
-
-            {% if whiteboard_data.employee_store_can_view_all %}
-            <form method="get" action="/employees" class="d-flex align-items-center gap-2">
-                <input type="hidden" name="store" value="{{ current_store }}">
-                <input type="hidden" name="tab" value="whiteboard">
-                <input type="hidden" name="whiteboard_year" value="{{ whiteboard_data.year }}">
-                <input type="hidden" name="whiteboard_month" value="{{ whiteboard_data.month }}">
-                <label class="small text-muted mb-0" for="whiteboardEmployeeFilter">员工筛选</label>
-                <select class="form-select form-select-sm"
-                        id="whiteboardEmployeeFilter"
-                        name="whiteboard_employee"
-                        onchange="this.form.submit()"
-                        style="min-width: 150px;">
-                    <option value="all" {% if whiteboard_data.employee_store_selected_employee == 'all' %}selected{% endif %}>
-                        全部员工
-                    </option>
-                    {% for employee_name in whiteboard_data.employee_store_employee_options %}
-                    <option value="{{ employee_name }}"
-                            {% if whiteboard_data.employee_store_selected_employee == employee_name %}selected{% endif %}>
-                        {{ employee_name }}
-                    </option>
-                    {% endfor %}
-                </select>
-            </form>
-            {% endif %}
-        </div>
-    </div>
-
-    <div class="card-body">
-        {% for row in whiteboard_data.employee_store_rows %}
-        <div class="whiteboard-bar-row">
-            <div class="row g-3 align-items-center">
-                <div class="col-md-3">
-                    <div class="whiteboard-bar-label">
-                        {% if whiteboard_data.employee_store_can_view_all %}
-                            {{ row.employee_name }}｜{{ row.store_name }}
-                        {% else %}
-                            {{ row.store_name }}
-                        {% endif %}
-                    </div>
-                    <div class="whiteboard-bar-meta">
-                        目标 {{ '%.2f'|format(row.target_order_count) }} 单
-                    </div>
-                </div>
-
-                <div class="col-md-7">
-                    <div class="whiteboard-bar-track">
-                        <div class="whiteboard-bar-fill {% if row.is_reached %}success{% endif %}"
-                             style="width: {{ row.actual_percent }}%;"></div>
-
-                        <div class="whiteboard-target-line"
-                             style="left: {{ row.target_percent }}%;"></div>
-                        <div class="whiteboard-target-label"
-                             style="left: {{ row.target_percent }}%;">
-                            目标 {{ '%.2f'|format(row.target_order_count) }}
-                        </div>
-
-                        <div class="whiteboard-bar-value">
-                            {{ row.actual_order_count }} 单
-                        </div>
-                    </div>
-                </div>
-
-                <div class="col-md-2 text-md-end">
-                    {% if row.is_reached %}
-                        <span class="badge rounded-pill whiteboard-status-reached">
-                            已达标 {{ row.achievement_rate }}%
-                        </span>
-                    {% else %}
-                        <span class="badge rounded-pill whiteboard-status-unreached">
-                            差 {{ '%.2f'|format(row.remaining_order_count) }} 单
-                        </span>
-                    {% endif %}
-                </div>
-            </div>
-        </div>
-        {% else %}
-        <div class="text-muted text-center py-5">
-            <i class="bi bi-inbox fs-1 d-block mb-3"></i>
-            本月暂无门店订单量数据
-        </div>
-        {% endfor %}
-    </div>
-</div>
-
 <!-- 员工本月订单量柱状图 -->
 <div class="card whiteboard-chart-card mb-4">
     <div class="card-header bg-white py-3">
@@ -2851,7 +2993,7 @@
             <i class="bi bi-person-lines-fill text-primary me-1"></i>员工本月订单量对比
         </div>
         <div class="small text-muted mt-1">
-            仅展示本月订单量大于 0 的员工；红色竖线为个人提成关键节点：660、710、760、810、860……。
+            仅展示本月订单量大于 0 的员工；红色竖线为个人提成关键节点：660、710、760、810、860……。点击员工可展开查看其每个门店的目标订单完成情况。
         </div>
     </div>
 
@@ -2860,12 +3002,20 @@
         <div class="whiteboard-bar-row">
             <div class="row g-3 align-items-center">
                 <div class="col-md-3">
-                    <div class="whiteboard-bar-label">
-                        {{ row.employee_name }}
+                    <button type="button"
+                            class="whiteboard-employee-toggle"
+                            data-whiteboard-employee-toggle="{{ loop.index }}"
+                            aria-expanded="false"
+                            aria-controls="whiteboard-employee-store-drawer-{{ loop.index }}">
+                        <span>{{ row.employee_name }}</span>
                         {% if not row.is_visible_employee %}
                             <span class="badge bg-secondary ms-1">历史接待人</span>
                         {% endif %}
-                    </div>
+                        {% if row.store_row_count %}
+                            <span class="badge bg-light text-dark border ms-1">{{ row.store_row_count }} 个门店</span>
+                            <i class="bi bi-chevron-down"></i>
+                        {% endif %}
+                    </button>
                     <div class="whiteboard-bar-meta">
                         本月 {{ row.order_count }} 单
                     </div>
@@ -2898,6 +3048,58 @@
                         <span class="badge bg-light text-dark border">未到 660</span>
                     {% endif %}
                 </div>
+            </div>
+
+            <div id="whiteboard-employee-store-drawer-{{ loop.index }}"
+                 class="whiteboard-store-drawer d-none"
+                 data-whiteboard-employee-drawer="{{ loop.index }}">
+                <div class="whiteboard-store-drawer-title">
+                    {{ row.employee_name }} 本月门店目标订单量明细
+                </div>
+                {% for store_row in row.store_rows %}
+                <div class="whiteboard-store-row">
+                    <div class="row g-3 align-items-center">
+                        <div class="col-md-3">
+                            <div class="whiteboard-bar-label">{{ store_row.store_name }}</div>
+                            <div class="whiteboard-bar-meta">
+                                目标 {{ '%.2f'|format(store_row.target_order_count) }} 单
+                            </div>
+                        </div>
+
+                        <div class="col-md-7">
+                            <div class="whiteboard-bar-track">
+                                <div class="whiteboard-bar-fill {% if store_row.is_reached %}success{% endif %}"
+                                     style="width: {{ store_row.actual_percent }}%;"></div>
+
+                                <div class="whiteboard-target-line"
+                                     style="left: {{ store_row.target_percent }}%;"></div>
+                                <div class="whiteboard-target-label"
+                                     style="left: {{ store_row.target_percent }}%;">
+                                    目标 {{ '%.2f'|format(store_row.target_order_count) }}
+                                </div>
+
+                                <div class="whiteboard-bar-value">
+                                    {{ store_row.actual_order_count }} 单
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-md-2 text-md-end">
+                            {% if store_row.is_reached %}
+                                <span class="badge rounded-pill whiteboard-status-reached">
+                                    已达标 {{ store_row.achievement_rate }}%
+                                </span>
+                            {% else %}
+                                <span class="badge rounded-pill whiteboard-status-unreached">
+                                    差 {{ '%.2f'|format(store_row.remaining_order_count) }} 单
+                                </span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                {% else %}
+                <div class="text-muted py-2">该员工本月暂无可展示的门店目标订单明细。</div>
+                {% endfor %}
             </div>
         </div>
         {% else %}
@@ -4364,7 +4566,7 @@
                 <div class="modal-body">
                     <input type="hidden" name="store" value="{{ current_store or '' }}">
                     <div class="alert alert-info small">
-                        换班至少提前一天申请，双方都必须有具体班次。后勤类型员工、机动类型员工和已锁定的机动顶班班次都不能参与换班。
+                        换班允许当天申请，双方都必须有具体班次；若当天已有已生效请假或顶班记录，则不能提交或同意换班。后勤类型员工、机动类型员工和已锁定的机动顶班班次都不能参与换班。
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-bold">换班员工</label>
@@ -4377,7 +4579,7 @@
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-bold">换班日期</label>
-                        <input type="date" name="swap_date" min="{{ tomorrow_date }}" class="form-control" required>
+                        <input type="date" name="swap_date" min="{{ today_date }}" class="form-control" required>
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-bold">原因</label>
@@ -5062,13 +5264,16 @@ function updateEmployeeStatCards(counts) {
 
         if (text === "员工总数") valueEl.textContent = counts.total_count ?? valueEl.textContent;
         if (text === "在职员工") valueEl.textContent = counts.active_count ?? valueEl.textContent;
-        if (text === "已停用") valueEl.textContent = counts.inactive_count ?? valueEl.textContent;
+        if (text === "已停用" || text === "已停用/离职") valueEl.textContent = counts.inactive_count ?? valueEl.textContent;
         if (text === "在职管理员") valueEl.textContent = counts.admin_count ?? valueEl.textContent;
         if (text === "在职普通员工") valueEl.textContent = counts.operator_count ?? valueEl.textContent;
     });
 }
 
 function renderEmployeeStatusBadge(emp) {
+    if (emp.is_resigned || emp.employment_status === "resigned") {
+        return `<span class="badge rounded-pill employee-status-inactive">${escapeHtml(emp.status_label || "离职")}</span>`;
+    }
     if (emp.is_active) {
         return `<span class="badge rounded-pill employee-status-active">在职</span>`;
     }
@@ -5128,6 +5333,26 @@ function renderEmployeeActionCell(emp) {
                 </button>
             </form>
             ` : ""}
+            ${emp.role !== "admin" ? `
+            <form action="/employees/resign/${emp.id}"
+                  method="post"
+                  class="d-inline"
+                  data-employee-ajax-form="1"
+                  onsubmit="return confirm('确定要将【${escapeHtml(emp.display_name)}】标记为离职吗？离职员工本月只能查看历史工资，不能进行任何操作。');">
+                <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                <input type="hidden" name="status_filter" value="${escapeHtml(currentEmployeeStatusFilter())}">
+                <input type="date"
+                       name="resignation_date"
+                       value="{{ today_date }}"
+                       max="{{ today_date }}"
+                       class="form-control form-control-sm d-inline-block"
+                       style="width: 138px;"
+                       required>
+                <button type="submit" class="btn btn-sm btn-outline-warning">
+                    <i class="bi bi-door-open me-1"></i>离职
+                </button>
+            </form>
+            ` : ""}
             <form action="/employees/delete/${emp.id}"
                   method="post"
                   class="d-inline"
@@ -5172,6 +5397,7 @@ function renderEmployeeRow(emp) {
             data-employee-id="${emp.id}"
             data-display-name="${escapeHtml(emp.display_name || "")}"
             data-employee-type="${escapeHtml(emp.employee_type || "regular")}"
+            data-employment-status="${escapeHtml(emp.employment_status || "active")}"
             data-pending-employee-type="${escapeHtml(emp.pending_employee_type || "")}"
             data-pending-effective-from="${escapeHtml(emp.pending_effective_from || "")}">
             <td class="fw-bold text-muted">#${emp.id}</td>
@@ -6274,6 +6500,85 @@ function renderSalarySettlementActionCell(item) {
     return html;
 }
 
+function renderSalarySettlementEmployeeCell(item) {
+    const roleLabel = escapeHtml(item.role_label || "员工");
+    const flowCount = Number(item.salary_flow_count || (item.salary_flows || []).length || 0);
+    return `
+        <button type="button"
+                class="salary-settlement-toggle"
+                data-salary-settlement-toggle="${item.user_id}"
+                aria-expanded="false"
+                aria-controls="salary-settlement-detail-row-user-${item.user_id}">
+            <span>
+                <div class="fw-bold">${escapeHtml(item.employee_name)}</div>
+                <div class="small text-muted">${roleLabel}<span class="ms-1">| ${flowCount} 条流水</span></div>
+            </span>
+            <span class="salary-settlement-chevron">
+                <i class="bi bi-chevron-down"></i>
+            </span>
+        </button>
+    `;
+}
+
+function renderSalarySettlementFlowItems(flows) {
+    if (!flows || !flows.length) {
+        return `<div class="text-muted py-3">当前月份暂无工资流水明细。</div>`;
+    }
+
+    return flows.map(flow => {
+        const amount = Number(flow.amount || 0);
+        const amountHtml = amount >= 0
+            ? `<div class="fs-6 fw-bold text-success">+¥${amount.toFixed(2)}</div>`
+            : `<div class="fs-6 fw-bold text-danger">-¥${Math.abs(amount).toFixed(2)}</div>`;
+        const createdAtHtml = (flow.created_at && flow.created_at !== flow.flow_date)
+            ? `<span class="small text-muted">入账 ${escapeHtml(flow.created_at)}</span>`
+            : "";
+
+        return `
+            <div class="salary-settlement-flow-item">
+                <div class="salary-settlement-flow-head">
+                    <div>
+                        <div class="fw-bold text-dark">${escapeHtml(flow.title || flow.flow_type_label || "工资流水")}</div>
+                        <div class="salary-settlement-flow-meta">
+                            <span class="badge text-bg-primary">${escapeHtml(flow.flow_type_label || flow.flow_type || "未分类")}</span>
+                            <span class="badge bg-light text-dark border">${escapeHtml(flow.flow_category_label || flow.flow_category || "其他")}</span>
+                            <span class="small text-muted">${escapeHtml(flow.flow_date || "")}</span>
+                            ${createdAtHtml}
+                        </div>
+                    </div>
+                    ${amountHtml}
+                </div>
+                ${flow.description ? `<div class="salary-settlement-flow-desc">${escapeHtml(flow.description)}</div>` : ""}
+            </div>
+        `;
+    }).join("");
+}
+
+function renderSalarySettlementDetailRow(item, expanded = false) {
+    return `
+        <tr id="salary-settlement-detail-row-user-${item.user_id}"
+            class="salary-settlement-detail-row${expanded ? "" : " d-none"}"
+            data-user-id="${item.user_id}">
+            <td colspan="13">
+                <div class="salary-settlement-drawer">
+                    <div class="salary-settlement-drawer-summary">
+                        <div>
+                            <div class="fw-bold text-dark">本月工资流水明细</div>
+                            <div class="small text-muted mt-1">
+                                共 ${Number(item.salary_flow_count || (item.salary_flows || []).length || 0)} 条流水，包含自动结算项、手工调整、补贴和扣款。
+                            </div>
+                        </div>
+                        <span class="badge bg-light text-dark border">最细粒度工资构成</span>
+                    </div>
+                    <div class="salary-settlement-flow-list">
+                        ${renderSalarySettlementFlowItems(item.salary_flows || [])}
+                    </div>
+                </div>
+            </td>
+        </tr>
+    `;
+}
+
 function renderSalarySettlementRow(item) {
     /**
      * 工资结算行渲染。
@@ -6329,6 +6634,7 @@ function renderSalarySettlementRow(item) {
 
     return `
         <tr id="salary-settlement-row-user-${item.user_id}"
+            class="salary-settlement-main-row"
             data-user-id="${item.user_id}"
             data-settlement-id="${item.id}">
             <td>
@@ -6369,6 +6675,43 @@ function renderSalarySettlementRow(item) {
     `;
 }
 
+function decorateSalarySettlementRow(row, item, expanded = false) {
+    if (!row) return;
+    row.dataset.roleLabel = item.role_label || row.dataset.roleLabel || "员工";
+
+    const firstCell = row.querySelector("td");
+    if (firstCell) {
+        firstCell.innerHTML = renderSalarySettlementEmployeeCell(item);
+    }
+
+    const existingDetailRow = document.getElementById(`salary-settlement-detail-row-user-${item.user_id}`);
+    if (existingDetailRow) {
+        existingDetailRow.remove();
+    }
+
+    row.insertAdjacentHTML("afterend", renderSalarySettlementDetailRow(item, expanded));
+    setSalarySettlementExpanded(item.user_id, expanded);
+}
+
+function setSalarySettlementExpanded(userId, expanded) {
+    const toggle = document.querySelector(`[data-salary-settlement-toggle='${userId}']`);
+    const detailRow = document.getElementById(`salary-settlement-detail-row-user-${userId}`);
+    if (!toggle || !detailRow) return;
+
+    toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+    detailRow.classList.toggle("d-none", !expanded);
+}
+
+function toggleSalarySettlementDetail(userId, forceExpanded = null) {
+    const toggle = document.querySelector(`[data-salary-settlement-toggle='${userId}']`);
+    const detailRow = document.getElementById(`salary-settlement-detail-row-user-${userId}`);
+    if (!toggle || !detailRow) return;
+
+    const currentExpanded = toggle.getAttribute("aria-expanded") === "true";
+    const nextExpanded = forceExpanded === null ? !currentExpanded : !!forceExpanded;
+    setSalarySettlementExpanded(userId, nextExpanded);
+}
+
 function updateSalarySettlementRow(item) {
     /**
      * 更新某个员工的工资结算行。
@@ -6376,6 +6719,9 @@ function updateSalarySettlementRow(item) {
     const row = document.getElementById(`salary-settlement-row-user-${item.user_id}`);
     if (!row) return;
 
+    item.role_label = item.role_label || row.dataset.roleLabel || "员工";
+    const oldDetailRow = document.getElementById(`salary-settlement-detail-row-user-${item.user_id}`);
+    const wasExpanded = !!oldDetailRow && !oldDetailRow.classList.contains("d-none");
     const temp = document.createElement("tbody");
     temp.innerHTML = renderSalarySettlementRow(item).trim();
 
@@ -6383,10 +6729,115 @@ function updateSalarySettlementRow(item) {
 
     const newRow = document.getElementById(`salary-settlement-row-user-${item.user_id}`);
     if (newRow) {
+        decorateSalarySettlementRow(newRow, item, wasExpanded);
         newRow.classList.add("table-warning");
         setTimeout(() => newRow.classList.remove("table-warning"), 1200);
     }
 }
+
+function enhanceSalarySettlementRowsFromInitialData() {
+    const scriptEl = document.getElementById("salary-settlement-initial-data");
+    if (!scriptEl) return;
+
+    let rows = [];
+    try {
+        rows = JSON.parse(scriptEl.textContent || "[]");
+    } catch (error) {
+        console.error("Failed to parse salary settlement initial data", error);
+        return;
+    }
+
+    rows.forEach(entry => {
+        if (!entry || !entry.settlement) return;
+        updateSalarySettlementRow({
+            ...entry.settlement,
+            user_id: entry.user_id,
+            employee_name: entry.employee_name,
+            role_label: entry.role_label
+        });
+    });
+}
+
+// Override the salary-settlement drawer renderers with clean text to avoid
+// legacy mojibake fragments in older inline strings.
+renderSalarySettlementEmployeeCell = function (item) {
+    const roleLabel = escapeHtml(item.role_label || "员工");
+    const flowCount = Number(item.salary_flow_count || (item.salary_flows || []).length || 0);
+    return `
+        <button type="button"
+                class="salary-settlement-toggle"
+                data-salary-settlement-toggle="${item.user_id}"
+                aria-expanded="false"
+                aria-controls="salary-settlement-detail-row-user-${item.user_id}">
+            <span>
+                <div class="fw-bold">${escapeHtml(item.employee_name)}</div>
+                <div class="small text-muted">${roleLabel}<span class="ms-1">| ${flowCount} 条流水</span></div>
+            </span>
+            <span class="salary-settlement-chevron">
+                <i class="bi bi-chevron-down"></i>
+            </span>
+        </button>
+    `;
+};
+
+renderSalarySettlementFlowItems = function (flows) {
+    if (!flows || !flows.length) {
+        return `<div class="text-muted py-3">当前月份暂无工资流水明细。</div>`;
+    }
+
+    return flows.map(flow => {
+        const amount = Number(flow.amount || 0);
+        const amountHtml = amount >= 0
+            ? `<div class="fs-6 fw-bold text-success">+¥${amount.toFixed(2)}</div>`
+            : `<div class="fs-6 fw-bold text-danger">-¥${Math.abs(amount).toFixed(2)}</div>`;
+        const createdAtHtml = (flow.created_at && flow.created_at !== flow.flow_date)
+            ? `<span class="small text-muted">入账 ${escapeHtml(flow.created_at)}</span>`
+            : "";
+
+        return `
+            <div class="salary-settlement-flow-item">
+                <div class="salary-settlement-flow-head">
+                    <div>
+                        <div class="fw-bold text-dark">${escapeHtml(flow.title || flow.flow_type_label || "工资流水")}</div>
+                        <div class="salary-settlement-flow-meta">
+                            <span class="badge text-bg-primary">${escapeHtml(flow.flow_type_label || flow.flow_type || "未分类")}</span>
+                            <span class="badge bg-light text-dark border">${escapeHtml(flow.flow_category_label || flow.flow_category || "其他")}</span>
+                            <span class="small text-muted">${escapeHtml(flow.flow_date || "")}</span>
+                            ${createdAtHtml}
+                        </div>
+                    </div>
+                    ${amountHtml}
+                </div>
+                ${flow.description ? `<div class="salary-settlement-flow-desc">${escapeHtml(flow.description)}</div>` : ""}
+            </div>
+        `;
+    }).join("");
+};
+
+renderSalarySettlementDetailRow = function (item, expanded = false) {
+    return `
+        <tr id="salary-settlement-detail-row-user-${item.user_id}"
+            class="salary-settlement-detail-row${expanded ? "" : " d-none"}"
+            data-user-id="${item.user_id}">
+            <td colspan="13">
+                <div class="salary-settlement-drawer">
+                    <div class="salary-settlement-drawer-summary">
+                        <div>
+                            <div class="fw-bold text-dark">本月工资流水明细</div>
+                            <div class="small text-muted mt-1">
+                                共 ${Number(item.salary_flow_count || (item.salary_flows || []).length || 0)} 条流水，包含自动结算项、手工调整、补贴和扣款。
+                            </div>
+                        </div>
+                        <span class="badge bg-light text-dark border">最细粒度工资构成</span>
+                    </div>
+                    <div class="salary-settlement-flow-list">
+                        ${renderSalarySettlementFlowItems(item.salary_flows || [])}
+                    </div>
+                </div>
+            </td>
+        </tr>
+    `;
+};
 
 function updateSalarySettlementRows(rows) {
     /**
@@ -6530,7 +6981,7 @@ function handleEmployeeAjaxResult(result) {
 
     const payload = result.payload || {};
 
-    if (result.action === "employee_disabled" || result.action === "employee_restored") {
+    if (result.action === "employee_disabled" || result.action === "employee_restored" || result.action === "employee_resigned") {
         updateEmployeeRow(payload.employee);
         updateEmployeeStatCards(payload.counts);
     }
@@ -6775,9 +7226,39 @@ function shouldSubmitLeaveApplyForm(form) {
     return confirm("确定提交请假申请吗？提交后将先通知当天休班员工确认顶班。");
 }
 
+function prepareHourlySubsidyBatchForm(form, actionLabel) {
+    if (!form) {
+        return false;
+    }
+
+    form.querySelectorAll(".hourly-subsidy-batch-id").forEach(input => input.remove());
+    const checkedItems = Array.from(document.querySelectorAll(".hourly-subsidy-batch-checkbox:checked"));
+
+    if (checkedItems.length === 0) {
+        alert(`请先勾选要${actionLabel}的时薪补贴申请`);
+        return false;
+    }
+
+    if (!confirm(`确定批量${actionLabel}选中的 ${checkedItems.length} 条时薪补贴申请吗？`)) {
+        return false;
+    }
+
+    checkedItems.forEach(item => {
+        const input = document.createElement("input");
+        input.type = "hidden";
+        input.name = "request_ids";
+        input.value = item.value;
+        input.className = "hourly-subsidy-batch-id";
+        form.appendChild(input);
+    });
+
+    return true;
+}
+
 document.addEventListener("DOMContentLoaded", function () {
 
     handleAttendanceEventTypeChange();
+    enhanceSalarySettlementRowsFromInitialData();
 
     // 初始化工资调整弹窗的默认金额方向和标题提示
     handleSalaryFlowTypeChange();
@@ -6827,6 +7308,15 @@ document.addEventListener("DOMContentLoaded", function () {
         });
     }
 
+    const hourlySubsidySelectAll = document.getElementById("hourlySubsidySelectAll");
+    if (hourlySubsidySelectAll) {
+        hourlySubsidySelectAll.addEventListener("change", function () {
+            document.querySelectorAll(".hourly-subsidy-batch-checkbox:not(:disabled)").forEach(item => {
+                item.checked = hourlySubsidySelectAll.checked;
+            });
+        });
+    }
+
     document.addEventListener("submit", function (event) {
         const form = event.target.closest("form[data-employee-ajax-form='1']");
         if (!form) return;
@@ -6836,6 +7326,29 @@ document.addEventListener("DOMContentLoaded", function () {
             return;
         }
         submitEmployeeAjaxForm(form);
+    });
+
+    document.addEventListener("click", function (event) {
+        const toggle = event.target.closest("[data-salary-settlement-toggle]");
+        if (!toggle) return;
+
+        const userId = toggle.getAttribute("data-salary-settlement-toggle");
+        if (!userId) return;
+
+        toggleSalarySettlementDetail(userId);
+    });
+
+    document.addEventListener("click", function (event) {
+        const toggle = event.target.closest("[data-whiteboard-employee-toggle]");
+        if (!toggle) return;
+
+        const key = toggle.getAttribute("data-whiteboard-employee-toggle");
+        const drawer = document.querySelector(`[data-whiteboard-employee-drawer='${key}']`);
+        if (!drawer) return;
+
+        const expanded = toggle.getAttribute("aria-expanded") === "true";
+        toggle.setAttribute("aria-expanded", expanded ? "false" : "true");
+        drawer.classList.toggle("d-none", expanded);
     });
 });
 </script>

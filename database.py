@@ -187,6 +187,13 @@ class User(SQLModel, table=True):
     is_active: bool = Field(default=True, index=True)
     deleted_at: Optional[datetime] = Field(default=None, index=True)
 
+    # V4：离职。离职员工当月可只读登录，次月起不可登录。
+    employment_status: str = Field(default="active", index=True)  # active / resigned / inactive
+    resignation_date: Optional[date] = Field(default=None, index=True)
+    resigned_at: Optional[datetime] = Field(default=None, index=True)
+    resigned_by_user_id: Optional[int] = Field(default=None, index=True)
+    resigned_by_name: Optional[str] = None
+
     # V3：展示过滤字段
     # True = 账号仍可正常登录，但不展示在排班表、店长业绩-各班次业绩-耍牌绩效考核表中
     hide_from_schedule_performance: bool = Field(default=False, index=True)
@@ -2263,7 +2270,7 @@ def migrate_formed_game_handover_link_table():
 
 def migrate_user_table():
     """
-    V3 员工管理：为 user 表增加软删除字段和展示过滤字段。
+    V3/V4 员工管理：为 user 表增加软删除、离职和展示过滤字段。
     """
     with engine.connect() as conn:
         columns = conn.execute(text("PRAGMA table_info(user)")).fetchall()
@@ -2275,11 +2282,39 @@ def migrate_user_table():
         if "deleted_at" not in existing_columns:
             conn.execute(text("ALTER TABLE user ADD COLUMN deleted_at DATETIME"))
 
+        if "employment_status" not in existing_columns:
+            conn.execute(text("ALTER TABLE user ADD COLUMN employment_status VARCHAR DEFAULT 'active'"))
+            conn.execute(text("""
+                UPDATE user
+                SET employment_status = CASE
+                    WHEN COALESCE(is_active, 1) = 1 THEN 'active'
+                    ELSE 'inactive'
+                END
+                WHERE employment_status IS NULL OR TRIM(employment_status) = ''
+            """))
+
+        if "resignation_date" not in existing_columns:
+            conn.execute(text("ALTER TABLE user ADD COLUMN resignation_date DATE"))
+
+        if "resigned_at" not in existing_columns:
+            conn.execute(text("ALTER TABLE user ADD COLUMN resigned_at DATETIME"))
+
+        if "resigned_by_user_id" not in existing_columns:
+            conn.execute(text("ALTER TABLE user ADD COLUMN resigned_by_user_id INTEGER"))
+
+        if "resigned_by_name" not in existing_columns:
+            conn.execute(text("ALTER TABLE user ADD COLUMN resigned_by_name VARCHAR"))
+
         if "hide_from_schedule_performance" not in existing_columns:
             conn.execute(text("""
                 ALTER TABLE user 
                 ADD COLUMN hide_from_schedule_performance BOOLEAN DEFAULT 0
             """))
+
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_user_employment_status ON user (employment_status)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_user_resignation_date ON user (resignation_date)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_user_resigned_at ON user (resigned_at)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_user_resigned_by_user_id ON user (resigned_by_user_id)"))
 
         conn.commit()
 
