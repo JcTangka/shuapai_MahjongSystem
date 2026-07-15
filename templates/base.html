@@ -6,7 +6,7 @@
     <title>{% block title %}耍牌公司管理系统{% endblock %}</title>
 
     <link href="{{ url_for('static', path='/css/bootstrap.min.css') }}" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="{{ url_for('static', path='/css/bootstrap-icons.css') }}">
 
     <style>
         body { font-family: "Microsoft YaHei", sans-serif; background-color: #f0f2f5; }
@@ -143,6 +143,12 @@
                                 <a href="/customers?store={{ current_store }}&tab=contact_customers"
                                    class="nav-link ms-4 {% if page_name == 'customers' and tab == 'contact_customers' %}active{% endif %}">
                                     <i class="bi bi-person-lines-fill me-2"></i>我的接触顾客
+                                </a>
+                            </li>
+                            <li>
+                                <a href="/customers?store={{ current_store }}&tab=old_to_new"
+                                   class="nav-link ms-4 {% if page_name == 'customers' and tab == 'old_to_new' %}active{% endif %}">
+                                    <i class="bi bi-person-check me-2"></i>老带新
                                 </a>
                             </li>
                             <li>
@@ -341,6 +347,9 @@
             <form action="/employee-duty/update-stores" method="post">
                 <div class="modal-body">
                     <input type="hidden" name="current_store" value="{{ current_store or '' }}">
+                    <div class="alert alert-warning d-none" id="employeeDutyUpdateStoresPrompt" role="alert">
+                        请确认当前门店是否与交接班后一致
+                    </div>
                     <div class="small text-muted mb-3">
                         可随时增减当前负责门店。移出门店前，系统会先检查该门店是否还有你未处理完的事项；未处理完就不能移出。
                     </div>
@@ -476,6 +485,97 @@
                 cleanUrl.searchParams.delete('duty_self_check_clicked_at');
                 window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search);
             }
+
+            {% if current_user.role != 'admin' and duty_status.get('has_active_store_duty') %}
+            const dutyStoreReminderTimes = new Set(['11:00', '16:00', '18:00', '20:00', '22:00']);
+            const dutyStoreReminderUserId = {{ current_user.id | tojson }};
+            const dutyStoreReminderSessionId = {{ duty_status.get('active_session_id') | tojson }};
+            const dutyUpdateStoresModalEl = document.getElementById('employeeDutyUpdateStoresModal');
+            const dutyUpdateStoresPromptEl = document.getElementById('employeeDutyUpdateStoresPrompt');
+            const dutyStoreReminderShownSlots = new Set();
+
+            function padDutyReminderNumber(value) {
+                return String(value).padStart(2, '0');
+            }
+
+            function hasShownDutyStoreReminder(storageKey) {
+                try {
+                    return localStorage.getItem(storageKey) || dutyStoreReminderShownSlots.has(storageKey);
+                } catch (error) {
+                    return dutyStoreReminderShownSlots.has(storageKey);
+                }
+            }
+
+            function markDutyStoreReminderShown(storageKey) {
+                dutyStoreReminderShownSlots.add(storageKey);
+                try {
+                    localStorage.setItem(storageKey, String(Date.now()));
+                } catch (error) {
+                    // Ignore storage failures; the in-memory set still prevents repeats in this tab.
+                }
+            }
+
+            function showDutyStoreReminder(slotKey) {
+                if (!dutyUpdateStoresModalEl || !window.bootstrap) {
+                    return false;
+                }
+
+                const visibleOtherModal = document.querySelector('.modal.show:not(#employeeDutyUpdateStoresModal)');
+                if (visibleOtherModal) {
+                    return false;
+                }
+
+                if (dutyUpdateStoresPromptEl) {
+                    dutyUpdateStoresPromptEl.textContent = '请确认当前门店是否与交接班后一致';
+                    dutyUpdateStoresPromptEl.classList.remove('d-none');
+                }
+
+                dutyUpdateStoresModalEl.dataset.scheduledReminderSlot = slotKey;
+                bootstrap.Modal.getOrCreateInstance(dutyUpdateStoresModalEl).show();
+                return true;
+            }
+
+            function checkDutyStoreReminderTime() {
+                const now = new Date();
+                const hhmm = `${padDutyReminderNumber(now.getHours())}:${padDutyReminderNumber(now.getMinutes())}`;
+                if (!dutyStoreReminderTimes.has(hhmm)) {
+                    return;
+                }
+
+                const dateKey = [
+                    now.getFullYear(),
+                    padDutyReminderNumber(now.getMonth() + 1),
+                    padDutyReminderNumber(now.getDate())
+                ].join('-');
+                const slotKey = `${dateKey}-${hhmm}`;
+                const storageKey = [
+                    'duty-store-handover-reminder',
+                    dutyStoreReminderUserId,
+                    dutyStoreReminderSessionId || 'active',
+                    slotKey
+                ].join(':');
+
+                if (hasShownDutyStoreReminder(storageKey)) {
+                    return;
+                }
+
+                if (showDutyStoreReminder(slotKey)) {
+                    markDutyStoreReminderShown(storageKey);
+                }
+            }
+
+            if (dutyUpdateStoresModalEl) {
+                dutyUpdateStoresModalEl.addEventListener('hidden.bs.modal', function() {
+                    if (dutyUpdateStoresModalEl.dataset.scheduledReminderSlot && dutyUpdateStoresPromptEl) {
+                        dutyUpdateStoresPromptEl.classList.add('d-none');
+                    }
+                    delete dutyUpdateStoresModalEl.dataset.scheduledReminderSlot;
+                });
+            }
+
+            checkDutyStoreReminderTime();
+            setInterval(checkDutyStoreReminderTime, 30 * 1000);
+            {% endif %}
         });
     </script>
 

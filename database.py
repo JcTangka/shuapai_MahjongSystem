@@ -110,6 +110,26 @@ class GameRecord(SQLModel, table=True):
     # V2：记录最后一次编辑人（显示名）
     updated_by: Optional[str] = None
 
+
+class GamePaymentItem(SQLModel, table=True):
+    """
+    Payment detail rows for formed games.
+    Keeps extra payment channels out of the large legacy GameRecord table.
+    """
+    __tablename__ = "gamepaymentitem"
+    __table_args__ = (
+        UniqueConstraint("game_id", "payment_type", name="uq_gamepaymentitem_game_type"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    game_id: int = Field(foreign_key="gamerecord.id", index=True)
+    store_name: str = Field(index=True)
+    payment_type: str = Field(index=True)
+    amount: float = Field(default=0.0)
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_by: Optional[str] = None
+
 # === 门店配置表（新增） ===
 class Store(SQLModel, table=True):
     """
@@ -181,7 +201,7 @@ class User(SQLModel, table=True):
     hashed_password: str
     display_name: str  # 显示名称
     role: str = "operator"  # admin / operator
-    employee_type: str = Field(default="regular", index=True)  # management / regular / logistics / flexible / foreman / hourly
+    employee_type: str = Field(default="regular", index=True)  # management / regular / probation / logistics / flexible / foreman / hourly
 
     # V3：员工软删除 / 停用
     is_active: bool = Field(default=True, index=True)
@@ -264,6 +284,11 @@ class Customer(SQLModel, table=True):
     # 创建时间
     created_at: date = Field(default_factory=date.today)
 
+    # 软删除
+    is_deleted: bool = Field(default=False, index=True)
+    deleted_at: Optional[datetime] = Field(default=None, index=True)
+    deleted_by: Optional[str] = Field(default=None, index=True)
+
 # === 顾客-门店关联表 ===
 class CustomerStoreLink(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -279,6 +304,7 @@ class CustomerStoreLink(SQLModel, table=True):
     # 门店顾客跟进信息，由店长在门店顾客列表中维护
     in_group_chat: bool = Field(default=False, index=True)
     has_tag: bool = Field(default=False, index=True)
+    remark_updated: bool = Field(default=False, index=True)
     remark: Optional[str] = None
     followup_updated_at: datetime = Field(default_factory=datetime.now, index=True)
     followup_updated_by: Optional[str] = Field(default=None, index=True)
@@ -331,6 +357,7 @@ class NewCustomerPullRecord(SQLModel, table=True):
     has_tag: bool = Field(default=False, index=True)
     in_group_chat: bool = Field(default=False, index=True)
     remark_updated: bool = Field(default=False, index=True)
+    remark: Optional[str] = None
     transferred_to_team: bool = Field(default=False, index=True)
 
     created_at: datetime = Field(default_factory=datetime.now, index=True)
@@ -824,10 +851,13 @@ class EmployeeLeaveRequest(SQLModel, table=True):
     employee_name_snapshot: str = Field(index=True)
 
     leave_date: date = Field(index=True)                  # 请假日期
+    leave_end_date: Optional[date] = Field(default=None, index=True)  # 公休结束日期（普通请假为空）
     apply_date: date = Field(default_factory=date.today)  # 申请日期
 
     # 系统根据 ShiftSchedule 自动读取并保存快照
-    shift_type: str = Field(default="off", index=True)    # early / mid / bigmid / night1 / night2 / off
+    shift_type: str = Field(default="off", index=True)    # early / mid / bigmid / night1 / night2 / off / public_rest
+    leave_type: str = Field(default="leave", index=True)  # leave / public_rest
+    shift_snapshot_json: Optional[str] = None             # 公休区间内原始班次快照
 
     reason: str
     remark: Optional[str] = None
@@ -1339,6 +1369,7 @@ class CommonIssue(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
 
     question: str = Field(index=True)
+    is_pinned: bool = Field(default=False, index=True)
 
     created_by_user_id: int = Field(foreign_key="user.id", index=True)
     created_by_name: str = Field(index=True)
@@ -1370,10 +1401,12 @@ def create_db_and_tables():
 
     migrate_store_room_settings_table()
     migrate_user_password_reset_fields()
+    migrate_customer_soft_delete_fields()
     migrate_customer_store_link_table()
     migrate_contact_customer_followup_table()
     migrate_new_customer_pull_record_table()
     migrate_game_record_table()
+    migrate_game_payment_item_table()
     migrate_customer_play_type_stat_table()
     migrate_formed_game_handover_link_table()
     migrate_public_traffic_lead_table()
@@ -1397,6 +1430,23 @@ def create_db_and_tables():
 
 def _normalize_migration_text(value: Optional[str]) -> str:
     return (value or "").strip()
+
+
+def migrate_customer_soft_delete_fields():
+    """为顾客主表补充软删除字段，兼容旧库。"""
+    with engine.begin() as conn:
+        columns = conn.execute(text("PRAGMA table_info(customer)")).fetchall()
+        existing_columns = {col[1] for col in columns}
+
+        if "is_deleted" not in existing_columns:
+            conn.execute(text("ALTER TABLE customer ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT 0"))
+        if "deleted_at" not in existing_columns:
+            conn.execute(text("ALTER TABLE customer ADD COLUMN deleted_at DATETIME"))
+        if "deleted_by" not in existing_columns:
+            conn.execute(text("ALTER TABLE customer ADD COLUMN deleted_by TEXT"))
+
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customer_is_deleted ON customer(is_deleted)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customer_deleted_at ON customer(deleted_at)"))
 
 
 def migrate_shift_and_daily_salary_rules():
@@ -1494,6 +1544,7 @@ def migrate_new_customer_pull_record_table():
                 has_tag BOOLEAN NOT NULL DEFAULT 0,
                 in_group_chat BOOLEAN NOT NULL DEFAULT 0,
                 remark_updated BOOLEAN NOT NULL DEFAULT 0,
+                remark TEXT,
                 transferred_to_team BOOLEAN NOT NULL DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1501,6 +1552,10 @@ def migrate_new_customer_pull_record_table():
                 CONSTRAINT uq_newcustomerpullrecord_source_slot UNIQUE (source_game_id, source_player_index)
             )
         """))
+        columns = conn.execute(text("PRAGMA table_info(newcustomerpullrecord)")).fetchall()
+        column_names = {col[1] for col in columns}
+        if "remark" not in column_names:
+            conn.execute(text("ALTER TABLE newcustomerpullrecord ADD COLUMN remark TEXT"))
         conn.execute(text("""
             CREATE UNIQUE INDEX IF NOT EXISTS ix_newcustomerpullrecord_source_slot
             ON newcustomerpullrecord (source_game_id, source_player_index)
@@ -1883,6 +1938,7 @@ def migrate_customer_store_link_table():
         alter_columns = [
             ("in_group_chat", "BOOLEAN NOT NULL DEFAULT 0"),
             ("has_tag", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("remark_updated", "BOOLEAN NOT NULL DEFAULT 0"),
             ("remark", "TEXT"),
             ("followup_updated_at", "DATETIME"),
             ("followup_updated_by", "TEXT"),
@@ -1898,6 +1954,7 @@ def migrate_customer_store_link_table():
         """))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customerstorelink_in_group_chat ON customerstorelink(in_group_chat)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customerstorelink_has_tag ON customerstorelink(has_tag)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customerstorelink_remark_updated ON customerstorelink(remark_updated)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customerstorelink_followup_updated_at ON customerstorelink(followup_updated_at)"))
 
 def migrate_game_record_table():
@@ -2211,7 +2268,47 @@ def migrate_game_record_table():
             ON gamerecord (external_store_name)
         """))
 
-        print("GameRecord 表已成功迁移到当前结构，旧值已按“有则保留”原则完成迁移。")
+
+def migrate_game_payment_item_table():
+    """
+    Payment detail table for store-specific expanded settlement channels.
+    Existing GameRecord payment fields remain untouched for legacy data.
+    """
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS gamepaymentitem (
+                id INTEGER PRIMARY KEY,
+                game_id INTEGER NOT NULL,
+                store_name VARCHAR NOT NULL,
+                payment_type VARCHAR NOT NULL,
+                amount REAL NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_by VARCHAR,
+                CONSTRAINT uq_gamepaymentitem_game_type UNIQUE (game_id, payment_type),
+                FOREIGN KEY(game_id) REFERENCES gamerecord (id)
+            )
+        """))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ix_gamepaymentitem_game_type
+            ON gamepaymentitem (game_id, payment_type)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_gamepaymentitem_game_id
+            ON gamepaymentitem (game_id)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_gamepaymentitem_store_name
+            ON gamepaymentitem (store_name)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_gamepaymentitem_payment_type
+            ON gamepaymentitem (payment_type)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_gamepaymentitem_store_type
+            ON gamepaymentitem (store_name, payment_type)
+        """))
 
 def migrate_formed_game_handover_link_table():
     """
@@ -2456,6 +2553,7 @@ def migrate_common_issue_tables():
             CREATE TABLE IF NOT EXISTS commonissue (
                 id INTEGER PRIMARY KEY,
                 question VARCHAR NOT NULL,
+                is_pinned BOOLEAN NOT NULL DEFAULT 0,
                 created_by_user_id INTEGER NOT NULL,
                 created_by_name VARCHAR NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -2466,6 +2564,14 @@ def migrate_common_issue_tables():
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_commonissue_question
             ON commonissue (question)
+        """))
+        columns = conn.execute(text("PRAGMA table_info(commonissue)")).fetchall()
+        col_names = {col[1] for col in columns}
+        if "is_pinned" not in col_names:
+            conn.execute(text("ALTER TABLE commonissue ADD COLUMN is_pinned BOOLEAN NOT NULL DEFAULT 0"))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_commonissue_is_pinned
+            ON commonissue (is_pinned)
         """))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_commonissue_created_by_user_id
@@ -2565,6 +2671,32 @@ def migrate_employee_leave_request_table():
             conn.execute(text("""
                 CREATE INDEX IF NOT EXISTS ix_employeeleaverequest_trigger_personal_store_bonus_halve
                 ON employeeleaverequest (trigger_personal_store_bonus_halve)
+            """))
+
+        if "leave_type" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE employeeleaverequest
+                ADD COLUMN leave_type TEXT NOT NULL DEFAULT 'leave'
+            """))
+            conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_employeeleaverequest_leave_type
+                ON employeeleaverequest (leave_type)
+            """))
+
+        if "leave_end_date" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE employeeleaverequest
+                ADD COLUMN leave_end_date DATE
+            """))
+            conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_employeeleaverequest_leave_end_date
+                ON employeeleaverequest (leave_end_date)
+            """))
+
+        if "shift_snapshot_json" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE employeeleaverequest
+                ADD COLUMN shift_snapshot_json TEXT
             """))
 
 def migrate_employee_attendance_record_table():
@@ -2830,24 +2962,19 @@ def get_manager_performance_stats(
     month: int,
 ) -> Dict[str, Any]:
     """
-    店长业绩三项统计（按操作员聚合），返回给前端画图。
+    店长业绩月度总结统计（按操作员聚合），返回给前端画图。
 
     返回：
     {
       "operators": [...],
       "tables": [...],
-      "pay_amounts": [...],
-      "verify_amounts": [...],
-      "totals": {"tables": int, "pay_amounts": float, "verify_amounts": float}
+      "totals": {"tables": int}
     }
     """
     month_start, month_end = get_month_date_range(year, month)
 
     # who_did 为空时归为“未标注”
     operator_col = func.coalesce(GameRecord.who_did, "未标注").label("operator")
-
-    # 金额口径：你当前表结构里金额来源是 wechat_pay + Alipay
-    amount_expr = (GameRecord.wechat_pay + GameRecord.Alipay)
 
     # 1) 销售订单数 = 已组齐牌局数 + 自主到店登记数
 
@@ -2886,48 +3013,13 @@ def get_manager_performance_stats(
     for op in all_sales_ops:
         sales_order_map[op] = formed_map.get(op, 0) + self_arrival_map.get(op, 0)
 
-    # 2) 代客收款金额
-    pay_stmt = (
-        select(
-            operator_col,
-            func.coalesce(func.sum(amount_expr), 0).label("amt"),
-        )
-        .where(GameRecord.store_name == store_name)
-        .where(GameRecord.payment_method == "代客收款")
-        .where(GameRecord.record_date >= month_start)
-        .where(GameRecord.record_date < month_end)
-        .group_by(operator_col)
-    )
-    pay_rows = session.exec(pay_stmt).all()
-    pay_map = {r.operator: float(r.amt or 0) for r in pay_rows}
-
-    # 3) 代客验券金额
-    verify_stmt = (
-        select(
-            operator_col,
-            func.coalesce(func.sum(amount_expr), 0).label("amt"),
-        )
-        .where(GameRecord.store_name == store_name)
-        .where(GameRecord.payment_method == "代客验券")
-        .where(GameRecord.record_date >= month_start)
-        .where(GameRecord.record_date < month_end)
-        .group_by(operator_col)
-    )
-    verify_rows = session.exec(verify_stmt).all()
-    verify_map = {r.operator: float(r.amt or 0) for r in verify_rows}
-
     # V3 员工管理联动：
     # 在职员工始终展示；已停用员工只展示到停用月份为止，下个月开始不展示
     visible_operator_names = set(
         get_visible_employee_names_for_month(session, year, month)
     )
 
-    # 合并操作员全集，确保三张图 labels 一致
-    raw_operators = sorted(
-        set(sales_order_map.keys()) |
-        set(pay_map.keys()) |
-        set(verify_map.keys())
-    )
+    raw_operators = sorted(sales_order_map.keys())
 
     operators = [
         op for op in raw_operators
@@ -2935,20 +3027,14 @@ def get_manager_performance_stats(
     ]
 
     tables = [sales_order_map.get(op, 0) for op in operators]
-    pay_amounts = [round(pay_map.get(op, 0.0), 2) for op in operators]
-    verify_amounts = [round(verify_map.get(op, 0.0), 2) for op in operators]
 
     totals = {
         "tables": int(sum(tables)),
-        "pay_amounts": round(sum(pay_amounts), 2),
-        "verify_amounts": round(sum(verify_amounts), 2),
     }
 
     return {
         "operators": operators,
         "tables": tables,
-        "pay_amounts": pay_amounts,
-        "verify_amounts": verify_amounts,
         "totals": totals,
         "month_start": month_start,  # 便于前端展示（可选）
         "month_end": month_end,      # 便于前端展示（可选）
@@ -2968,9 +3054,7 @@ def get_shift_performance_stats(
     2. 统计项：
        - 销售订单：status='formed' 的桌数
        - 代客收款金额：在这些 formed 中，payment_method='代客收款' 的金额总和
-    3. 若某天是“休息(off)”，则该天产生的业绩统一并入“前一天的晚班”：
-       - 上半部分“耍牌绩效考核表”也这样处理
-       - 下半部分“各班次业绩汇总表”也这样处理
+    3. 若某天是“休息(off)”，则该天产生的业绩统一并入“前一天的晚班”。
     """
     month_start, month_end = get_month_date_range(year, month)
     _, days_in_month = calendar.monthrange(year, month)
@@ -3128,45 +3212,9 @@ def get_shift_performance_stats(
             "daily": daily
         })
 
-    # 7) 下半部分：各班次业绩汇总
-    #    汇总按“上半部分最终显示的班次归属”来汇总
-    summary_keys = ["early", "mid", "bigmid", "night1", "night2"]
-    summary_map = {}
-    for sk in summary_keys:
-        for d in day_list:
-            summary_map[(sk, d, "orders")] = 0
-            summary_map[(sk, d, "pay_amount")] = 0.0
-
-    for row in operator_rows:
-        for item in row["daily"]:
-            sk = item["shift_type"]
-            d = item["date"]
-
-            if sk not in summary_keys:
-                # 休息不单独汇总
-                continue
-
-            summary_map[(sk, d, "orders")] += item["orders"]
-            summary_map[(sk, d, "pay_amount")] += item["pay_amount"]
-
-    summary_rows = []
-    for sk in summary_keys:
-        daily = []
-        for d in day_list:
-            daily.append({
-                "date": d,
-                "orders": summary_map[(sk, d, "orders")],
-                "pay_amount": round(summary_map[(sk, d, "pay_amount")], 2)
-            })
-        summary_rows.append({
-            "shift_type": sk,
-            "daily": daily
-        })
-
     return {
         "day_list": day_list,
-        "operator_rows": operator_rows,
-        "summary_rows": summary_rows
+        "operator_rows": operator_rows
     }
 
 def upsert_shift(
@@ -3198,7 +3246,11 @@ def upsert_shift(
 
 def normalize_shift_type(shift_type: str) -> str:
     """将拆分前保存的晚班记录兼容映射为晚1班。"""
-    return "night1" if shift_type == "night" else shift_type
+    if shift_type == "night":
+        return "night1"
+    if shift_type in {"public-rest", "public_rest", "gongxiu", "publicrest"}:
+        return "public_rest"
+    return shift_type
 
 
 def get_month_shifts_map(

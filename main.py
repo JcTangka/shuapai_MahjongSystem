@@ -15,11 +15,11 @@ import string
 from sqlmodel import Session, select
 from sqlalchemy import func, or_, and_, delete, text  # 用于搜索逻辑；text 用于团队硬删除时兼容清理工资结算表
 from datetime import date, datetime,timedelta,time
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 import itertools
 
 #  导入数据库模型
-from database import (GameRecord,Store, Room, User,
+from database import (GameRecord, GamePaymentItem, Store, Room, User,
                       Customer, CustomerStoreLink,
                       Blacklist, BrandBlacklistEntry, PlayFrequency, CustomerPlayTypeStat, create_db_and_tables, get_session,
                       ShiftSchedule, MaintenanceRecord, upsert_shift, get_month_shifts_map, get_month_date_range, normalize_shift_type,
@@ -61,8 +61,10 @@ SHIFT_TYPE_FLEXIBLE = "flexible"
 SHIFT_TYPE_NIGHT_LEGACY = "night"
 SHIFT_TYPE_NIGHT_1 = "night1"
 SHIFT_TYPE_NIGHT_2 = "night2"
+SHIFT_TYPE_PUBLIC_REST = "public_rest"
 SHIFT_OPTIONS = [
     ("off", "休息"),
+    (SHIFT_TYPE_PUBLIC_REST, "公休"),
     ("early", "早班"),
     ("mid", "中班"),
     ("bigmid", "大中班"),
@@ -90,6 +92,7 @@ FOREMAN_BASE_SALARY = 4000.0
 
 EMPLOYEE_TYPE_OPTIONS = [
     ("regular", "普通"),
+    ("probation", "试用"),
     ("logistics", "后勤"),
     ("flexible", "机动"),
     ("foreman", "领班"),
@@ -100,6 +103,13 @@ EMPLOYEE_TYPE_LABEL_MAP = {
     **{value: label for value, label in EMPLOYEE_TYPE_OPTIONS},
 }
 ALLOWED_OPERATOR_EMPLOYEE_TYPES = {value for value, _ in EMPLOYEE_TYPE_OPTIONS}
+REGULAR_LIKE_EMPLOYEE_TYPES = {"regular", "probation"}
+LEAVE_TYPE_OPTIONS = [
+    ("leave", "请假"),
+    ("public_rest", "公休"),
+]
+LEAVE_TYPE_LABEL_MAP = {value: label for value, label in LEAVE_TYPE_OPTIONS}
+PUBLIC_REST_INELIGIBLE_EMPLOYEE_TYPES = {"logistics", "flexible", "probation", "hourly"}
 
 
 # === 辅助函数 ===
@@ -113,6 +123,115 @@ def generate_temp_password(length: int = 10) -> str:
     alphabet = string.ascii_letters + string.digits
     random_part = "".join(secrets.choice(alphabet) for _ in range(length))
     return f"SP-{random_part}"
+
+
+def _leave_type_label(leave_type: str) -> str:
+    return LEAVE_TYPE_LABEL_MAP.get(leave_type or "leave", leave_type or "请假")
+
+
+def _is_rest_shift(shift_type: str) -> bool:
+    return normalize_shift_type(shift_type or "off") in {"off", SHIFT_TYPE_PUBLIC_REST}
+
+
+def _can_apply_public_rest(user: Optional[User]) -> bool:
+    if not user or user.role != "operator" or not getattr(user, "is_active", True):
+        return False
+    return (user.employee_type or "regular") not in PUBLIC_REST_INELIGIBLE_EMPLOYEE_TYPES
+
+
+def _is_public_rest_leave(leave_req: Optional[EmployeeLeaveRequest]) -> bool:
+    return bool(leave_req and (leave_req.leave_type or "leave") == "public_rest")
+
+
+def _leave_request_end_date(leave_req: EmployeeLeaveRequest) -> date:
+    return getattr(leave_req, "leave_end_date", None) or leave_req.leave_date
+
+
+def _iter_leave_request_dates(leave_req: EmployeeLeaveRequest) -> List[date]:
+    end_date = _leave_request_end_date(leave_req)
+    total_days = max((end_date - leave_req.leave_date).days, 0)
+    return [leave_req.leave_date + timedelta(days=offset) for offset in range(total_days + 1)]
+
+
+def _leave_period_label(start_date: date, end_date: date) -> str:
+    return str(start_date) if start_date == end_date else f"{start_date} 至 {end_date}"
+
+
+def _leave_request_period_label(leave_req: EmployeeLeaveRequest) -> str:
+    return _leave_period_label(leave_req.leave_date, _leave_request_end_date(leave_req))
+
+
+def _serialize_shift_snapshot(snapshot: Dict[str, str]) -> str:
+    return json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+
+
+def _deserialize_shift_snapshot(raw_value: Optional[str]) -> Dict[str, str]:
+    if not raw_value:
+        return {}
+    try:
+        data = json.loads(raw_value)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): normalize_shift_type(str(value or "off")) for key, value in data.items()}
+
+
+def _collect_public_rest_shift_snapshot(
+        session: Session,
+        *,
+        employee_name: str,
+        start_date: date,
+        end_date: date
+) -> Tuple[Optional[str], Dict[str, str]]:
+    snapshot: Dict[str, str] = {}
+    current = start_date
+    while current <= end_date:
+        shift_type = _get_shift_type_for_employee_on_date(
+            session=session,
+            employee_name=employee_name,
+            work_date=current
+        )
+        if _is_rest_shift(shift_type):
+            return f"{current} 排班为{_shift_type_label(shift_type)}，不能申请公休", {}
+        snapshot[current.isoformat()] = shift_type
+        current += timedelta(days=1)
+    return None, snapshot
+
+
+def _find_overlapping_leave_request(
+        session: Session,
+        *,
+        user_id: int,
+        start_date: date,
+        end_date: date,
+        exclude_leave_id: Optional[int] = None
+) -> Optional[EmployeeLeaveRequest]:
+    requests = session.exec(
+        select(EmployeeLeaveRequest).where(
+            EmployeeLeaveRequest.user_id == user_id,
+            EmployeeLeaveRequest.status.in_(list(LEAVE_COUNT_ACTIVE_STATUSES))
+        )
+    ).all()
+    for item in requests:
+        if exclude_leave_id and item.id == exclude_leave_id:
+            continue
+        item_end = _leave_request_end_date(item)
+        if item.leave_date <= end_date and item_end >= start_date:
+            return item
+    return None
+
+
+def _leave_affected_months(leave_req: EmployeeLeaveRequest) -> List[Tuple[int, int]]:
+    months = []
+    seen = set()
+    for work_date in _iter_leave_request_dates(leave_req):
+        key = (work_date.year, work_date.month)
+        if key in seen:
+            continue
+        seen.add(key)
+        months.append(key)
+    return months
 
 def _get_all_store_list(session: Session):
     all_rooms = session.exec(select(Room)).all()
@@ -240,7 +359,7 @@ def _calc_leave_deduct_amount(
     3. 其他上班班次请假：扣普通日薪 107；
     4. 审批通过的请假不影响全勤奖。
     """
-    if shift_type == "off":
+    if _is_rest_shift(shift_type):
         return 0.0
 
     user = session.get(User, user_id)
@@ -265,7 +384,7 @@ def _get_month_non_off_shifts(
             ShiftSchedule.operator_name == employee_name,
             ShiftSchedule.work_date >= month_start,
             ShiftSchedule.work_date <= month_end,
-            ShiftSchedule.shift_type != "off"
+            ~ShiftSchedule.shift_type.in_(["off", SHIFT_TYPE_PUBLIC_REST])
         ).order_by(
             ShiftSchedule.work_date,
             ShiftSchedule.id
@@ -305,7 +424,7 @@ def _calc_employee_leave_deduct(
         leave_date: date,
         shift_type: str
 ) -> float:
-    if shift_type == "off":
+    if _is_rest_shift(shift_type):
         return 0.0
     if (employee.employee_type or "regular") == "logistics":
         return LOGISTICS_DAILY_SALARY
@@ -396,14 +515,21 @@ def _rebuild_flexible_employee_shift_flows(
         ))
 
 
-def _find_leave_replacement_employee(
+def _find_leave_replacement_employees(
         session: Session,
         *,
         applicant_user_id: int,
         leave_date: date
-) -> Optional[User]:
+) -> List[User]:
     """
-    找到请假当天唯一一个休班员工，作为指定顶班人。
+    Return eligible off-shift replacement employees for one leave date.
+
+    Eligible candidates:
+    1. must be off that day;
+    2. cannot be the applicant;
+    3. cannot be admin;
+    4. cannot be logistics;
+    5. cannot be flexible.
     """
     off_shifts = session.exec(
         select(ShiftSchedule).where(
@@ -412,6 +538,7 @@ def _find_leave_replacement_employee(
         ).order_by(ShiftSchedule.id)
     ).all()
 
+    candidates: List[User] = []
     for shift in off_shifts:
         candidate = session.exec(
             select(User).where(
@@ -420,10 +547,16 @@ def _find_leave_replacement_employee(
                 User.id != applicant_user_id
             )
         ).first()
-        if candidate and (candidate.employee_type or "regular") != "flexible":
-            return candidate
+        if not candidate or candidate.role == "admin":
+            continue
 
-    return None
+        candidate_type = candidate.employee_type or "regular"
+        if candidate_type in {"logistics", "flexible"}:
+            continue
+
+        candidates.append(candidate)
+
+    return candidates
 
 
 def _create_employee_notification(
@@ -547,6 +680,7 @@ def _finalize_leave_for_applicant(
 ) -> None:
     """Create the applicant attendance record and salary deduction for an approved leave."""
     now = datetime.now()
+    is_public_rest_leave = _is_public_rest_leave(leave_req)
     leave_req.status = status
     leave_req.final_deduct_amount = round(final_deduct, 2)
     leave_req.updated_at = now
@@ -577,27 +711,81 @@ def _finalize_leave_for_applicant(
     session.add(attendance)
     session.flush()
 
-    salary_flow = _create_leave_deduct_salary_flow(
-        session=session,
-        target_user=applicant,
-        employee_name=leave_req.employee_name_snapshot,
-        leave_req=leave_req,
-        amount=final_deduct,
-        title="请假扣款",
-        description=(
-            f"{leave_req.employee_name_snapshot} 请假，日期：{leave_req.leave_date}，"
-            f"班次：{_shift_type_label(leave_req.shift_type)}，"
-            f"顶班人：{leave_req.replacement_employee_name_snapshot or '-'}，"
-            f"扣款：{final_deduct:.2f} 元。审批通过请假不影响全勤奖。"
-        ),
-        operator=operator,
-        created_at=now
-    )
-    attendance.is_salary_generated = True
-    attendance.salary_flow_id = salary_flow.id
+    salary_flow = None
+    if not is_public_rest_leave:
+        salary_flow = _create_leave_deduct_salary_flow(
+            session=session,
+            target_user=applicant,
+            employee_name=leave_req.employee_name_snapshot,
+            leave_req=leave_req,
+            amount=final_deduct,
+            title="请假扣款",
+            description=(
+                f"{leave_req.employee_name_snapshot} 请假，日期：{leave_req.leave_date}，"
+                f"班次：{_shift_type_label(leave_req.shift_type)}，"
+                f"顶班人：{leave_req.replacement_employee_name_snapshot or '-'}，"
+                f"扣款：{final_deduct:.2f} 元。审批通过请假不影响全勤奖。"
+            ),
+            operator=operator,
+            created_at=now
+        )
+        attendance.is_salary_generated = True
+        attendance.salary_flow_id = salary_flow.id
     leave_req.attendance_record_id = attendance.id
-    leave_req.salary_flow_id = salary_flow.id
+    leave_req.salary_flow_id = salary_flow.id if salary_flow else None
     session.add(attendance)
+    session.add(leave_req)
+
+
+def _finalize_public_rest_leave_for_applicant(
+        session: Session,
+        *,
+        leave_req: EmployeeLeaveRequest,
+        applicant: User,
+        operator: User,
+        status: str,
+        approval_note: Optional[str] = None,
+        attendance_remark: Optional[str] = None
+) -> None:
+    now = datetime.now()
+    shift_snapshot = _deserialize_shift_snapshot(getattr(leave_req, "shift_snapshot_json", None))
+    leave_req.status = status
+    leave_req.final_deduct_amount = 0.0
+    leave_req.salary_flow_id = None
+    leave_req.updated_at = now
+
+    first_attendance_id = None
+    for work_date in _iter_leave_request_dates(leave_req):
+        original_shift = shift_snapshot.get(work_date.isoformat(), leave_req.shift_type)
+        attendance = EmployeeAttendanceRecord(
+            user_id=leave_req.user_id,
+            employee_name_snapshot=leave_req.employee_name_snapshot,
+            event_date=work_date,
+            event_type="leave",
+            shift_type=original_shift,
+            reason=leave_req.reason,
+            remark=attendance_remark,
+            status="approved",
+            affect_full_attendance=False,
+            deduct_amount=0.0,
+            is_salary_generated=False,
+            salary_flow_id=None,
+            leave_request_id=leave_req.id,
+            created_by_user_id=operator.id,
+            created_by_name=operator.display_name,
+            approved_by_user_id=leave_req.approved_by_user_id,
+            approved_by_name=leave_req.approved_by_name,
+            approved_at=leave_req.approved_at,
+            approval_note=approval_note or None,
+            created_at=now,
+            updated_at=now
+        )
+        session.add(attendance)
+        session.flush()
+        if first_attendance_id is None:
+            first_attendance_id = attendance.id
+
+    leave_req.attendance_record_id = first_attendance_id
     session.add(leave_req)
 
 
@@ -657,6 +845,7 @@ def _count_employee_leave_requests_for_month(
         EmployeeLeaveRequest.user_id == user_id,
         EmployeeLeaveRequest.leave_date >= month_start,
         EmployeeLeaveRequest.leave_date <= month_end,
+        EmployeeLeaveRequest.leave_type == "leave",
         EmployeeLeaveRequest.status.in_(list(LEAVE_COUNT_ACTIVE_STATUSES))
     )
     if exclude_leave_id:
@@ -922,13 +1111,57 @@ def _cancel_leave_by_admin(
         replacement = session.get(User, leave_req.replacement_user_id) if leave_req.replacement_user_id else None
         if not replacement:
             return "机动顶班员工账号不存在，不能恢复排班"
-        current_shift = _get_shift_type_for_employee_on_date(
-            session=session,
-            employee_name=replacement.display_name,
-            work_date=leave_req.leave_date
-        )
-        if current_shift != leave_req.shift_type:
-            return "机动员工当天排班已被后续修改，不能直接撤回"
+        if _is_public_rest_leave(leave_req):
+            shift_snapshot = _deserialize_shift_snapshot(getattr(leave_req, "shift_snapshot_json", None))
+            for work_date in _iter_leave_request_dates(leave_req):
+                expected_shift = shift_snapshot.get(work_date.isoformat(), leave_req.shift_type)
+                current_shift = _get_shift_type_for_employee_on_date(
+                    session=session,
+                    employee_name=replacement.display_name,
+                    work_date=work_date
+                )
+                if current_shift != expected_shift:
+                    return f"机动员工 {work_date} 的排班已被后续修改，不能直接撤回"
+        else:
+            current_shift = _get_shift_type_for_employee_on_date(
+                session=session,
+                employee_name=replacement.display_name,
+                work_date=leave_req.leave_date
+            )
+            if current_shift != leave_req.shift_type:
+                return "机动员工当天排班已被后续修改，不能直接撤回"
+
+    if _is_public_rest_leave(leave_req):
+        for work_date in _iter_leave_request_dates(leave_req):
+            applicant_current_shift = _get_shift_type_for_employee_on_date(
+                session=session,
+                employee_name=applicant.display_name,
+                work_date=work_date
+            )
+            if applicant_current_shift != SHIFT_TYPE_PUBLIC_REST:
+                return f"请假员工 {work_date} 的排班已被后续修改，不能直接撤回公休"
+
+        if leave_req.status == "approved_with_flexible" and leave_req.replacement_user_id:
+            replacement = session.get(User, leave_req.replacement_user_id)
+            replacement_shift_rows = session.exec(
+                select(ShiftSchedule).where(
+                    ShiftSchedule.operator_name == replacement.display_name,
+                    ShiftSchedule.work_date >= leave_req.leave_date,
+                    ShiftSchedule.work_date <= _leave_request_end_date(leave_req)
+                )
+            ).all()
+            shift_ids = [item.id for item in replacement_shift_rows if item.id]
+            if shift_ids:
+                flexible_flows = session.exec(
+                    select(SalaryFlowRecord).where(
+                        SalaryFlowRecord.user_id == replacement.id,
+                        SalaryFlowRecord.source_type == "flexible_schedule",
+                        SalaryFlowRecord.source_id.in_(shift_ids)
+                    )
+                ).all()
+                locked_flows = [flow for flow in flexible_flows if flow.is_locked]
+                if locked_flows:
+                    return "相关机动顶班工资流水已锁定，不能直接撤回，请走工资修正"
 
     error = _delete_unlocked_salary_flows(session, related_flows)
     if error:
@@ -944,15 +1177,34 @@ def _cancel_leave_by_admin(
 
     if leave_req.status == "approved_with_flexible":
         replacement = session.get(User, leave_req.replacement_user_id)
-        upsert_shift(session, replacement.display_name, leave_req.leave_date, "off")
-        session.flush()
-        _rebuild_flexible_employee_shift_flows(
-            session=session,
-            employee=replacement,
-            year=leave_req.leave_date.year,
-            month=leave_req.leave_date.month,
-            operator=operator
-        )
+        if _is_public_rest_leave(leave_req):
+            for work_date in _iter_leave_request_dates(leave_req):
+                upsert_shift(session, replacement.display_name, work_date, "off")
+            session.flush()
+            for year, month in _leave_affected_months(leave_req):
+                _rebuild_flexible_employee_shift_flows(
+                    session=session,
+                    employee=replacement,
+                    year=year,
+                    month=month,
+                    operator=operator
+                )
+        else:
+            upsert_shift(session, replacement.display_name, leave_req.leave_date, "off")
+            session.flush()
+            _rebuild_flexible_employee_shift_flows(
+                session=session,
+                employee=replacement,
+                year=leave_req.leave_date.year,
+                month=leave_req.leave_date.month,
+                operator=operator
+            )
+
+    if _is_public_rest_leave(leave_req):
+        shift_snapshot = _deserialize_shift_snapshot(getattr(leave_req, "shift_snapshot_json", None))
+        for work_date in _iter_leave_request_dates(leave_req):
+            original_shift = shift_snapshot.get(work_date.isoformat(), leave_req.shift_type)
+            upsert_shift(session, applicant.display_name, work_date, original_shift)
 
     now = datetime.now()
     leave_req.status = "admin_cancelled"
@@ -968,7 +1220,7 @@ def _cancel_leave_by_admin(
         target_user=applicant,
         related_user=operator,
         title="请假已由管理员撤回",
-        content=f"管理员已撤回您 {leave_req.leave_date} 的请假，相关工资和考勤记录已恢复。",
+        content=f"管理员已撤回您 {_leave_request_period_label(leave_req)} 的申请，相关工资、考勤和排班已恢复。",
         notification_type="leave_admin_cancelled",
         source_type="leave_request",
         source_id=leave_req.id,
@@ -1107,7 +1359,11 @@ def _employee_salary_type(user_obj: User) -> str:
 
 
 def _employee_participates_personal_store_bonus(user_obj: User) -> bool:
-    return bool(user_obj and user_obj.role != "admin" and (user_obj.employee_type or "regular") == "regular")
+    return bool(
+        user_obj
+        and user_obj.role != "admin"
+        and (user_obj.employee_type or "regular") in REGULAR_LIKE_EMPLOYEE_TYPES
+    )
 
 
 def _employee_participates_team_bonus(employee_type: str) -> bool:
@@ -1296,7 +1552,11 @@ def _leave_request_payload(item: EmployeeLeaveRequest) -> dict:
         "user_id": item.user_id,
         "employee_name": item.employee_name_snapshot,
         "leave_date": str(item.leave_date),
+        "leave_end_date": str(_leave_request_end_date(item)),
+        "period_label": _leave_request_period_label(item),
         "apply_date": str(item.apply_date),
+        "leave_type": getattr(item, "leave_type", "leave") or "leave",
+        "leave_type_label": _leave_type_label(getattr(item, "leave_type", "leave") or "leave"),
         "shift_type": item.shift_type,
         "shift_label": _shift_type_label(item.shift_type),
         "reason": item.reason or "",
@@ -2032,8 +2292,9 @@ def _sum_salary_flows_for_settlement(
 
     注意：
     1. final_salary 直接等于全部工资流水 amount 总和；
-    2. deduction_total 是所有负数流水绝对值合计；
-    3. manual_adjustment_total 统计管理员手工流水净额，方便后台查看。
+    2. bonus_total 包含个人门店达标奖和其他奖金；
+    3. deduction_total 仍记录所有负数流水绝对值合计；
+    4. manual_adjustment_total 用于工资结算列表展示，包含所有扣款和其他手工调整净额。
     """
     flows = session.exec(
         select(SalaryFlowRecord).where(
@@ -2071,6 +2332,7 @@ def _sum_salary_flows_for_settlement(
             result["personal_commission_total"] += amount
         elif category == "personal_store_bonus":
             result["personal_store_bonus_total"] += amount
+            result["bonus_total"] += amount
         elif category == "team_commission":
             continue
         elif category == "bonus":
@@ -2079,7 +2341,7 @@ def _sum_salary_flows_for_settlement(
         if amount < 0:
             result["deduction_total"] += abs(amount)
 
-        if not f.is_auto:
+        if amount < 0 or not f.is_auto:
             result["manual_adjustment_total"] += amount
 
     for k in result:
@@ -2110,12 +2372,16 @@ def _salary_settlement_payload(
     employee_social_security_amount = round(float(getattr(item, "employee_social_security_amount", 0) or 0), 2)
     social_security_amount = round(float(getattr(item, "social_security_amount", 0) or 0), 2)
     payable_salary = round(final_salary + employee_social_security_amount, 2)
-    actual_salary = round(payable_salary - social_security_amount, 2)
+    actual_salary = round(payable_salary - employee_social_security_amount - social_security_amount, 2)
+    employee = session.get(User, item.user_id)
+    employee_type = _employee_salary_type(employee) if employee else "regular"
 
     return {
         "id": item.id,
         "user_id": item.user_id,
         "employee_name": item.employee_name_snapshot,
+        "employee_type": employee_type,
+        "employee_type_label": _employee_type_label(employee_type),
         "salary_year": item.salary_year,
         "salary_month": item.salary_month,
 
@@ -2436,7 +2702,10 @@ def _build_salary_settlement_data(
             or_(
                 and_(
                     User.is_active == True,
-                    User.hide_from_schedule_performance == False
+                    or_(
+                        User.hide_from_schedule_performance == False,
+                        User.employee_type == "logistics",
+                    )
                 ),
                 and_(
                     User.employment_status == "resigned",
@@ -3748,6 +4017,26 @@ PUBLIC_TRAFFIC_SOURCE_PORTS = ("小红书", "抖音")
 
 OVERFLOW_PAYMENT_METHOD = "溢出收款"
 
+JINNIU_WANDA_STORE_NAME = "金牛万达店"
+PAYMENT_TYPE_ENTERPRISE_WECHAT = "enterprise_wechat"
+PAYMENT_TYPE_ALIPAY = "alipay"
+PAYMENT_TYPE_NORMAL_WECHAT = "normal_wechat_shuapai9725"
+PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET = "enterprise_wechat_red_packet_shuapai888"
+
+EXPANDED_PAYMENT_TYPES = (
+    PAYMENT_TYPE_ENTERPRISE_WECHAT,
+    PAYMENT_TYPE_ALIPAY,
+    PAYMENT_TYPE_NORMAL_WECHAT,
+    PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET,
+)
+
+EXPANDED_PAYMENT_LABELS = {
+    PAYMENT_TYPE_ENTERPRISE_WECHAT: "企业微信收款",
+    PAYMENT_TYPE_ALIPAY: "支付宝收款",
+    PAYMENT_TYPE_NORMAL_WECHAT: "普通微信收款（shuapai9725）",
+    PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET: "企业微信红包收款（shuapai888）",
+}
+
 
 def _normalize_formed_source_filter(source_filter: Optional[str]) -> str:
     source_filter = _normalize_text(source_filter) or FORMED_SOURCE_NORMAL
@@ -3755,8 +4044,110 @@ def _normalize_formed_source_filter(source_filter: Optional[str]) -> str:
         return FORMED_SOURCE_NORMAL
     return source_filter
 
-def _has_any_system_receipt(game: GameRecord) -> bool:
-    return (_safe_float(game.wechat_pay) > 0) or (_safe_float(game.Alipay) > 0)
+
+def _is_jinniu_wanda_store(store_name: Optional[str]) -> bool:
+    return _normalize_text(store_name) == JINNIU_WANDA_STORE_NAME
+
+
+def _empty_payment_breakdown() -> Dict[str, float]:
+    return {payment_type: 0.0 for payment_type in EXPANDED_PAYMENT_TYPES}
+
+
+def _legacy_payment_breakdown(game: GameRecord) -> Dict[str, float]:
+    breakdown = _empty_payment_breakdown()
+    breakdown[PAYMENT_TYPE_ENTERPRISE_WECHAT] = _safe_float(game.wechat_pay)
+    breakdown[PAYMENT_TYPE_ALIPAY] = _safe_float(game.Alipay)
+    return breakdown
+
+
+def _payment_breakdown_total(breakdown: Dict[str, float]) -> float:
+    return round(sum(_safe_float(breakdown.get(payment_type)) for payment_type in EXPANDED_PAYMENT_TYPES), 2)
+
+
+def _load_payment_item_breakdowns(session: Session, games: List[GameRecord]) -> Dict[int, Dict[str, float]]:
+    game_ids = [g.id for g in games if g.id]
+    if not game_ids:
+        return {}
+
+    item_rows = session.exec(
+        select(GamePaymentItem).where(GamePaymentItem.game_id.in_(game_ids))
+    ).all()
+
+    result: Dict[int, Dict[str, float]] = {}
+    for item in item_rows:
+        if item.payment_type not in EXPANDED_PAYMENT_TYPES:
+            continue
+        result.setdefault(item.game_id, _empty_payment_breakdown())
+        result[item.game_id][item.payment_type] += _safe_float(item.amount)
+
+    return result
+
+
+def _payment_breakdown_for_game(
+    game: GameRecord,
+    item_breakdowns: Optional[Dict[int, Dict[str, float]]] = None
+) -> Dict[str, float]:
+    if _is_jinniu_wanda_store(game.store_name) and game.id and item_breakdowns and game.id in item_breakdowns:
+        breakdown = _empty_payment_breakdown()
+        for payment_type in EXPANDED_PAYMENT_TYPES:
+            breakdown[payment_type] = round(_safe_float(item_breakdowns[game.id].get(payment_type)), 2)
+        return breakdown
+    return _legacy_payment_breakdown(game)
+
+
+def _received_amount_for_game(
+    game: GameRecord,
+    item_breakdowns: Optional[Dict[int, Dict[str, float]]] = None
+) -> float:
+    return _payment_breakdown_total(_payment_breakdown_for_game(game, item_breakdowns))
+
+
+def _remaining_amount_for_game(
+    game: GameRecord,
+    item_breakdowns: Optional[Dict[int, Dict[str, float]]] = None
+) -> float:
+    return round(_safe_float(game.room_fee) - _received_amount_for_game(game, item_breakdowns), 2)
+
+
+def _load_single_payment_breakdown(session: Session, game: GameRecord) -> Dict[str, float]:
+    return _payment_breakdown_for_game(game, _load_payment_item_breakdowns(session, [game]))
+
+
+def _has_any_system_receipt(session: Session, game: GameRecord) -> bool:
+    return _payment_breakdown_total(_load_single_payment_breakdown(session, game)) > 0
+
+
+def _save_expanded_payment_items(
+    session: Session,
+    game: GameRecord,
+    breakdown: Dict[str, float],
+    operator_name: str
+) -> None:
+    now = datetime.now()
+    existing_items = session.exec(
+        select(GamePaymentItem).where(GamePaymentItem.game_id == game.id)
+    ).all()
+    item_map = {item.payment_type: item for item in existing_items}
+
+    for payment_type in EXPANDED_PAYMENT_TYPES:
+        amount = round(_safe_float(breakdown.get(payment_type)), 2)
+        item = item_map.get(payment_type)
+        if not item:
+            item = GamePaymentItem(
+                game_id=game.id,
+                store_name=game.store_name,
+                payment_type=payment_type,
+                amount=amount,
+                created_at=now,
+                updated_at=now,
+                updated_by=operator_name
+            )
+        else:
+            item.store_name = game.store_name
+            item.amount = amount
+            item.updated_at = now
+            item.updated_by = operator_name
+        session.add(item)
 
 
 def _parse_required_self_arrival_order_start_time(order_start_time_full: str) -> Tuple[date, str]:
@@ -4727,7 +5118,14 @@ def _xml_cell(value) -> str:
     return f'<Cell><Data ss:Type="String">{text}</Data></Cell>'
 
 
-def _build_formed_games_excel_xml(records: List[GameRecord], store_name: str, start_d: date, end_d: date) -> str:
+def _build_formed_games_excel_xml(
+    records: List[GameRecord],
+    store_name: str,
+    start_d: date,
+    end_d: date,
+    payment_breakdowns: Optional[Dict[int, Dict[str, float]]] = None
+) -> str:
+    is_jinniu_wanda_store = _is_jinniu_wanda_store(store_name)
     headers = [
         "ID",
         "门店",
@@ -4751,8 +5149,13 @@ def _build_formed_games_excel_xml(records: List[GameRecord], store_name: str, st
         "下单/支付方式",
         "本单金额",
         "是否已收齐",
-        "微信收款",
+        "企业微信收款" if is_jinniu_wanda_store else "微信收款",
         "支付宝收款",
+        *(
+            ["普通微信收款（shuapai9725）", "企业微信红包收款（shuapai888）"]
+            if is_jinniu_wanda_store
+            else []
+        ),
         "未收金额",
         "接待店长",
         "创建时间",
@@ -4779,7 +5182,8 @@ def _build_formed_games_excel_xml(records: List[GameRecord], store_name: str, st
     rows_xml.append(f'<Row>{header_cells}</Row>')
 
     for g in records:
-        remaining = round((g.room_fee or 0) - (g.wechat_pay or 0) - (g.Alipay or 0), 2)
+        breakdown = _payment_breakdown_for_game(g, payment_breakdowns)
+        remaining = round((g.room_fee or 0) - _payment_breakdown_total(breakdown), 2)
         if remaining < 0:
             remaining = 0
 
@@ -4806,8 +5210,16 @@ def _build_formed_games_excel_xml(records: List[GameRecord], store_name: str, st
             g.payment_method or "",
             g.room_fee or 0,
             "是" if g.is_payAll else "否",
-            g.wechat_pay or 0,
-            g.Alipay or 0,
+            breakdown.get(PAYMENT_TYPE_ENTERPRISE_WECHAT, 0),
+            breakdown.get(PAYMENT_TYPE_ALIPAY, 0),
+            *(
+                [
+                    breakdown.get(PAYMENT_TYPE_NORMAL_WECHAT, 0),
+                    breakdown.get(PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET, 0),
+                ]
+                if is_jinniu_wanda_store
+                else []
+            ),
             remaining,
             g.who_did or "",
             g.created_at.strftime("%Y-%m-%d %H:%M:%S") if g.created_at else "",
@@ -4981,18 +5393,19 @@ def get_brand_store_dashboard_stats(
         g for g in period_games
         if _normalize_text(g.record_source) == FORMED_SOURCE_OVERFLOW
     ]
+    payment_breakdowns = _load_payment_item_breakdowns(session, period_games)
 
     # ========= 4. 营收（溢出单不计入） =========
-    total_revenue = round(sum(_safe_float(g.wechat_pay) + _safe_float(g.Alipay) for g in normal_period_games), 2)
+    total_revenue = round(sum(_received_amount_for_game(g, payment_breakdowns) for g in normal_period_games), 2)
 
     offline_revenue = round(sum(
-        (_safe_float(g.wechat_pay) + _safe_float(g.Alipay))
+        _received_amount_for_game(g, payment_breakdowns)
         for g in normal_period_games
         if g.payment_method == "代客收款"
     ), 2)
 
     voucher_revenue = round(sum(
-        (_safe_float(g.wechat_pay) + _safe_float(g.Alipay))
+        _received_amount_for_game(g, payment_breakdowns)
         for g in normal_period_games
         if g.payment_method == "代客验券"
     ), 2)
@@ -5066,7 +5479,7 @@ def get_brand_store_dashboard_stats(
     # 收入趋势：只算正常营收单
     for g in normal_period_games:
         day_key = _game_effective_order_dt(g).strftime("%Y-%m-%d")
-        revenue_by_day[day_key] += (_safe_float(g.wechat_pay) + _safe_float(g.Alipay))
+        revenue_by_day[day_key] += _received_amount_for_game(g, payment_breakdowns)
 
     # 桌数趋势：全部 formed 都算，包含溢出单
     for g in period_games:
@@ -5080,7 +5493,7 @@ def get_brand_store_dashboard_stats(
     # ========= 11. 溢出单补充统计 =========
     overflow_order_count = len(overflow_period_games)
     overflow_profit_total = round(sum(
-        (_safe_float(g.wechat_pay) + _safe_float(g.Alipay) - _safe_float(g.room_fee))
+        (_received_amount_for_game(g, payment_breakdowns) - _safe_float(g.room_fee))
         for g in overflow_period_games
     ), 2)
 
@@ -5365,8 +5778,9 @@ def build_handover_stats(session: Session, store_name: str, start_date: date, en
     ).all()
 
     unreceived_amount = 0.0
+    payment_breakdowns = _load_payment_item_breakdowns(session, game_rows)
     for g in game_rows:
-        left_amount = (g.room_fee or 0.0) - (g.wechat_pay or 0.0) - (g.Alipay or 0.0)
+        left_amount = (g.room_fee or 0.0) - _received_amount_for_game(g, payment_breakdowns)
         unreceived_amount += max(left_amount, 0.0)
 
     store_customer_ids = session.exec(
@@ -5994,6 +6408,8 @@ DUTY_ACTION_REVIEW = "review_info"
 DUTY_ACTION_LOGIN = "login_duty"
 DUTY_WORK_ACTION_TYPES = {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN}
 DUTY_REVIEW_SESSION_COOKIE = "employee_review_session_id"
+DUTY_REVIEW_SESSION_MAX_AGE_SECONDS = 15 * 60
+DUTY_DEFAULT_LOGIN_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
 
 
 def _is_logistics_employee(user: Optional[User]) -> bool:
@@ -6147,16 +6563,23 @@ def _employee_duty_status_label(item: EmployeeDutySession) -> str:
 
 
 def _today_review_session(session: Session, user_id: int) -> Optional[EmployeeDutySession]:
-    today_start = datetime.combine(date.today(), time.min)
-    tomorrow_start = today_start + timedelta(days=1)
+    now = datetime.now()
+    valid_after = now - timedelta(seconds=DUTY_REVIEW_SESSION_MAX_AGE_SECONDS)
     return session.exec(
         select(EmployeeDutySession).where(
             EmployeeDutySession.user_id == user_id,
             EmployeeDutySession.action_type == DUTY_ACTION_REVIEW,
-            EmployeeDutySession.reviewed_at >= today_start,
-            EmployeeDutySession.reviewed_at < tomorrow_start
+            EmployeeDutySession.reviewed_at >= valid_after,
+            EmployeeDutySession.reviewed_at <= now
         ).order_by(EmployeeDutySession.reviewed_at.desc(), EmployeeDutySession.id.desc())
     ).first()
+
+
+def _is_review_session_valid(review_session: Optional[EmployeeDutySession]) -> bool:
+    if not review_session or not review_session.reviewed_at:
+        return False
+    expires_at = review_session.reviewed_at + timedelta(seconds=DUTY_REVIEW_SESSION_MAX_AGE_SECONDS)
+    return expires_at > datetime.now()
 
 
 def _review_session_from_current_login(
@@ -6169,13 +6592,16 @@ def _review_session_from_current_login(
     except Exception:
         return None
 
-    return session.exec(
+    review_session = session.exec(
         select(EmployeeDutySession).where(
             EmployeeDutySession.id == session_id,
             EmployeeDutySession.user_id == user_id,
             EmployeeDutySession.action_type == DUTY_ACTION_REVIEW,
         )
     ).first()
+    if not _is_review_session_valid(review_session):
+        return None
+    return review_session
 
 
 def _build_employee_duty_status(
@@ -6351,9 +6777,12 @@ def _store_duty_month_start_filter_text(clicked_at: datetime) -> str:
     return month_start.strftime("%Y-%m-%d %H:%M")
 
 
-def _store_duty_week_ago_filter_text(clicked_at: datetime) -> str:
-    week_ago = clicked_at - timedelta(days=7)
-    return week_ago.strftime("%Y-%m-%d %H:%M")
+def _store_duty_lookback_start(clicked_at: datetime) -> datetime:
+    return clicked_at - timedelta(hours=12)
+
+
+def _store_duty_lookback_start_filter_text(clicked_at: datetime) -> str:
+    return _store_duty_lookback_start(clicked_at).strftime("%Y-%m-%d %H:%M")
 
 
 def _run_store_duty_payment_self_check(
@@ -6370,7 +6799,7 @@ def _run_store_duty_payment_self_check(
         return result
 
     clicked_at_text = _store_duty_order_end_filter_text(clicked_at)
-    week_ago_text = _store_duty_week_ago_filter_text(clicked_at)
+    lookback_start_text = _store_duty_lookback_start_filter_text(clicked_at)
     candidate_games = session.exec(
         select(GameRecord).where(
             GameRecord.store_name.in_(store_names),
@@ -6378,7 +6807,7 @@ def _run_store_duty_payment_self_check(
             GameRecord.record_source.in_(STORE_DUTY_SELF_CHECK_ORDER_SOURCES),
             GameRecord.order_end_time.is_not(None),
             GameRecord.order_end_time != "",
-            GameRecord.order_end_time >= week_ago_text,
+            GameRecord.order_end_time >= lookback_start_text,
             GameRecord.order_end_time <= clicked_at_text,
             GameRecord.is_payAll == False
         ).order_by(GameRecord.record_source, GameRecord.store_name, GameRecord.order_end_time, GameRecord.id)
@@ -6451,8 +6880,8 @@ def _run_store_duty_info_self_check(
         return result
 
     clicked_at_text = _store_duty_order_end_filter_text(clicked_at)
-    week_ago_text = _store_duty_week_ago_filter_text(clicked_at)
-    week_ago_date = (clicked_at - timedelta(days=7)).date()
+    lookback_start_text = _store_duty_lookback_start_filter_text(clicked_at)
+    lookback_start_date = _store_duty_lookback_start(clicked_at).date()
     clicked_at_date = clicked_at.date()
     candidate_games = session.exec(
         select(GameRecord).where(
@@ -6463,12 +6892,12 @@ def _run_store_duty_info_self_check(
                 (
                     (GameRecord.order_end_time.is_not(None)) &
                     (GameRecord.order_end_time != "") &
-                    (GameRecord.order_end_time >= week_ago_text) &
+                    (GameRecord.order_end_time >= lookback_start_text) &
                     (GameRecord.order_end_time <= clicked_at_text)
                 ),
                 (
                     ((GameRecord.order_end_time.is_(None)) | (GameRecord.order_end_time == "")) &
-                    (GameRecord.record_date >= week_ago_date) &
+                    (GameRecord.record_date >= lookback_start_date) &
                     (GameRecord.record_date <= clicked_at_date)
                 )
             )
@@ -6723,8 +7152,8 @@ def _run_store_duty_store_release_checks(
     )
 
     clicked_at_text = _store_duty_order_end_filter_text(clicked_at)
-    week_ago_text = _store_duty_week_ago_filter_text(clicked_at)
-    week_ago_date = (clicked_at - timedelta(days=7)).date()
+    lookback_start_text = _store_duty_lookback_start_filter_text(clicked_at)
+    lookback_start_date = _store_duty_lookback_start(clicked_at).date()
     clicked_at_date = clicked_at.date()
     candidate_games = session.exec(
         select(GameRecord).where(
@@ -6735,12 +7164,12 @@ def _run_store_duty_store_release_checks(
                 (
                     (GameRecord.order_end_time.is_not(None)) &
                     (GameRecord.order_end_time != "") &
-                    (GameRecord.order_end_time >= week_ago_text) &
+                    (GameRecord.order_end_time >= lookback_start_text) &
                     (GameRecord.order_end_time <= clicked_at_text)
                 ),
                 (
                     ((GameRecord.order_end_time.is_(None)) | (GameRecord.order_end_time == "")) &
-                    (GameRecord.record_date >= week_ago_date) &
+                    (GameRecord.record_date >= lookback_start_date) &
                     (GameRecord.record_date <= clicked_at_date)
                 )
             )
@@ -6920,6 +7349,7 @@ def _build_common_issue_cards(session: Session, issues: List[CommonIssue]) -> Li
         cards.append({
             "id": issue.id,
             "question": issue.question,
+            "is_pinned": bool(issue.is_pinned),
             "created_by_name": issue.created_by_name,
             "created_at_str": issue.created_at.strftime("%Y-%m-%d %H:%M") if issue.created_at else "",
             "updated_at_str": issue.updated_at.strftime("%Y-%m-%d %H:%M") if issue.updated_at else "",
@@ -6931,7 +7361,11 @@ def _build_common_issue_cards(session: Session, issues: List[CommonIssue]) -> Li
 def _search_common_issues(session: Session, keyword: str) -> List[CommonIssue]:
     clean_keyword = _normalize_text(keyword)
     issues = session.exec(
-        select(CommonIssue).order_by(CommonIssue.updated_at.desc(), CommonIssue.id.desc())
+        select(CommonIssue).order_by(
+            CommonIssue.is_pinned.desc(),
+            CommonIssue.updated_at.desc(),
+            CommonIssue.id.desc()
+        )
     ).all()
     if not clean_keyword:
         return issues
@@ -7056,6 +7490,16 @@ async def enforce_employee_duty_release(request: Request, call_next):
             request.cookies.get(DUTY_REVIEW_SESSION_COOKIE)
         )
         request.state.duty_status = duty_status
+
+        if (
+            user.role != "admin"
+            and request.cookies.get(DUTY_REVIEW_SESSION_COOKIE)
+            and not duty_status.get("is_released")
+        ):
+            response = RedirectResponse(url="/login?error=复查补信息登录凭证已过期，请重新登录", status_code=303)
+            response.delete_cookie("user_id")
+            response.delete_cookie(DUTY_REVIEW_SESSION_COOKIE)
+            return response
 
         if (
             user.role != "admin"
@@ -7202,7 +7646,7 @@ async def login_action(
     response.set_cookie(
         key="user_id",
         value=str(user.id),
-        max_age=60 * 60 * 24 * 7
+        max_age=DUTY_DEFAULT_LOGIN_MAX_AGE_SECONDS
     )
     response.delete_cookie(DUTY_REVIEW_SESSION_COOKIE)
     if _is_logistics_employee(user) and not is_resigned_read_only:
@@ -7419,6 +7863,11 @@ async def start_employee_store_duty(
         url=f"/?store={clean_store_names[0]}&success=已开始带店",
         status_code=303
     )
+    response.set_cookie(
+        key="user_id",
+        value=str(user.id),
+        max_age=DUTY_DEFAULT_LOGIN_MAX_AGE_SECONDS
+    )
     response.delete_cookie(DUTY_REVIEW_SESSION_COOKIE)
     return response
 
@@ -7512,6 +7961,7 @@ async def update_employee_store_duty_stores(
 
 @app.post("/employee-duty/review")
 async def record_employee_review_info(
+        request: Request,
         current_store: str = Form(""),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
@@ -7522,9 +7972,25 @@ async def record_employee_review_info(
     if user.role == "admin":
         return RedirectResponse(url=f"/?store={current_store}", status_code=303)
 
+    review_session_id_from_cookie = request.cookies.get(DUTY_REVIEW_SESSION_COOKIE)
+    if (
+        review_session_id_from_cookie
+        and not _active_store_duty_session(session, user.id)
+        and not _review_session_from_current_login(session, user.id, review_session_id_from_cookie)
+    ):
+        response = RedirectResponse(url="/login?error=复查补信息登录凭证已过期，请重新登录", status_code=303)
+        response.delete_cookie("user_id")
+        response.delete_cookie(DUTY_REVIEW_SESSION_COOKIE)
+        return response
+
     now = datetime.now()
     today_review = _today_review_session(session, user.id)
     if today_review:
+        today_review.employee_name = user.display_name
+        today_review.reviewed_at = now
+        today_review.updated_at = now
+        session.add(today_review)
+        session.commit()
         review_session_id = today_review.id
     else:
         duty = EmployeeDutySession(
@@ -7550,7 +8016,13 @@ async def record_employee_review_info(
     if review_session_id:
         response.set_cookie(
             key=DUTY_REVIEW_SESSION_COOKIE,
-            value=str(review_session_id)
+            value=str(review_session_id),
+            max_age=DUTY_REVIEW_SESSION_MAX_AGE_SECONDS
+        )
+        response.set_cookie(
+            key="user_id",
+            value=str(user.id),
+            max_age=DUTY_REVIEW_SESSION_MAX_AGE_SECONDS
         )
     return response
 
@@ -7812,6 +8284,7 @@ async def employees_page(
     my_replacement_requests = []
     leave_approval_requests = []
     logistics_leave_map = {}
+    leave_rest_replacement_candidates_map = {}
     pending_leave_count = 0
     my_current_month_leave_count = 0
     flexible_replacement_employees = []
@@ -7914,6 +8387,14 @@ async def employees_page(
         for item in leave_approval_requests:
             applicant = session.get(User, item.user_id)
             logistics_leave_map[item.id] = _is_logistics_employee(applicant)
+            if applicant and not logistics_leave_map[item.id] and not _is_public_rest_leave(item):
+                leave_rest_replacement_candidates_map[item.id] = _find_leave_replacement_employees(
+                    session=session,
+                    applicant_user_id=item.user_id,
+                    leave_date=item.leave_date
+                )
+            else:
+                leave_rest_replacement_candidates_map[item.id] = []
         flexible_replacement_employees = [
             employee for employee in active_employees
             if (employee.employee_type or "regular") == "flexible"
@@ -8246,6 +8727,7 @@ async def employees_page(
         "page_name": "employees",
         "current_user": user,
         "current_user_is_logistics": _is_logistics_employee(user),
+        "current_user_can_apply_public_rest": _can_apply_public_rest(user),
         "current_store": store,
         "store_list": store_list,
 
@@ -8272,7 +8754,10 @@ async def employees_page(
         "my_leave_requests": my_leave_requests,
         "my_replacement_requests": my_replacement_requests,
         "leave_approval_requests": leave_approval_requests,
+        "leave_type_options": LEAVE_TYPE_OPTIONS,
+        "leave_type_label": _leave_type_label,
         "logistics_leave_map": logistics_leave_map,
+        "leave_rest_replacement_candidates_map": leave_rest_replacement_candidates_map,
         "pending_leave_count": pending_leave_count,
         "my_current_month_leave_count": my_current_month_leave_count,
         "flexible_replacement_employees": flexible_replacement_employees,
@@ -8804,6 +9289,121 @@ async def change_employee_type(
     )
 
 
+@app.post("/employees/promote/{employee_id}")
+async def promote_probation_employee(
+        request: Request,
+        employee_id: int,
+        store: str = Form(""),
+        status_filter: str = Form("active"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    """管理员将试用员工即时转正为普通员工。"""
+    if not user:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请先登录", 401)
+        return RedirectResponse(url="/login", status_code=303)
+
+    if user.role != "admin":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("只有管理员可以执行转正", 403)
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="只有管理员可以执行转正"),
+            status_code=303
+        )
+
+    employee = session.get(User, employee_id)
+    if not employee:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("员工不存在", 404)
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="员工不存在"),
+            status_code=303
+        )
+
+    if employee.role == "admin":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("管理员账号不支持转正")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="管理员账号不支持转正"),
+            status_code=303
+        )
+
+    if not getattr(employee, "is_active", True) or _is_resigned_employee(employee):
+        if _is_ajax_request(request):
+            return _employee_ajax_error("只有在职试用员工可以转正")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="只有在职试用员工可以转正"),
+            status_code=303
+        )
+
+    if (employee.employee_type or "regular") != "probation":
+        if _is_ajax_request(request):
+            return _employee_ajax_error("该员工当前不是试用类型，无需转正")
+        return RedirectResponse(
+            url=_build_employees_url(store, "employee_list", status_filter=status_filter, error="该员工当前不是试用类型，无需转正"),
+            status_code=303
+        )
+
+    today = date.today()
+    now = datetime.now()
+    current_month_start = today.replace(day=1)
+
+    current_record = session.exec(
+        select(EmployeeTypeChangeRecord).where(
+            EmployeeTypeChangeRecord.user_id == employee.id,
+            EmployeeTypeChangeRecord.effective_from == current_month_start
+        )
+    ).first()
+    if current_record:
+        current_record.employee_name_snapshot = employee.display_name
+        current_record.employee_type = "regular"
+        current_record.changed_by_user_id = user.id
+        current_record.changed_by_name = user.display_name
+        current_record.updated_at = now
+        session.add(current_record)
+    else:
+        session.add(EmployeeTypeChangeRecord(
+            user_id=employee.id,
+            employee_name_snapshot=employee.display_name,
+            employee_type="regular",
+            effective_from=current_month_start,
+            changed_by_user_id=user.id,
+            changed_by_name=user.display_name,
+            created_at=now,
+            updated_at=now
+        ))
+
+    future_records = session.exec(
+        select(EmployeeTypeChangeRecord).where(
+            EmployeeTypeChangeRecord.user_id == employee.id,
+            EmployeeTypeChangeRecord.effective_from > today
+        )
+    ).all()
+    for record in future_records:
+        session.delete(record)
+
+    employee.employee_type = "regular"
+    session.add(employee)
+    session.commit()
+    session.refresh(employee)
+
+    message = "试用员工已转正为普通员工，并已立即生效；现在可以申请公休"
+    if _is_ajax_request(request):
+        return _employee_ajax_success(
+            message=message,
+            action="employee_type_updated",
+            payload={
+                "employee": _employee_user_payload(employee, user, session)
+            }
+        )
+
+    return RedirectResponse(
+        url=_build_employees_url(store, "employee_list", status_filter=status_filter, success=message),
+        status_code=303
+    )
+
+
 # =========================
 # V3 员工换班：提交申请
 # =========================
@@ -9133,6 +9733,8 @@ async def employee_leave_apply(
         request: Request,
         store: str = Form(""),
         leave_date: str = Form(...),
+        leave_end_date: str = Form(""),
+        leave_type: str = Form("leave"),
         reason: str = Form(...),
         remark: str = Form(""),
         confirm_excessive_leave: str = Form("0"),
@@ -9143,7 +9745,7 @@ async def employee_leave_apply(
     普通员工提交请假申请。
 
     AJAX 模式：
-    成功后返回新建的请假申请数据，前端只在“我的请假”表格里新增一行。
+    成功后返回新建的请假申请数据，前端在“我的请假”表格里新增一行或多行。
     """
     if not user:
         if _is_ajax_request(request):
@@ -9160,6 +9762,18 @@ async def employee_leave_apply(
             status_code=303
         )
 
+    leave_end_d = leave_d
+    if _normalize_text(leave_end_date):
+        try:
+            leave_end_d = datetime.strptime(leave_end_date, "%Y-%m-%d").date()
+        except Exception:
+            if _is_ajax_request(request):
+                return _employee_ajax_error("结束日期格式不正确")
+            return RedirectResponse(
+                url=_build_employees_url(store, "my_leave", error="结束日期格式不正确"),
+                status_code=303
+            )
+
     today = date.today()
 
     if leave_d <= today:
@@ -9170,6 +9784,24 @@ async def employee_leave_apply(
             status_code=303
         )
 
+    leave_type = _normalize_text(leave_type) or "leave"
+    if leave_type not in LEAVE_TYPE_LABEL_MAP:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请假类型不正确")
+        return RedirectResponse(
+            url=_build_employees_url(store, "my_leave", error="请假类型不正确"),
+            status_code=303
+        )
+    if leave_type == "public_rest" and not _can_apply_public_rest(user):
+        message = "当前员工类型不能申请公休"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
+    if leave_end_d < leave_d:
+        message = "结束日期不能早于开始日期"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
     reason = _normalize_text(reason)
     remark = _normalize_text(remark)
 
@@ -9181,60 +9813,104 @@ async def employee_leave_apply(
             status_code=303
         )
 
-    existing = session.exec(
-        select(EmployeeLeaveRequest).where(
-            EmployeeLeaveRequest.user_id == user.id,
-            EmployeeLeaveRequest.leave_date == leave_d,
-            EmployeeLeaveRequest.status.in_([
-                "pending_admin_review",
-                "pending",
-                "replacement_accepted",
-                "replacement_rejected_wait_employee",
-                "force_leave_deducted",
-                "approved_with_flexible",
-                "approved",
-            ])
-        )
-    ).first()
+    existing = _find_overlapping_leave_request(
+        session=session,
+        user_id=user.id,
+        start_date=leave_d,
+        end_date=leave_end_d
+    )
 
     if existing:
         if _is_ajax_request(request):
-            return _employee_ajax_error("该日期已有待审批或已通过的请假申请，请勿重复提交")
+            return _employee_ajax_error("所选日期范围内已有待审批或已通过的请假申请，请勿重复提交")
         return RedirectResponse(
-            url=_build_employees_url(store, "my_leave", error="该日期已有待审批或已通过的请假申请，请勿重复提交"),
+            url=_build_employees_url(store, "my_leave", error="所选日期范围内已有待审批或已通过的请假申请，请勿重复提交"),
             status_code=303
         )
 
-    shift_type = _get_shift_type_for_employee_on_date(
-        session=session,
-        employee_name=user.display_name,
-        work_date=leave_d
-    )
+    leave_items = []
+    skipped_rest_days = []
+    if leave_type == "public_rest":
+        error_message, shift_snapshot = _collect_public_rest_shift_snapshot(
+            session=session,
+            employee_name=user.display_name,
+            start_date=leave_d,
+            end_date=leave_end_d
+        )
+        if error_message:
+            if _is_ajax_request(request):
+                return _employee_ajax_error(error_message)
+            return RedirectResponse(url=_build_employees_url(store, "my_leave", error=error_message), status_code=303)
+        shift_type = shift_snapshot.get(leave_d.isoformat(), "off")
+        shift_snapshot_json = _serialize_shift_snapshot(shift_snapshot)
+        leave_items.append({
+            "leave_date": leave_d,
+            "leave_end_date": leave_end_d if leave_end_d != leave_d else None,
+            "shift_type": shift_type,
+            "shift_snapshot_json": shift_snapshot_json,
+            "estimated_deduct": 0.0,
+        })
+    else:
+        current = leave_d
+        while current <= leave_end_d:
+            shift_type = _get_shift_type_for_employee_on_date(
+                session=session,
+                employee_name=user.display_name,
+                work_date=current
+            )
+            if _is_rest_shift(shift_type):
+                skipped_rest_days.append(f"{current}({_shift_type_label(shift_type)})")
+            else:
+                leave_items.append({
+                    "leave_date": current,
+                    "leave_end_date": None,
+                    "shift_type": shift_type,
+                    "shift_snapshot_json": None,
+                    "estimated_deduct": _calc_employee_leave_deduct(
+                        session=session,
+                        employee=user,
+                        leave_date=current,
+                        shift_type=shift_type
+                    ),
+                })
+            current += timedelta(days=1)
 
-    estimated_deduct = _calc_employee_leave_deduct(
-        session=session,
-        employee=user,
-        leave_date=leave_d,
-        shift_type=shift_type
-    )
+        if not leave_items:
+            message = "所选日期均为休息班次，无需发起请假申请"
+            if _is_ajax_request(request):
+                return _employee_ajax_error(message)
+            return RedirectResponse(
+                url=_build_employees_url(store, "my_leave", error=message),
+                status_code=303
+            )
 
-    if shift_type == "off":
-        if _is_ajax_request(request):
-            return _employee_ajax_error("当天排班为休班，无需发起顶班请假")
-        return RedirectResponse(
-            url=_build_employees_url(store, "my_leave", error="当天排班为休班，无需发起顶班请假"),
-            status_code=303
+    month_leave_counts: Dict[Tuple[int, int], int] = {}
+    for item in leave_items:
+        work_date = item["leave_date"]
+        key = (work_date.year, work_date.month)
+        if key not in month_leave_counts:
+            month_leave_counts[key] = _count_employee_leave_requests_for_month(
+                session=session,
+                user_id=user.id,
+                year=work_date.year,
+                month=work_date.month
+            )
+
+        if leave_type == "leave":
+            month_leave_counts[key] += 1
+            item["month_leave_count_snapshot"] = month_leave_counts[key]
+        else:
+            item["month_leave_count_snapshot"] = 1
+
+        item["trigger_personal_store_bonus_halve"] = (
+            leave_type == "leave"
+            and item["month_leave_count_snapshot"] >= 4
+            and _employee_participates_personal_store_bonus(user)
         )
 
-    current_month_leave_count = _count_employee_leave_requests_for_month(
-        session=session,
-        user_id=user.id,
-        year=leave_d.year,
-        month=leave_d.month
+    trigger_personal_store_bonus_halve = any(
+        item["trigger_personal_store_bonus_halve"] for item in leave_items
     )
-    month_leave_count_snapshot = current_month_leave_count + 1
-    trigger_personal_store_bonus_halve = month_leave_count_snapshot >= 4
-
     if trigger_personal_store_bonus_halve and _normalize_text(confirm_excessive_leave) != "1":
         message = "本月第4次及以上请假需先确认；坚持请假将导致个人门店达标奖减半"
         if _is_ajax_request(request):
@@ -9245,81 +9921,108 @@ async def employee_leave_apply(
         )
 
     now = datetime.now()
+    leave_requests = []
+    for item in leave_items:
+        leave_req = EmployeeLeaveRequest(
+            user_id=user.id,
+            employee_name_snapshot=user.display_name,
+            leave_date=item["leave_date"],
+            leave_end_date=item["leave_end_date"],
+            apply_date=today,
+            shift_type=item["shift_type"],
+            leave_type=leave_type,
+            shift_snapshot_json=item["shift_snapshot_json"],
+            reason=reason,
+            remark=remark or None,
 
-    leave_req = EmployeeLeaveRequest(
-        user_id=user.id,
-        employee_name_snapshot=user.display_name,
-        leave_date=leave_d,
-        apply_date=today,
-        shift_type=shift_type,
-        reason=reason,
-        remark=remark or None,
+            status="pending_admin_review",
+            is_before_one_day=True,
+            estimated_deduct_amount=item["estimated_deduct"],
+            final_deduct_amount=0.0,
+            month_leave_count_snapshot=item["month_leave_count_snapshot"],
+            trigger_personal_store_bonus_halve=item["trigger_personal_store_bonus_halve"],
 
-        status="pending_admin_review",
-        is_before_one_day=True,
-        estimated_deduct_amount=estimated_deduct,
-        final_deduct_amount=0.0,
-        month_leave_count_snapshot=month_leave_count_snapshot,
-        trigger_personal_store_bonus_halve=trigger_personal_store_bonus_halve,
+            approved_by_user_id=None,
+            approved_by_name=None,
+            approved_at=None,
+            approval_note=None,
 
-        approved_by_user_id=None,
-        approved_by_name=None,
-        approved_at=None,
-        approval_note=None,
+            replacement_user_id=None,
+            replacement_employee_name_snapshot=None,
+            replacement_response=None,
+            replacement_response_at=None,
 
-        replacement_user_id=None,
-        replacement_employee_name_snapshot=None,
-        replacement_response=None,
-        replacement_response_at=None,
+            attendance_record_id=None,
+            salary_flow_id=None,
+            replacement_salary_flow_id=None,
 
-        attendance_record_id=None,
-        salary_flow_id=None,
-        replacement_salary_flow_id=None,
+            created_at=now,
+            updated_at=now
+        )
+        session.add(leave_req)
+        leave_requests.append(leave_req)
 
-        created_at=now,
-        updated_at=now
-    )
-
-    session.add(leave_req)
     session.flush()
 
     admins = session.exec(
         select(User).where(User.role == "admin", User.is_active == True).order_by(User.id)
     ).all()
-    for admin in admins:
-        _create_employee_notification(
-            session=session,
-            target_user=admin,
-            related_user=user,
-            title="待审批请假",
-            content=(
-                f"{user.display_name} 申请 {leave_d} {_shift_type_label(shift_type)} 请假，请选择顶班方式或拒绝。"
-                + (
-                    f" 这是该员工本月第 {month_leave_count_snapshot} 次请假，如审批通过，本月个人门店达标奖减半。"
-                    if trigger_personal_store_bonus_halve
-                    else ""
-                )
-            ),
-            notification_type="leave_admin_review",
-            source_type="leave_request",
-            source_id=leave_req.id,
-            created_at=now
-        )
+    is_batch_leave = leave_type == "leave" and len(leave_requests) > 1
+    for leave_req in leave_requests:
+        for admin in admins:
+            _create_employee_notification(
+                session=session,
+                target_user=admin,
+                related_user=user,
+                title=f"待审批{_leave_type_label(leave_type)}",
+                content=(
+                    f"{user.display_name} 申请 {_leave_request_period_label(leave_req)} {_leave_type_label(leave_type)}，请处理。"
+                    + (f" 本次多天请假已按上班日拆分为 {len(leave_requests)} 条单日申请。" if is_batch_leave else "")
+                    + (
+                        f" 这是该员工本月第 {leave_req.month_leave_count_snapshot} 次请假，如审批通过，本月个人门店达标奖减半。"
+                        if leave_req.trigger_personal_store_bonus_halve
+                        else ""
+                    )
+                ),
+                notification_type="leave_admin_review",
+                source_type="leave_request",
+                source_id=leave_req.id,
+                created_at=now
+            )
 
     session.commit()
-    session.refresh(leave_req)
+    for leave_req in leave_requests:
+        session.refresh(leave_req)
+
+    leave_count_delta_current_month = sum(
+        1
+        for leave_req in leave_requests
+        if (leave_req.leave_type or "leave") == "leave"
+        and leave_req.leave_date.year == today.year
+        and leave_req.leave_date.month == today.month
+    )
+    skipped_note = ""
+    if leave_type == "leave" and skipped_rest_days:
+        skipped_note = f"，已自动跳过 {len(skipped_rest_days)} 个休息日"
+    success_message = (
+        f"申请已提交，已按 {len(leave_requests)} 个上班日拆分为单日请假{skipped_note}，等待管理员审批"
+        if is_batch_leave or skipped_note
+        else "申请已提交，等待管理员审批"
+    )
 
     if _is_ajax_request(request):
         return _employee_ajax_success(
-            message="请假申请已提交，等待管理员审批",
+            message=success_message,
             action="leave_created",
             payload={
-                "leave": _leave_request_payload(leave_req)
+                "leave": _leave_request_payload(leave_requests[0]),
+                "leaves": [_leave_request_payload(item) for item in leave_requests],
+                "leave_count_delta_current_month": leave_count_delta_current_month,
             }
         )
 
     return RedirectResponse(
-        url=_build_employees_url(store, "my_leave", success="请假申请已提交，等待管理员审批"),
+        url=_build_employees_url(store, "my_leave", success=success_message),
         status_code=303
     )
 
@@ -9333,6 +10036,8 @@ async def employee_leave_update_pending(
         leave_id: int,
         store: str = Form(""),
         leave_date: str = Form(...),
+        leave_end_date: str = Form(""),
+        leave_type: str = Form("leave"),
         reason: str = Form(""),
         remark: str = Form(""),
         session: Session = Depends(get_session),
@@ -9360,10 +10065,37 @@ async def employee_leave_update_pending(
             return _employee_ajax_error("请假日期格式不正确")
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="请假日期格式不正确"), status_code=303)
 
+    leave_end_d = leave_d
+    if _normalize_text(leave_end_date):
+        try:
+            leave_end_d = datetime.strptime(leave_end_date, "%Y-%m-%d").date()
+        except Exception:
+            if _is_ajax_request(request):
+                return _employee_ajax_error("结束日期格式不正确")
+            return RedirectResponse(url=_build_employees_url(store, "my_leave", error="结束日期格式不正确"), status_code=303)
+
     if leave_d <= date.today():
         if _is_ajax_request(request):
             return _employee_ajax_error("当天无法请假，请至少提前一天提交请假申请")
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="当天无法请假，请至少提前一天提交请假申请"), status_code=303)
+
+    leave_type = _normalize_text(leave_type) or (leave_req.leave_type or "leave")
+    if leave_type not in LEAVE_TYPE_LABEL_MAP:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请假类型不正确")
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="请假类型不正确"), status_code=303)
+    if leave_type == "public_rest" and not _can_apply_public_rest(user):
+        message = "当前员工类型不能申请公休"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
+    if leave_end_d < leave_d:
+        message = "结束日期不能早于开始日期"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
+    if leave_type != "public_rest":
+        leave_end_d = leave_d
 
     reason = _normalize_text(reason) or leave_req.reason
     remark = _normalize_text(remark)
@@ -9372,32 +10104,39 @@ async def employee_leave_update_pending(
             return _employee_ajax_error("请假原因不能为空")
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="请假原因不能为空"), status_code=303)
 
-    existing = session.exec(
-        select(EmployeeLeaveRequest).where(
-            EmployeeLeaveRequest.user_id == user.id,
-            EmployeeLeaveRequest.leave_date == leave_d,
-            EmployeeLeaveRequest.id != leave_req.id,
-            EmployeeLeaveRequest.status.in_([
-                "pending_admin_review",
-                "pending",
-                "replacement_accepted",
-                "replacement_rejected_wait_employee",
-                "force_leave_deducted",
-                "approved_with_flexible",
-                "approved",
-            ])
-        )
-    ).first()
+    existing = _find_overlapping_leave_request(
+        session=session,
+        user_id=user.id,
+        start_date=leave_d,
+        end_date=leave_end_d,
+        exclude_leave_id=leave_req.id
+    )
     if existing:
         if _is_ajax_request(request):
-            return _employee_ajax_error("该日期已有待审批或已通过的请假申请，请勿重复提交")
-        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="该日期已有待审批或已通过的请假申请，请勿重复提交"), status_code=303)
+            return _employee_ajax_error("所选日期范围内已有待审批或已通过的请假申请，请勿重复提交")
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="所选日期范围内已有待审批或已通过的请假申请，请勿重复提交"), status_code=303)
 
     shift_type = _get_shift_type_for_employee_on_date(session=session, employee_name=user.display_name, work_date=leave_d)
-    if shift_type == "off":
-        if _is_ajax_request(request):
-            return _employee_ajax_error("当天排班为休班，无需发起顶班请假")
-        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="当天排班为休班，无需发起顶班请假"), status_code=303)
+    shift_snapshot_json = None
+    if leave_type == "public_rest":
+        error_message, shift_snapshot = _collect_public_rest_shift_snapshot(
+            session=session,
+            employee_name=user.display_name,
+            start_date=leave_d,
+            end_date=leave_end_d
+        )
+        if error_message:
+            if _is_ajax_request(request):
+                return _employee_ajax_error(error_message)
+            return RedirectResponse(url=_build_employees_url(store, "my_leave", error=error_message), status_code=303)
+        shift_type = shift_snapshot.get(leave_d.isoformat(), shift_type)
+        shift_snapshot_json = _serialize_shift_snapshot(shift_snapshot)
+    else:
+        if _is_rest_shift(shift_type):
+            shift_label = _shift_type_label(shift_type)
+            if _is_ajax_request(request):
+                return _employee_ajax_error(f"当天排班为{shift_label}，无需发起申请")
+            return RedirectResponse(url=_build_employees_url(store, "my_leave", error=f"当天排班为{shift_label}，无需发起申请"), status_code=303)
 
     current_month_leave_count = _count_employee_leave_requests_for_month(
         session=session,
@@ -9407,17 +10146,29 @@ async def employee_leave_update_pending(
         exclude_leave_id=leave_req.id
     )
     leave_req.leave_date = leave_d
+    leave_req.leave_end_date = leave_end_d if leave_type == "public_rest" and leave_end_d != leave_d else None
     leave_req.shift_type = shift_type
+    leave_req.leave_type = leave_type
+    leave_req.shift_snapshot_json = shift_snapshot_json
     leave_req.reason = reason
     leave_req.remark = remark or None
-    leave_req.estimated_deduct_amount = _calc_employee_leave_deduct(
-        session=session,
-        employee=user,
-        leave_date=leave_d,
-        shift_type=shift_type
+    leave_req.estimated_deduct_amount = (
+        0.0
+        if leave_type == "public_rest"
+        else _calc_employee_leave_deduct(
+            session=session,
+            employee=user,
+            leave_date=leave_d,
+            shift_type=shift_type
+        )
     )
-    leave_req.month_leave_count_snapshot = current_month_leave_count + 1
-    leave_req.trigger_personal_store_bonus_halve = leave_req.month_leave_count_snapshot >= 4
+    leave_req.month_leave_count_snapshot = current_month_leave_count + (1 if leave_type == "leave" else 0)
+    leave_req.trigger_personal_store_bonus_halve = (
+        leave_type == "leave"
+        and
+        leave_req.month_leave_count_snapshot >= 4
+        and _employee_participates_personal_store_bonus(user)
+    )
     leave_req.updated_at = datetime.now()
     session.add(leave_req)
     session.commit()
@@ -9479,6 +10230,7 @@ async def employee_leave_cancel_pending(
 async def employee_leave_rest_replacement(
         request: Request,
         leave_id: int,
+        replacement_user_id: Optional[int] = Form(None),
         store: str = Form(""),
         approval_note: str = Form(""),
         session: Session = Depends(get_session),
@@ -9519,6 +10271,12 @@ async def employee_leave_rest_replacement(
             url=_build_employees_url(store, "leave_approval", error="该请假申请当前不能安排休班顶班"),
             status_code=303
         )
+
+    if _is_public_rest_leave(leave_req):
+        message = "公休申请批准后需通过机动顶班生效，不能走休班顶班流程"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
 
     applicant = session.get(User, leave_req.user_id)
     if not applicant:
@@ -9583,18 +10341,29 @@ async def employee_leave_rest_replacement(
             status_code=303
         )
 
-    replacement = _find_leave_replacement_employee(
+    replacement_candidates = _find_leave_replacement_employees(
         session=session,
         applicant_user_id=leave_req.user_id,
         leave_date=leave_req.leave_date
     )
-    if not replacement:
+    if not replacement_candidates:
         if _is_ajax_request(request):
-            return _employee_ajax_error("未找到请假当天的休息员工，申请仍停留在待管理员审批")
+            return _employee_ajax_error("未找到符合条件的休班员工，申请仍停留在待管理员审批")
         return RedirectResponse(
-            url=_build_employees_url(store, "leave_approval", error="未找到请假当天的休息员工，申请仍停留在待管理员审批"),
+            url=_build_employees_url(store, "leave_approval", error="未找到符合条件的休班员工，申请仍停留在待管理员审批"),
             status_code=303
         )
+
+    candidate_map = {item.id: item for item in replacement_candidates}
+    if not replacement_user_id or replacement_user_id not in candidate_map:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请先明确选择一名符合条件的休班员工")
+        return RedirectResponse(
+            url=_build_employees_url(store, "leave_approval", error="请先明确选择一名符合条件的休班员工"),
+            status_code=303
+        )
+
+    replacement = candidate_map[replacement_user_id]
 
     now = datetime.now()
     approval_note = _normalize_text(approval_note)
@@ -9693,19 +10462,28 @@ async def employee_leave_flexible_replacement(
             return _employee_ajax_error("请假员工不能为自己顶班")
         return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="请假员工不能为自己顶班"), status_code=303)
 
-    replacement_shift_type = _get_shift_type_for_employee_on_date(
-        session=session,
-        employee_name=replacement.display_name,
-        work_date=leave_req.leave_date
-    )
-    if replacement_shift_type != "off":
-        message = f"{replacement.display_name} 当天已有具体班次，请选择其他机动员工"
-        if _is_ajax_request(request):
-            return _employee_ajax_error(message)
-        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
-
     now = datetime.now()
     approval_note = _normalize_text(approval_note)
+    is_public_rest_leave = _is_public_rest_leave(leave_req)
+    leave_dates = _iter_leave_request_dates(leave_req)
+    shift_snapshot = _deserialize_shift_snapshot(getattr(leave_req, "shift_snapshot_json", None))
+
+    for work_date in leave_dates:
+        replacement_shift_type = _get_shift_type_for_employee_on_date(
+            session=session,
+            employee_name=replacement.display_name,
+            work_date=work_date
+        )
+        if replacement_shift_type != "off":
+            message = (
+                f"{replacement.display_name} 在 {work_date} 已有具体班次，请选择其他机动员工"
+                if is_public_rest_leave
+                else f"{replacement.display_name} 当天已有具体班次，请选择其他机动员工"
+            )
+            if _is_ajax_request(request):
+                return _employee_ajax_error(message)
+            return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
+
     leave_req.replacement_user_id = replacement.id
     leave_req.replacement_employee_name_snapshot = replacement.display_name
     leave_req.replacement_response = "accepted"
@@ -9717,77 +10495,120 @@ async def employee_leave_flexible_replacement(
     leave_req.updated_at = now
     session.add(leave_req)
 
-    upsert_shift(session, replacement.display_name, leave_req.leave_date, leave_req.shift_type)
+    if is_public_rest_leave:
+        for work_date in leave_dates:
+            upsert_shift(session, applicant.display_name, work_date, SHIFT_TYPE_PUBLIC_REST)
+        session.flush()
+
+    for work_date in leave_dates:
+        replacement_shift = shift_snapshot.get(work_date.isoformat(), leave_req.shift_type)
+        upsert_shift(session, replacement.display_name, work_date, replacement_shift)
     session.flush()
-    _rebuild_flexible_employee_shift_flows(
-        session=session,
-        employee=replacement,
-        year=leave_req.leave_date.year,
-        month=leave_req.leave_date.month,
-        operator=user
-    )
+    for year, month in _leave_affected_months(leave_req):
+        _rebuild_flexible_employee_shift_flows(
+            session=session,
+            employee=replacement,
+            year=year,
+            month=month,
+            operator=user
+        )
     session.flush()
-    replacement_shift = session.exec(
+    replacement_shift_rows = session.exec(
         select(ShiftSchedule).where(
             ShiftSchedule.operator_name == replacement.display_name,
-            ShiftSchedule.work_date == leave_req.leave_date
+            ShiftSchedule.work_date >= leave_req.leave_date,
+            ShiftSchedule.work_date <= _leave_request_end_date(leave_req)
         )
-    ).first()
-    replacement_salary_flow = session.exec(
-        select(SalaryFlowRecord).where(
-            SalaryFlowRecord.user_id == replacement.id,
-            SalaryFlowRecord.source_type == "flexible_schedule",
-            SalaryFlowRecord.source_id == (replacement_shift.id if replacement_shift else None)
-        )
-    ).first()
-    leave_req.replacement_salary_flow_id = replacement_salary_flow.id if replacement_salary_flow else None
+    ).all()
+    shift_id_by_date = {item.work_date: item.id for item in replacement_shift_rows if item.id}
+    flow_id_by_source: Dict[int, int] = {}
+    shift_ids = [item.id for item in replacement_shift_rows if item.id]
+    if shift_ids:
+        replacement_salary_flows = session.exec(
+            select(SalaryFlowRecord).where(
+                SalaryFlowRecord.user_id == replacement.id,
+                SalaryFlowRecord.source_type == "flexible_schedule",
+                SalaryFlowRecord.source_id.in_(shift_ids)
+            )
+        ).all()
+        flow_id_by_source = {flow.source_id: flow.id for flow in replacement_salary_flows if flow.source_id}
+
+    first_shift_id = shift_id_by_date.get(leave_req.leave_date)
+    leave_req.replacement_salary_flow_id = flow_id_by_source.get(first_shift_id) if first_shift_id else None
     session.add(leave_req)
 
-    applicant_deduct = _calc_employee_leave_deduct(
-        session=session,
-        employee=applicant,
-        leave_date=leave_req.leave_date,
-        shift_type=leave_req.shift_type
+    applicant_deduct = (
+        0.0
+        if is_public_rest_leave
+        else _calc_employee_leave_deduct(
+            session=session,
+            employee=applicant,
+            leave_date=leave_req.leave_date,
+            shift_type=leave_req.shift_type
+        )
     )
-    _finalize_leave_for_applicant(
-        session=session,
-        leave_req=leave_req,
-        applicant=applicant,
-        operator=user,
-        final_deduct=applicant_deduct,
-        status="approved_with_flexible",
-        approval_note=approval_note,
-        attendance_remark=f"管理员安排机动员工 {replacement.display_name} 顶班。"
-    )
-    session.add(EmployeeAttendanceRecord(
-        user_id=replacement.id,
-        employee_name_snapshot=replacement.display_name,
-        event_date=leave_req.leave_date,
-        event_type="other",
-        shift_type=leave_req.shift_type,
-        reason=f"机动顶班：为 {leave_req.employee_name_snapshot} 顶班",
-        remark=f"管理员 {user.display_name} 安排机动顶班，排班已自动调整为 {_shift_type_label(leave_req.shift_type)}。",
-        status="recorded",
-        affect_full_attendance=False,
-        deduct_amount=0.0,
-        is_salary_generated=True,
-        salary_flow_id=replacement_salary_flow.id if replacement_salary_flow else None,
-        leave_request_id=leave_req.id,
-        created_by_user_id=user.id,
-        created_by_name=user.display_name,
-        approved_by_user_id=user.id,
-        approved_by_name=user.display_name,
-        approved_at=now,
-        approval_note=approval_note or None,
-        created_at=now,
-        updated_at=now
-    ))
+    if is_public_rest_leave:
+        _finalize_public_rest_leave_for_applicant(
+            session=session,
+            leave_req=leave_req,
+            applicant=applicant,
+            operator=user,
+            status="approved_with_flexible",
+            approval_note=approval_note,
+            attendance_remark=f"管理员批准公休，并安排机动员工 {replacement.display_name} 顶班。"
+        )
+    else:
+        _finalize_leave_for_applicant(
+            session=session,
+            leave_req=leave_req,
+            applicant=applicant,
+            operator=user,
+            final_deduct=applicant_deduct,
+            status="approved_with_flexible",
+            approval_note=approval_note,
+            attendance_remark=f"管理员安排机动员工 {replacement.display_name} 顶班。"
+        )
+
+    for work_date in leave_dates:
+        replacement_shift = shift_snapshot.get(work_date.isoformat(), leave_req.shift_type)
+        replacement_shift_id = shift_id_by_date.get(work_date)
+        session.add(EmployeeAttendanceRecord(
+            user_id=replacement.id,
+            employee_name_snapshot=replacement.display_name,
+            event_date=work_date,
+            event_type="other",
+            shift_type=replacement_shift,
+            reason=f"机动顶班：为 {leave_req.employee_name_snapshot} 顶班",
+            remark=(
+                f"管理员 {user.display_name} 批准公休并安排机动顶班，排班已自动调整为 {_shift_type_label(replacement_shift)}。"
+                if is_public_rest_leave
+                else f"管理员 {user.display_name} 安排机动顶班，排班已自动调整为 {_shift_type_label(replacement_shift)}。"
+            ),
+            status="recorded",
+            affect_full_attendance=False,
+            deduct_amount=0.0,
+            is_salary_generated=True,
+            salary_flow_id=flow_id_by_source.get(replacement_shift_id),
+            leave_request_id=leave_req.id,
+            created_by_user_id=user.id,
+            created_by_name=user.display_name,
+            approved_by_user_id=user.id,
+            approved_by_name=user.display_name,
+            approved_at=now,
+            approval_note=approval_note or None,
+            created_at=now,
+            updated_at=now
+        ))
     _create_employee_notification(
         session=session,
         target_user=applicant,
         related_user=replacement,
-        title="机动顶班已安排，请假已生效",
-        content=f"管理员已安排 {replacement.display_name} 为您顶班，您的请假已生效，扣款 {applicant_deduct:.2f} 元。",
+        title="机动顶班已安排，申请已生效",
+        content=(
+            f"管理员已批准您 {_leave_request_period_label(leave_req)} 的公休，并安排 {replacement.display_name} 为您顶班；对应排班已调整为公休，不扣除工资。"
+            if is_public_rest_leave
+            else f"管理员已安排 {replacement.display_name} 为您顶班，您的请假已生效，扣款 {applicant_deduct:.2f} 元。"
+        ),
         notification_type="leave_flexible_replacement",
         source_type="leave_request",
         source_id=leave_req.id,
@@ -9799,8 +10620,8 @@ async def employee_leave_flexible_replacement(
         related_user=applicant,
         title="已安排机动顶班",
         content=(
-            f"管理员已安排您在 {leave_req.leave_date} 为 {leave_req.employee_name_snapshot} 顶班，"
-            f"当天排班已调整为 {_shift_type_label(leave_req.shift_type)}，工资流水已同步更新。"
+            f"管理员已安排您在 {_leave_request_period_label(leave_req)} 为 {leave_req.employee_name_snapshot} 顶班，"
+            f"对应排班已同步调整，工资流水已同步更新。"
         ),
         notification_type="leave_flexible_replacement_assigned",
         source_type="leave_request",
@@ -9812,12 +10633,24 @@ async def employee_leave_flexible_replacement(
 
     if _is_ajax_request(request):
         return _employee_ajax_success(
-            message=f"已安排机动员工 {replacement.display_name} 顶班，请假已生效",
+            message=(
+                f"已批准公休，并安排机动员工 {replacement.display_name} 顶班"
+                if is_public_rest_leave
+                else f"已安排机动员工 {replacement.display_name} 顶班，请假已生效"
+            ),
             action="leave_flexible_replacement_assigned",
             payload={"leave": _leave_request_payload(leave_req)}
         )
     return RedirectResponse(
-        url=_build_employees_url(store, "leave_approval", success=f"已安排机动员工 {replacement.display_name} 顶班，请假已生效"),
+        url=_build_employees_url(
+            store,
+            "leave_approval",
+            success=(
+                f"已批准公休，并安排机动员工 {replacement.display_name} 顶班"
+                if is_public_rest_leave
+                else f"已安排机动员工 {replacement.display_name} 顶班，请假已生效"
+            )
+        ),
         status_code=303
     )
 
@@ -9892,8 +10725,8 @@ async def employee_leave_reject(
             session=session,
             target_user=applicant,
             related_user=user,
-            title="请假申请已拒绝",
-            content=f"您 {leave_req.leave_date} 的请假审批未通过，请按原班次正常上班。",
+            title="申请已拒绝",
+            content=f"您 {_leave_request_period_label(leave_req)} 的申请审批未通过，请按原班次正常上班。",
             notification_type="leave_rejected",
             source_type="leave_request",
             source_id=leave_req.id,
@@ -10426,7 +11259,7 @@ async def employee_hourly_subsidy_apply(
 
     if user.role != "operator":
         return RedirectResponse(
-            url=_build_employees_url(store, "my_hourly_subsidy", error="只有普通员工可以申请时薪补贴"),
+            url=_build_employees_url(store, "my_hourly_subsidy", error="只有普通/试用员工可以申请时薪补贴"),
             status_code=303
         )
 
@@ -11843,7 +12676,10 @@ async def employee_salary_settlement_generate_all(
             or_(
                 and_(
                     User.is_active == True,
-                    User.hide_from_schedule_performance == False
+                    or_(
+                        User.hide_from_schedule_performance == False,
+                        User.employee_type == "logistics",
+                    )
                 ),
                 and_(
                     User.employment_status == "resigned",
@@ -13313,7 +14149,10 @@ async def customer_search(
 
     # 昵称模糊匹配
     matched_customers = session.exec(
-        select(Customer).where(Customer.nickname.contains(keyword))
+        select(Customer).where(
+            Customer.is_deleted == False,
+            Customer.nickname.contains(keyword)
+        )
     ).all()
 
     # 若指定门店，则只保留和该门店有关联的顾客
@@ -13376,6 +14215,83 @@ async def validate_unformed_game_players(
         "indices": indices,
         "error_type": error_type
     })
+
+
+def _ensure_game_players_in_store_customer_pool(
+        session: Session,
+        game: GameRecord,
+        store_name: str,
+        *,
+        mark_visit: bool = False
+) -> List[int]:
+    """
+    Ensure players with wechat IDs have Customer + CustomerStoreLink rows.
+
+    mark_visit=False: enter the store customer pool without counting as an actual visit.
+    mark_visit=True: update customer/store last visit dates, used after successful settlement.
+    """
+    today = date.today()
+    valid_customer_ids = []
+    raw_players = [
+        (game.player_1, game.player_1_wechat),
+        (game.player_2, game.player_2_wechat),
+        (game.player_3, game.player_3_wechat),
+        (game.player_4, game.player_4_wechat),
+    ]
+
+    for nickname, wechat in raw_players:
+        wechat = _normalize_text(wechat)
+        if not wechat:
+            continue
+
+        nickname = _normalize_text(nickname) or "未知昵称"
+        cust = session.exec(select(Customer).where(Customer.wechat_id == wechat)).first()
+
+        if not cust:
+            cust = Customer(
+                nickname=nickname,
+                wechat_id=wechat,
+                gender="未知",
+                guarantee_deposit=0.0,
+                last_visit_date=today if mark_visit else None,
+                created_at=today,
+            )
+            session.add(cust)
+            session.flush()
+        else:
+            if bool(getattr(cust, "is_deleted", False)):
+                cust.is_deleted = False
+                cust.deleted_at = None
+                cust.deleted_by = None
+            if nickname and (not _normalize_text(cust.nickname) or cust.nickname == "未知昵称"):
+                cust.nickname = nickname
+            if mark_visit:
+                cust.last_visit_date = today
+            session.add(cust)
+            session.flush()
+
+        valid_customer_ids.append(cust.id)
+
+        link = session.exec(
+            select(CustomerStoreLink).where(
+                CustomerStoreLink.customer_id == cust.id,
+                CustomerStoreLink.store_name == store_name,
+            )
+        ).first()
+
+        if not link:
+            link = CustomerStoreLink(
+                customer_id=cust.id,
+                store_name=store_name,
+                created_at=today,
+                last_visit_at_store=today if mark_visit else None,
+            )
+        elif mark_visit:
+            link.last_visit_at_store = today
+
+        session.add(link)
+
+    return [cid for cid in valid_customer_ids if cid is not None]
 
 
 
@@ -13511,6 +14427,13 @@ async def add_game(
         updated_by=user.display_name,
     )
     session.add(new_game)
+    session.flush()
+    _ensure_game_players_in_store_customer_pool(
+        session=session,
+        game=new_game,
+        store_name=store_name,
+        mark_visit=False,
+    )
     session.commit()
 
     return RedirectResponse(url=f"/?store={store_name}", status_code=303)
@@ -13854,6 +14777,8 @@ async def update_payment(
         store_name: str = Form(...),
         wechat_pay: float = Form(0.0),
         Alipay: float = Form(0.0),
+        normal_wechat_pay: float = Form(0.0),
+        enterprise_wechat_red_packet_pay: float = Form(0.0),
 
         source_filter: str = Form(""),
         pay_status: str = Form("all"),
@@ -13914,7 +14839,7 @@ async def update_payment(
 
     was_paid = game.is_payAll
 
-    if wechat_pay < 0 or Alipay < 0:
+    if wechat_pay < 0 or Alipay < 0 or normal_wechat_pay < 0 or enterprise_wechat_red_packet_pay < 0:
         msg = "收款金额不能小于0"
         if _is_ajax_request(request):
             return JSONResponse({"ok": False, "message": msg}, status_code=400)
@@ -13933,7 +14858,21 @@ async def update_payment(
         )
 
     fee_amount = round(float(game.room_fee or 0), 2)
-    received_amount = round(float(wechat_pay or 0) + float(Alipay or 0), 2)
+    if _is_jinniu_wanda_store(game.store_name):
+        submitted_breakdown = {
+            PAYMENT_TYPE_ENTERPRISE_WECHAT: wechat_pay,
+            PAYMENT_TYPE_ALIPAY: Alipay,
+            PAYMENT_TYPE_NORMAL_WECHAT: normal_wechat_pay,
+            PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET: enterprise_wechat_red_packet_pay,
+        }
+    else:
+        submitted_breakdown = {
+            PAYMENT_TYPE_ENTERPRISE_WECHAT: wechat_pay,
+            PAYMENT_TYPE_ALIPAY: Alipay,
+            PAYMENT_TYPE_NORMAL_WECHAT: 0.0,
+            PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET: 0.0,
+        }
+    received_amount = _payment_breakdown_total(submitted_breakdown)
     is_overflow_game = game.record_source == FORMED_SOURCE_OVERFLOW
     if received_amount > fee_amount and not is_overflow_game:
         msg = f"收款金额不能大于费用，当前多收 ¥{received_amount - fee_amount:.2f}"
@@ -13961,64 +14900,22 @@ async def update_payment(
     game.updated_by = user.display_name
     session.add(game)
 
+    if _is_jinniu_wanda_store(game.store_name):
+        _save_expanded_payment_items(
+            session=session,
+            game=game,
+            breakdown=submitted_breakdown,
+            operator_name=user.display_name
+        )
+
     if not was_paid and new_is_payAll:
-        print(f"检测到牌局 #{game.serial_number} 完成结算，开始同步顾客数据...")
-
-        raw_players = [
-            (game.player_1, game.player_1_wechat),
-            (game.player_2, game.player_2_wechat),
-            (game.player_3, game.player_3_wechat),
-            (game.player_4, game.player_4_wechat)
-        ]
-
-        valid_customer_ids = []
-
-        for nickname, wechat in raw_players:
-            if not wechat:
-                continue
-
-            today = date.today()
-
-            cust = session.exec(select(Customer).where(Customer.wechat_id == wechat)).first()
-
-            if not cust:
-                cust = Customer(
-                    nickname=nickname or "未知昵称",
-                    wechat_id=wechat,
-                    gender="未知",
-                    guarantee_deposit=0.0,
-                    last_visit_date=today,
-                    created_at=today
-                )
-                session.add(cust)
-                session.commit()
-                session.refresh(cust)
-            else:
-                cust.last_visit_date = today
-                if cust.is_loss:
-                    cust.is_loss = False
-                session.add(cust)
-
-            valid_customer_ids.append(cust.id)
-
-            link = session.exec(
-                select(CustomerStoreLink).where(
-                    CustomerStoreLink.customer_id == cust.id,
-                    CustomerStoreLink.store_name == store_name
-                )
-            ).first()
-
-            if not link:
-                link = CustomerStoreLink(
-                    customer_id=cust.id,
-                    store_name=store_name,
-                    created_at=today,
-                    last_visit_at_store=today
-                )
-            else:
-                link.last_visit_at_store = today
-
-            session.add(link)
+        print(f"检测到牌局 #{game.serial_number} 完成结算，开始同步顾客到店与转化数据...")
+        valid_customer_ids = _ensure_game_players_in_store_customer_pool(
+            session=session,
+            game=game,
+            store_name=store_name,
+            mark_visit=True,
+        )
 
         for id1, id2 in itertools.combinations(sorted(valid_customer_ids), 2):
             pf = session.exec(select(PlayFrequency).where(
@@ -14144,12 +15041,15 @@ async def formed_games(
                 filtered_results.append(focus_game)
 
     filtered_results.sort(key=_game_effective_order_dt, reverse=True)
+    payment_breakdowns = _load_payment_item_breakdowns(session, filtered_results)
 
     total_collection_amount = 0.0
     collected_amount = 0.0
     uncollected_amount = 0.0
     wechat_collection_amount = 0.0
     alipay_collection_amount = 0.0
+    normal_wechat_collection_amount = 0.0
+    enterprise_wechat_red_packet_collection_amount = 0.0
     normal_formed_order_count = 0
 
     overflow_order_count = 0
@@ -14167,17 +15067,47 @@ async def formed_games(
             if _normalize_text(g.payment_method) == "代客收款"
         ]
         total_collection_amount = round(sum((g.room_fee or 0) for g in collection_games), 2)
-        collected_amount = round(sum((g.wechat_pay or 0) + (g.Alipay or 0) for g in collection_games), 2)
+        collected_amount = round(sum(_received_amount_for_game(g, payment_breakdowns) for g in collection_games), 2)
         uncollected_amount = round(total_collection_amount - collected_amount, 2)
-        wechat_collection_amount = round(sum((g.wechat_pay or 0) for g in collection_games), 2)
-        alipay_collection_amount = round(sum((g.Alipay or 0) for g in collection_games), 2)
+        wechat_collection_amount = round(sum(
+            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ENTERPRISE_WECHAT, 0.0)
+            for g in collection_games
+        ), 2)
+        alipay_collection_amount = round(sum(
+            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ALIPAY, 0.0)
+            for g in collection_games
+        ), 2)
+        normal_wechat_collection_amount = round(sum(
+            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_NORMAL_WECHAT, 0.0)
+            for g in collection_games
+        ), 2)
+        enterprise_wechat_red_packet_collection_amount = round(sum(
+            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET, 0.0)
+            for g in collection_games
+        ), 2)
 
     elif source_filter == FORMED_SOURCE_OVERFLOW:
         overflow_order_count = len(filtered_results)
         overflow_reserved_total = round(sum((g.room_fee or 0) for g in filtered_results), 2)
-        overflow_received_total = round(sum((g.wechat_pay or 0) + (g.Alipay or 0) for g in filtered_results), 2)
+        overflow_received_total = round(sum(_received_amount_for_game(g, payment_breakdowns) for g in filtered_results), 2)
         overflow_profit_total = round(sum(
-            ((g.wechat_pay or 0) + (g.Alipay or 0) - (g.room_fee or 0))
+            (_received_amount_for_game(g, payment_breakdowns) - (g.room_fee or 0))
+            for g in filtered_results
+        ), 2)
+        wechat_collection_amount = round(sum(
+            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ENTERPRISE_WECHAT, 0.0)
+            for g in filtered_results
+        ), 2)
+        alipay_collection_amount = round(sum(
+            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ALIPAY, 0.0)
+            for g in filtered_results
+        ), 2)
+        normal_wechat_collection_amount = round(sum(
+            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_NORMAL_WECHAT, 0.0)
+            for g in filtered_results
+        ), 2)
+        enterprise_wechat_red_packet_collection_amount = round(sum(
+            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET, 0.0)
             for g in filtered_results
         ), 2)
         overflow_paid_count = len([g for g in filtered_results if g.is_payAll])
@@ -14192,9 +15122,25 @@ async def formed_games(
         self_arrival_charge_count = len(self_arrival_charge_games)
         self_arrival_charge_amount = round(sum((g.room_fee or 0) for g in self_arrival_charge_games), 2)
         self_arrival_received_amount = round(
-            sum((g.wechat_pay or 0) + (g.Alipay or 0) for g in self_arrival_charge_games),
+            sum(_received_amount_for_game(g, payment_breakdowns) for g in self_arrival_charge_games),
             2
         )
+        wechat_collection_amount = round(sum(
+            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ENTERPRISE_WECHAT, 0.0)
+            for g in self_arrival_charge_games
+        ), 2)
+        alipay_collection_amount = round(sum(
+            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ALIPAY, 0.0)
+            for g in self_arrival_charge_games
+        ), 2)
+        normal_wechat_collection_amount = round(sum(
+            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_NORMAL_WECHAT, 0.0)
+            for g in self_arrival_charge_games
+        ), 2)
+        enterprise_wechat_red_packet_collection_amount = round(sum(
+            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET, 0.0)
+            for g in self_arrival_charge_games
+        ), 2)
         self_arrival_unpaid_count = len([g for g in self_arrival_charge_games if not g.is_payAll])
         self_arrival_non_cashier_count = self_arrival_total_count - self_arrival_charge_count
     else:
@@ -14212,6 +15158,12 @@ async def formed_games(
         focus_page_game = next((g for g in filtered_results if g.id == focus_game_id), None)
         if focus_page_game:
             page_game_list.append(focus_page_game)
+
+    page_payment_breakdowns = {
+        g.id: _payment_breakdown_for_game(g, payment_breakdowns)
+        for g in page_game_list
+        if g.id
+    }
 
     return templates.TemplateResponse("formed_games.html", {
         "request": request,
@@ -14240,6 +15192,10 @@ async def formed_games(
         "uncollected_amount": uncollected_amount,
         "wechat_collection_amount": wechat_collection_amount,
         "alipay_collection_amount": alipay_collection_amount,
+        "normal_wechat_collection_amount": normal_wechat_collection_amount,
+        "enterprise_wechat_red_packet_collection_amount": enterprise_wechat_red_packet_collection_amount,
+        "payment_breakdowns": page_payment_breakdowns,
+        "is_jinniu_wanda_store": _is_jinniu_wanda_store(store),
         "normal_formed_order_count": normal_formed_order_count,
 
         "overflow_order_count": overflow_order_count,
@@ -14798,7 +15754,7 @@ async def update_self_arrival_game(
             status_code=303
         )
 
-    if payment_method != "代客收款" and _has_any_system_receipt(game):
+    if payment_method != "代客收款" and _has_any_system_receipt(session, game):
         return RedirectResponse(
             url=_build_formed_redirect_url(
                 store=store_name,
@@ -14814,6 +15770,7 @@ async def update_self_arrival_game(
         )
 
     final_room_fee = room_fee or 0.0
+    final_table_note = _normalize_text(table_note) or None
     if payment_method == "代客收款":
         if final_room_fee < 0:
             return RedirectResponse(
@@ -14826,6 +15783,20 @@ async def update_self_arrival_game(
                     end_date=end_date,
                     payment_method_filter=payment_method_filter,
                     error="下单方式为代客收款时，费用不能小于0"
+                ),
+                status_code=303
+            )
+        if final_room_fee == 0 and not final_table_note:
+            return RedirectResponse(
+                url=_build_formed_redirect_url(
+                    store=store_name,
+                    source_filter=FORMED_SOURCE_SELF_ARRIVAL,
+                    pay_status=pay_status,
+                    date_filter=date_filter,
+                    start_date=start_date,
+                    end_date=end_date,
+                    payment_method_filter=payment_method_filter,
+                    error="下单方式为代客收款且费用为0时，必须填写整桌备注"
                 ),
                 status_code=303
             )
@@ -14869,7 +15840,7 @@ async def update_self_arrival_game(
     game.player_3_note = None
     game.player_4_note = None
 
-    game.table_note = _normalize_text(table_note) or None
+    game.table_note = final_table_note
     game.status = "formed"
     game.record_source = FORMED_SOURCE_SELF_ARRIVAL
 
@@ -15104,6 +16075,7 @@ async def add_overflow_game(
 
     final_stakes = _normalize_text(stakes_custom) if _normalize_text(stakes_select) == "其他" else _normalize_text(stakes_select)
     final_game_type = _normalize_text(game_type)
+    final_tags = _normalize_text(tags) or None
 
     final_room_fee = room_fee or 0.0
     if final_room_fee < 0:
@@ -15117,6 +16089,20 @@ async def add_overflow_game(
                 end_date=end_date,
                 payment_method_filter=payment_method_filter,
                 error="预定金额不能小于0"
+            ),
+            status_code=303
+        )
+    if final_room_fee == 0 and not final_tags:
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_OVERFLOW,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error="预定金额为0时，必须填写特殊备注"
             ),
             status_code=303
         )
@@ -15191,7 +16177,7 @@ async def add_overflow_game(
         player_3_note=_normalize_text(player_3_note) or None,
         player_4_note=_normalize_text(player_4_note) or None,
 
-        tags=_normalize_text(tags) or None,
+        tags=final_tags,
         table_note=_normalize_text(table_note) or None,
 
         payment_method=OVERFLOW_PAYMENT_METHOD,
@@ -15406,6 +16392,7 @@ async def update_overflow_game(
 
     final_stakes = _normalize_text(stakes_custom) if _normalize_text(stakes_select) == "其他" else _normalize_text(stakes_select)
     final_game_type = _normalize_text(game_type)
+    final_tags = _normalize_text(tags) or None
 
     final_room_fee = room_fee or 0.0
     if final_room_fee < 0:
@@ -15419,6 +16406,20 @@ async def update_overflow_game(
                 end_date=end_date,
                 payment_method_filter=payment_method_filter,
                 error="预定金额不能小于0"
+            ),
+            status_code=303
+        )
+    if final_room_fee == 0 and not final_tags:
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_OVERFLOW,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error="预定金额为0时，必须填写特殊备注"
             ),
             status_code=303
         )
@@ -15484,7 +16485,7 @@ async def update_overflow_game(
 
     game.stakes = final_stakes or ""
     game.game_type = final_game_type or ""
-    game.tags = _normalize_text(tags) or None
+    game.tags = final_tags
 
     game.player_1 = _normalize_text(player_1) or None
     game.player_2 = _normalize_text(player_2) or None
@@ -15693,12 +16694,14 @@ async def export_formed_games_excel(
         ]
 
         filtered_records.sort(key=_game_effective_order_dt, reverse=True)
+        payment_breakdowns = _load_payment_item_breakdowns(session, filtered_records)
 
         xml_content = _build_formed_games_excel_xml(
             records=filtered_records,
             store_name=store,
             start_d=start_d,
-            end_d=end_d
+            end_d=end_d,
+            payment_breakdowns=payment_breakdowns
         )
 
         filename = f"已组齐订单导出_{store}_{start_d}_{end_d}.xls"
@@ -16241,9 +17244,27 @@ async def update_formed_game(
     final_stakes = _normalize_text(stakes_custom) if stakes_select == "其他" else _normalize_text(stakes_select)
     final_payment_method = _normalize_text(payment_method) or None
     final_room_fee = room_fee or 0.0
+    final_table_note = _normalize_text(table_note) or None
 
     if final_payment_method == "代客收款" and final_room_fee < 0:
         msg = "支付方式为代客收款时，费用不能小于0"
+        return _ajax_or_redirect_error(
+            request,
+            message=msg,
+            redirect_url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_NORMAL,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=msg
+            )
+        )
+
+    if final_payment_method == "代客收款" and final_room_fee == 0 and not final_table_note:
+        msg = "支付方式为代客收款且费用为0时，必须填写整桌备注"
         return _ajax_or_redirect_error(
             request,
             message=msg,
@@ -16323,7 +17344,7 @@ async def update_formed_game(
     game.player_3_note = None if p3_changed else (_normalize_text(player_3_note) or None)
     game.player_4_note = None if p4_changed else (_normalize_text(player_4_note) or None)
 
-    game.table_note = _normalize_text(table_note) or None
+    game.table_note = final_table_note
 
     game.updated_at = datetime.now()
     game.updated_by = user.display_name
@@ -16423,8 +17444,9 @@ async def get_game_detail(
                 "note": note or ""
             })
 
-    remaining = (game.room_fee or 0) - (game.wechat_pay or 0) - (game.Alipay or 0)
-    actual_received = round((game.wechat_pay or 0) + (game.Alipay or 0), 2)
+    payment_breakdown = _load_single_payment_breakdown(session, game)
+    remaining = round((game.room_fee or 0) - _payment_breakdown_total(payment_breakdown), 2)
+    actual_received = _payment_breakdown_total(payment_breakdown)
     profit_amount = round(actual_received - (game.room_fee or 0), 2)
 
     source_label = (
@@ -16455,8 +17477,10 @@ async def get_game_detail(
         "payment_method": game.payment_method or "",
         "room_fee": game.room_fee or 0,
         "is_payAll": bool(game.is_payAll),
-        "wechat_pay": game.wechat_pay or 0,
-        "Alipay": game.Alipay or 0,
+        "wechat_pay": payment_breakdown.get(PAYMENT_TYPE_ENTERPRISE_WECHAT, 0),
+        "Alipay": payment_breakdown.get(PAYMENT_TYPE_ALIPAY, 0),
+        "normal_wechat_pay": payment_breakdown.get(PAYMENT_TYPE_NORMAL_WECHAT, 0),
+        "enterprise_wechat_red_packet_pay": payment_breakdown.get(PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET, 0),
         "remaining": remaining,
         "actual_received": actual_received,
         "profit_amount": profit_amount,
@@ -16498,6 +17522,7 @@ def _build_public_traffic_conversion_map(session: Session, wechat_ids: List[str]
         games = session.exec(
             select(GameRecord).where(
                 GameRecord.status == "formed",
+                GameRecord.is_payAll == True,
                 GameRecord.record_source != "self_arrival",
                 or_(
                     GameRecord.player_1_wechat.in_(chunk),
@@ -16569,6 +17594,10 @@ async def read_customers(
         contact_end_date: str = "",
         contact_store_filter: str = "all",
         contact_employee: str = "all",
+        old_to_new_date_filter: str = "today",
+        old_to_new_start_date: str = "",
+        old_to_new_end_date: str = "",
+        old_to_new_employee: str = "all",
         pull_date_filter: str = "today",
         pull_start_date: str = "",
         pull_end_date: str = "",
@@ -16595,6 +17624,7 @@ async def read_customers(
         "store_customers",
         "public_traffic",
         "contact_customers",
+        "old_to_new",
         "my_new_customer_pull",
         "team_new_customer_pull",
     } else "store_customers"
@@ -16689,6 +17719,148 @@ async def read_customers(
             "public_loaded_count": list_offset + len(public_lead_list),
             "public_total_record_count": len(all_leads),
             "public_has_more": (list_offset + len(public_lead_list)) < len(all_leads),
+            "list_offset": list_offset,
+            "list_page_size": LIST_PAGE_SIZE,
+        })
+
+    if tab == "old_to_new":
+        old_to_new_date_filter = old_to_new_date_filter if old_to_new_date_filter in {
+            "today", "yesterday", "this_month", "last_month", "custom"
+        } else "today"
+        range_start, range_end = _parse_contact_customer_date_range(
+            old_to_new_date_filter,
+            old_to_new_start_date,
+            old_to_new_end_date
+        )
+        employee_names = sorted([
+            _normalize_text(u.display_name)
+            for u in session.exec(select(User).order_by(User.display_name)).all()
+            if _normalize_text(u.display_name)
+        ])
+        if user.role == "admin":
+            old_to_new_employee = _normalize_text(old_to_new_employee) or "all"
+            if old_to_new_employee != "all" and old_to_new_employee not in employee_names:
+                old_to_new_employee = "all"
+        else:
+            old_to_new_employee = _normalize_text(user.display_name)
+        current_employee_name = _normalize_text(user.display_name)
+
+        games = session.exec(
+            select(GameRecord).where(
+                GameRecord.record_source != FORMED_SOURCE_SELF_ARRIVAL,
+                GameRecord.status.in_(["unformed", "formed"]),
+                GameRecord.record_date >= range_start,
+                GameRecord.record_date <= range_end,
+                GameRecord.store_name == store,
+            )
+        ).all()
+
+        contact_map = {}
+        duty_store_names_by_date = {}
+        for game in games:
+            source_store_name = _normalize_text(game.store_name)
+            if source_store_name != store:
+                continue
+            employee_name = _normalize_text(game.who_did)
+            if not employee_name:
+                continue
+
+            reservation_dt = _game_reservation_dt(game)
+            if reservation_dt.date() < range_start or reservation_dt.date() > range_end:
+                continue
+            if user.role == "admin":
+                if old_to_new_employee != "all" and employee_name != old_to_new_employee:
+                    continue
+            else:
+                duty_date = reservation_dt.date()
+                if duty_date not in duty_store_names_by_date:
+                    duty_store_names_by_date[duty_date] = _get_employee_duty_store_names_for_date(
+                        session,
+                        user.id,
+                        duty_date
+                    )
+                duty_store_names = duty_store_names_by_date[duty_date]
+                if employee_name != current_employee_name and source_store_name not in duty_store_names:
+                    continue
+
+            for idx in range(1, 5):
+                nickname = _normalize_text(getattr(game, f"player_{idx}", None))
+                wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+                if not nickname or not wechat_id:
+                    continue
+                if nickname == PLACEHOLDER_PLAYER_NAME and wechat_id == PLACEHOLDER_PLAYER_WECHAT:
+                    continue
+
+                existing = contact_map.get(wechat_id)
+                if not existing or reservation_dt < existing["first_contact_dt"]:
+                    contact_map[wechat_id] = {
+                        "employee_name": employee_name,
+                        "nickname": nickname,
+                        "wechat_id": wechat_id,
+                        "first_contact_dt": reservation_dt,
+                    }
+
+        contact_items = sorted(
+            contact_map.values(),
+            key=lambda item: (item["first_contact_dt"], item["wechat_id"])
+        )
+        contact_wechat_ids = sorted({item["wechat_id"] for item in contact_items})
+
+        customers_by_wechat = {}
+        links_by_customer_id = {}
+        public_wechat_ids = set()
+        if contact_wechat_ids:
+            customers = session.exec(
+                select(Customer).where(Customer.wechat_id.in_(contact_wechat_ids))
+            ).all()
+            customers_by_wechat = {c.wechat_id: c for c in customers}
+            customer_ids = [c.id for c in customers if c.id is not None]
+            if customer_ids:
+                links = session.exec(
+                    select(CustomerStoreLink).where(CustomerStoreLink.customer_id.in_(customer_ids))
+                ).all()
+                for link in links:
+                    links_by_customer_id.setdefault(link.customer_id, []).append(link)
+
+            public_leads = session.exec(
+                select(PublicTrafficLead).where(PublicTrafficLead.wechat_id.in_(contact_wechat_ids))
+            ).all()
+            public_wechat_ids = {
+                _normalize_text(lead.wechat_id)
+                for lead in public_leads
+                if _normalize_text(lead.wechat_id)
+            }
+
+        old_to_new_full_list = []
+        for item in contact_items:
+            customer = customers_by_wechat.get(item["wechat_id"])
+            is_old = _customer_is_old_before_contact(
+                customer,
+                links_by_customer_id,
+                item["first_contact_dt"]
+            )
+            if is_old or item["wechat_id"] in public_wechat_ids:
+                continue
+
+            old_to_new_full_list.append({
+                "nickname": item["nickname"],
+                "wechat_id": item["wechat_id"],
+                "visit_date": item["first_contact_dt"].strftime("%Y-%m-%d"),
+            })
+
+        old_to_new_customer_list = old_to_new_full_list[list_offset:list_offset + list_limit]
+
+        return templates.TemplateResponse("customers.html", {
+            **common_context,
+            "old_to_new_date_filter": old_to_new_date_filter,
+            "old_to_new_start_date": range_start.strftime("%Y-%m-%d"),
+            "old_to_new_end_date": range_end.strftime("%Y-%m-%d"),
+            "old_to_new_employee": old_to_new_employee,
+            "employee_names": employee_names,
+            "old_to_new_customer_list": old_to_new_customer_list,
+            "old_to_new_customer_count": len(old_to_new_full_list),
+            "old_to_new_loaded_count": list_offset + len(old_to_new_customer_list),
+            "old_to_new_has_more": (list_offset + len(old_to_new_customer_list)) < len(old_to_new_full_list),
             "list_offset": list_offset,
             "list_page_size": LIST_PAGE_SIZE,
         })
@@ -16909,6 +18081,7 @@ async def read_customers(
                 "has_tag": bool(row.has_tag),
                 "in_group_chat": bool(row.in_group_chat),
                 "remark_updated": bool(row.remark_updated),
+                "remark": row.remark or "",
                 "status_text": "成功" if is_success else "待拉新",
             })
 
@@ -16929,7 +18102,7 @@ async def read_customers(
             "list_page_size": LIST_PAGE_SIZE,
         })
 
-    query = select(Customer)
+    query = select(Customer).where(Customer.is_deleted == False)
     if keyword:
         query = query.where(or_(
             Customer.nickname.contains(keyword),
@@ -16975,13 +18148,11 @@ async def read_customers(
             "gender": cust.gender,
             "visited_stores": ", ".join(visited_store_names),
             "last_visit_date": cust.last_visit_date,
-            "guarantee_deposit": cust.guarantee_deposit,
             "current_store_visit_count": visit_count,
-            "is_loss": cust.is_loss,
             "current_store_link_id": current_store_link.id if current_store_link else None,
             "in_group_chat": bool(current_store_link.in_group_chat) if current_store_link else False,
             "has_tag": bool(current_store_link.has_tag) if current_store_link else False,
-            "store_remark": current_store_link.remark or "" if current_store_link else "",
+            "remark_updated": bool(current_store_link.remark_updated) if current_store_link else False,
         })
 
     if sort_by == "last_visit_desc":
@@ -17187,37 +18358,54 @@ async def add_customer(
         select(Customer).where(Customer.wechat_id == wechat_id)
     ).first()
 
-    if existing_cust:
+    if existing_cust and not bool(getattr(existing_cust, "is_deleted", False)):
         return RedirectResponse(
             url=_build_customers_url(store_name, error="该微信号已存在"),
             status_code=303
         )
 
-    # 2. 创建新顾客
-    # 手动录入但未组局：到店次数=0，因此 last_visit_date 应为空
-    new_cust = Customer(
-        nickname=nickname,
-        wechat_id=wechat_id,
-        gender=gender,
-        guarantee_deposit=0.0,
-        is_loss=False,
-        last_visit_date=None,
-        created_at=today
-    )
-    session.add(new_cust)
-    session.commit()
-    session.refresh(new_cust)
+    if existing_cust and bool(getattr(existing_cust, "is_deleted", False)):
+        existing_cust.nickname = nickname
+        existing_cust.gender = gender
+        existing_cust.is_deleted = False
+        existing_cust.deleted_at = None
+        existing_cust.deleted_by = None
+        session.add(existing_cust)
+        session.commit()
+        session.refresh(existing_cust)
+        new_cust = existing_cust
+    else:
+        # 2. 创建新顾客
+        # 手动录入但未组局：到店次数=0，因此 last_visit_date 应为空
+        new_cust = Customer(
+            nickname=nickname,
+            wechat_id=wechat_id,
+            gender=gender,
+            guarantee_deposit=0.0,
+            last_visit_date=None,
+            created_at=today
+        )
+        session.add(new_cust)
+        session.commit()
+        session.refresh(new_cust)
 
     # 3. 创建门店关联
     # 手动录入即进入该门店顾客池，但未组局，所以 last_visit_at_store 为空
-    new_link = CustomerStoreLink(
-        customer_id=new_cust.id,
-        store_name=store_name,
-        created_at=today,
-        last_visit_at_store=None
-    )
-    session.add(new_link)
-    session.commit()
+    existing_link = session.exec(
+        select(CustomerStoreLink).where(
+            CustomerStoreLink.customer_id == new_cust.id,
+            CustomerStoreLink.store_name == store_name
+        )
+    ).first()
+    if not existing_link:
+        new_link = CustomerStoreLink(
+            customer_id=new_cust.id,
+            store_name=store_name,
+            created_at=today,
+            last_visit_at_store=None
+        )
+        session.add(new_link)
+        session.commit()
 
     return RedirectResponse(url=_build_customers_url(store_name), status_code=303)
 
@@ -17256,7 +18444,7 @@ async def save_store_customer_followup(
 
         link.in_group_chat = form.get(f"in_group_chat_{customer_id}") == "1"
         link.has_tag = form.get(f"has_tag_{customer_id}") == "1"
-        link.remark = _normalize_text(form.get(f"store_remark_{customer_id}")) or None
+        link.remark_updated = form.get(f"remark_updated_{customer_id}") == "1"
         link.followup_updated_at = now
         link.followup_updated_by = user.display_name
         session.add(link)
@@ -17359,6 +18547,147 @@ async def add_public_traffic_lead(
     )
 
 
+@app.post("/public-traffic-leads/{lead_id}/update")
+async def update_public_traffic_lead(
+        lead_id: int,
+        source_port: str = Form(...),
+        wechat_id: str = Form(...),
+        store: str = Form("牛王庙店"),
+        public_date_filter: str = Form("today"),
+        public_start_date: str = Form(""),
+        public_end_date: str = Form(""),
+        public_source_port: str = Form("all"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    lead = session.get(PublicTrafficLead, lead_id)
+    if not lead:
+        return RedirectResponse(
+            url=_build_public_traffic_url(
+                store,
+                public_date_filter,
+                public_start_date,
+                public_end_date,
+                public_source_port,
+                error="公域流量顾客记录不存在"
+            ),
+            status_code=303
+        )
+
+    source_port = _normalize_text(source_port)
+    wechat_id = _normalize_text(wechat_id)
+
+    if source_port not in PUBLIC_TRAFFIC_SOURCE_PORTS:
+        return RedirectResponse(
+            url=_build_public_traffic_url(
+                store,
+                public_date_filter,
+                public_start_date,
+                public_end_date,
+                public_source_port,
+                error="引流端口不合法"
+            ),
+            status_code=303
+        )
+
+    if not wechat_id:
+        return RedirectResponse(
+            url=_build_public_traffic_url(
+                store,
+                public_date_filter,
+                public_start_date,
+                public_end_date,
+                public_source_port,
+                error="微信号不能为空"
+            ),
+            status_code=303
+        )
+
+    duplicate = session.exec(
+        select(PublicTrafficLead).where(
+            PublicTrafficLead.source_port == source_port,
+            PublicTrafficLead.wechat_id == wechat_id,
+            PublicTrafficLead.id != lead_id
+        )
+    ).first()
+    if duplicate:
+        return RedirectResponse(
+            url=_build_public_traffic_url(
+                store,
+                public_date_filter,
+                public_start_date,
+                public_end_date,
+                public_source_port,
+                error="该端口，该微信号顾客已登记过，请勿重复登记"
+            ),
+            status_code=303
+        )
+
+    lead.source_port = source_port
+    lead.wechat_id = wechat_id
+    session.add(lead)
+    session.commit()
+
+    return RedirectResponse(
+        url=_build_public_traffic_url(
+            store,
+            public_date_filter,
+            public_start_date,
+            public_end_date,
+            public_source_port,
+            success="公域流量顾客修改成功"
+        ),
+        status_code=303
+    )
+
+
+@app.post("/public-traffic-leads/{lead_id}/delete")
+async def delete_public_traffic_lead(
+        lead_id: int,
+        store: str = Form("牛王庙店"),
+        public_date_filter: str = Form("today"),
+        public_start_date: str = Form(""),
+        public_end_date: str = Form(""),
+        public_source_port: str = Form("all"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    lead = session.get(PublicTrafficLead, lead_id)
+    if not lead:
+        return RedirectResponse(
+            url=_build_public_traffic_url(
+                store,
+                public_date_filter,
+                public_start_date,
+                public_end_date,
+                public_source_port,
+                error="公域流量顾客记录不存在"
+            ),
+            status_code=303
+        )
+
+    session.delete(lead)
+    session.commit()
+
+    return RedirectResponse(
+        url=_build_public_traffic_url(
+            store,
+            public_date_filter,
+            public_start_date,
+            public_end_date,
+            public_source_port,
+            success="公域流量顾客已删除"
+        ),
+        status_code=303
+    )
+
+
 @app.post("/contact-customers/followup/save")
 async def save_contact_customer_followup(
         request: Request,
@@ -17376,7 +18705,15 @@ async def save_contact_customer_followup(
 
     form = await request.form()
     wechat_ids = form.getlist("wechat_id")
+    contact_row_keys = form.getlist("contact_row_key")
+    contact_store_names = form.getlist("contact_store_name")
+    contact_nicknames = form.getlist("contact_nickname")
+    contact_is_new_values = form.getlist("contact_is_new")
     now = datetime.now()
+    today = date.today()
+    active_store_names = set(get_active_store_name_list(session))
+    added_to_store_count = 0
+    synced_store_link_count = 0
 
     for idx, raw_wechat in enumerate(wechat_ids):
         wechat_id = _normalize_text(raw_wechat)
@@ -17389,14 +18726,80 @@ async def save_contact_customer_followup(
         if not followup:
             followup = ContactCustomerFollowup(wechat_id=wechat_id)
 
-        followup.has_tag = form.get(f"has_tag_{idx}") == "1"
-        followup.in_group_chat = form.get(f"in_group_chat_{idx}") == "1"
-        followup.remark_updated = form.get(f"remark_updated_{idx}") == "1"
+        row_key = contact_row_keys[idx] if idx < len(contact_row_keys) else str(idx)
+        has_tag = form.get(f"has_tag_{row_key}") == "1"
+        in_group_chat = form.get(f"in_group_chat_{row_key}") == "1"
+        remark_updated = form.get(f"remark_updated_{row_key}") == "1"
+
+        followup.has_tag = has_tag
+        followup.in_group_chat = in_group_chat
+        followup.remark_updated = remark_updated
         followup.updated_at = now
         followup.updated_by = user.display_name
         session.add(followup)
 
+        contact_store_name = _normalize_text(contact_store_names[idx] if idx < len(contact_store_names) else "")
+        contact_nickname = _normalize_text(contact_nicknames[idx] if idx < len(contact_nicknames) else "") or "未知昵称"
+        is_new_contact = (contact_is_new_values[idx] if idx < len(contact_is_new_values) else "") == "1"
+        has_any_followup = has_tag or in_group_chat or remark_updated
+
+        if is_new_contact and has_any_followup and contact_store_name in active_store_names:
+            customer = session.exec(
+                select(Customer).where(Customer.wechat_id == wechat_id)
+            ).first()
+            if customer:
+                if bool(getattr(customer, "is_deleted", False)):
+                    customer.is_deleted = False
+                    customer.deleted_at = None
+                    customer.deleted_by = None
+                if contact_nickname and (not _normalize_text(customer.nickname) or customer.nickname == "未知昵称"):
+                    customer.nickname = contact_nickname
+                session.add(customer)
+                session.flush()
+            else:
+                customer = Customer(
+                    nickname=contact_nickname,
+                    wechat_id=wechat_id,
+                    gender="未知",
+                    guarantee_deposit=0.0,
+                    last_visit_date=None,
+                    created_at=today
+                )
+                session.add(customer)
+                session.flush()
+
+            link = session.exec(
+                select(CustomerStoreLink).where(
+                    CustomerStoreLink.customer_id == customer.id,
+                    CustomerStoreLink.store_name == contact_store_name
+                )
+            ).first()
+            if not link:
+                link = CustomerStoreLink(
+                    customer_id=customer.id,
+                    store_name=contact_store_name,
+                    created_at=today,
+                    last_visit_at_store=None
+                )
+                session.add(link)
+                session.flush()
+                added_to_store_count += 1
+
+            link.has_tag = has_tag
+            link.in_group_chat = in_group_chat
+            link.remark_updated = remark_updated
+            link.followup_updated_at = now
+            link.followup_updated_by = user.display_name
+            session.add(link)
+            synced_store_link_count += 1
+
     session.commit()
+
+    success_message = "接触顾客跟进状态已保存"
+    if added_to_store_count:
+        success_message += f"，新增入门店顾客 {added_to_store_count} 位"
+    if synced_store_link_count:
+        success_message += f"，同步门店状态 {synced_store_link_count} 条"
 
     return RedirectResponse(
         url=_build_contact_customers_url(
@@ -17406,7 +18809,7 @@ async def save_contact_customer_followup(
             contact_end_date,
             contact_store_filter,
             contact_employee if user.role == "admin" else _normalize_text(user.display_name),
-            success="接触顾客跟进状态已保存"
+            success=success_message
         ),
         status_code=303
     )
@@ -17478,6 +18881,7 @@ async def save_new_customer_pull_records(
         row.has_tag = form.get(f"has_tag_{record_id}") == "1"
         row.in_group_chat = form.get(f"in_group_chat_{record_id}") == "1"
         row.remark_updated = form.get(f"remark_updated_{record_id}") == "1"
+        row.remark = _normalize_text(form.get(f"remark_{record_id}")) or None
         row.updated_at = now
         row.updated_by = user.display_name
         session.add(row)
@@ -17659,8 +19063,6 @@ async def get_customer_details(
             "nickname": cust.nickname,
             "wechat_id": cust.wechat_id,
             "gender": cust.gender,
-            "guarantee_deposit": cust.guarantee_deposit,
-            "is_loss": cust.is_loss,
             "last_visit_date": str(cust.last_visit_date) if cust.last_visit_date else "",
             "created_at": str(cust.created_at) if cust.created_at else ""
         },
@@ -17842,7 +19244,6 @@ async def update_customer(
         nickname: str = Form(...),
         wechat_id: str = Form(...),
         gender: str = Form(...),
-        guarantee_deposit: float = Form(0.0),
         store_name: str = Form(...),  # 为了重定向回正确的页面
         session: Session = Depends(get_session)
 ):
@@ -17852,11 +19253,47 @@ async def update_customer(
     cust.nickname = nickname
     cust.wechat_id = wechat_id
     cust.gender = gender
-    cust.guarantee_deposit = guarantee_deposit
 
     session.add(cust)
     session.commit()
     return RedirectResponse(url=_build_customers_url(store_name), status_code=303)
+
+
+@app.post("/customer/{customer_id}/delete")
+async def delete_customer(
+        customer_id: int,
+        store: str = Form("牛王庙店"),
+        search_query: str = Form(""),
+        sort_by: str = Form("default"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    if user.role != "admin":
+        return RedirectResponse(
+            url=_build_store_customers_url(store, search_query, sort_by, error="无权限，仅管理员可删除顾客"),
+            status_code=303
+        )
+
+    cust = session.get(Customer, customer_id)
+    if not cust:
+        return RedirectResponse(
+            url=_build_store_customers_url(store, search_query, sort_by, error="顾客不存在"),
+            status_code=303
+        )
+
+    cust.is_deleted = True
+    cust.deleted_at = datetime.now()
+    cust.deleted_by = user.display_name
+    session.add(cust)
+    session.commit()
+
+    return RedirectResponse(
+        url=_build_store_customers_url(store, search_query, sort_by, success="顾客已删除"),
+        status_code=303
+    )
 
 
 # === 添加黑名单接口 (POST) ===
@@ -18435,7 +19872,7 @@ async def manager_performance(
     # 4. 年份下拉
     year_options = list(range(today.year - 4, today.year + 1))
 
-    # 5. 月度总结数据（原有三张图）
+    # 5. 月度总结数据
     monthly_stats = None
     if display_mode == "monthly_summary":
         monthly_stats = get_manager_performance_stats(
@@ -18760,6 +20197,7 @@ async def maintenance_records_page(
         "total_count": total_count,
         "total_amount": total_amount,
         "focus_record_id": focus_record_id,
+        "today_date": date.today().strftime("%Y-%m-%d"),
         "list_offset": list_offset,
         "list_page_size": LIST_PAGE_SIZE,
         "loaded_record_count": list_offset + len(page_record_list),
@@ -19250,6 +20688,33 @@ async def update_common_issue(
     session.commit()
 
     return RedirectResponse(url=_build_common_issues_url(keyword, success="常见问题已更新"), status_code=303)
+
+
+@app.post("/common-issues/{issue_id}/pin")
+async def toggle_common_issue_pin(
+        issue_id: int,
+        keyword: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login?error=请先登录", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url=_build_common_issues_url(keyword, error="无权限置顶常见问题"), status_code=303)
+
+    issue = session.get(CommonIssue, issue_id)
+    if not issue:
+        return RedirectResponse(url=_build_common_issues_url(keyword, error="常见问题不存在"), status_code=303)
+
+    issue.is_pinned = not bool(issue.is_pinned)
+    issue.updated_at = datetime.now()
+    session.add(issue)
+    session.commit()
+
+    return RedirectResponse(
+        url=_build_common_issues_url(keyword, success="常见问题已置顶" if issue.is_pinned else "常见问题已取消置顶"),
+        status_code=303
+    )
 
 
 @app.post("/common-issues/{issue_id}/delete")

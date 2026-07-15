@@ -228,6 +228,46 @@
         padding: 12px 14px;
     }
 
+    .salary-settlement-flow-base {
+        background: rgba(13, 110, 253, 0.08);
+        border-color: rgba(13, 110, 253, 0.2);
+    }
+
+    .salary-settlement-flow-commission {
+        background: rgba(25, 135, 84, 0.08);
+        border-color: rgba(25, 135, 84, 0.2);
+    }
+
+    .salary-settlement-flow-bonus {
+        background: rgba(255, 193, 7, 0.14);
+        border-color: rgba(255, 193, 7, 0.3);
+    }
+
+    .salary-settlement-flow-deduction {
+        background: rgba(220, 53, 69, 0.08);
+        border-color: rgba(220, 53, 69, 0.2);
+    }
+
+    .salary-settlement-flow-attendance {
+        background: rgba(111, 66, 193, 0.08);
+        border-color: rgba(111, 66, 193, 0.2);
+    }
+
+    .salary-settlement-flow-replacement {
+        background: rgba(13, 202, 240, 0.1);
+        border-color: rgba(13, 202, 240, 0.25);
+    }
+
+    .salary-settlement-flow-adjustment {
+        background: rgba(108, 117, 125, 0.08);
+        border-color: rgba(108, 117, 125, 0.2);
+    }
+
+    .salary-settlement-flow-other {
+        background: rgba(248, 249, 250, 0.95);
+        border-color: rgba(173, 181, 189, 0.35);
+    }
+
     .salary-settlement-flow-head {
         display: flex;
         justify-content: space-between;
@@ -554,7 +594,7 @@
     <div class="col-md-4 col-xl">
         <div class="card employee-stat-card">
             <div class="card-body">
-                <div class="employee-stat-label">在职普通员工</div>
+                <div class="employee-stat-label">在职员工</div>
                 <div class="employee-stat-value">{{ operator_count }}</div>
             </div>
         </div>
@@ -761,7 +801,7 @@
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="6" class="text-center text-muted py-4">暂无在职普通员工</td>
+                        <td colspan="6" class="text-center text-muted py-4">暂无在职员工</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -969,6 +1009,19 @@
                                 </button>
                             {% else %}
                                 {% if emp.role != 'admin' %}
+                                {% if emp.is_active and emp.employee_type == 'probation' %}
+                                <form action="/employees/promote/{{ emp.id }}"
+                                      method="post"
+                                      class="d-inline"
+                                      data-employee-ajax-form="1"
+                                      onsubmit="return confirm('确定将【{{ emp.display_name }}】从试用员工转为普通员工吗？转正后将立即可以申请公休。');">
+                                    <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                    <input type="hidden" name="status_filter" value="{{ status_filter or 'active' }}">
+                                    <button type="submit" class="btn btn-sm btn-success">
+                                        <i class="bi bi-person-check me-1"></i>转正
+                                    </button>
+                                </form>
+                                {% endif %}
                                 <button type="button"
                                         class="btn btn-sm btn-outline-info"
                                         onclick="openEmployeeTypeModal({{ emp.id }})">
@@ -1068,7 +1121,7 @@
                     <i class="bi bi-calendar-check me-1 text-primary"></i>请假审批
                 </div>
                 <div class="small text-muted mt-1">
-                    待审批 {{ pending_leave_count or 0 }} 条；普通员工请假可安排休班顶班或机动顶班，后勤员工请假同意后直接扣固定日薪 88.5 元。
+                    待审批 {{ pending_leave_count or 0 }} 条；普通/试用员工请假可安排休班顶班或机动顶班，符合条件的员工也可申请公休，公休批准后不扣工资但仍会触发机动顶班；后勤员工请假同意后直接扣固定日薪 88.5 元。
                 </div>
             </div>
         </div>
@@ -1103,7 +1156,13 @@
                     </td>
 
                     <td>
-                        <span class="fw-bold">{{ item.leave_date }}</span>
+                        <span class="fw-bold">
+                            {% if item.leave_end_date and item.leave_end_date != item.leave_date %}
+                            {{ item.leave_date }} 至 {{ item.leave_end_date }}
+                            {% else %}
+                            {{ item.leave_date }}
+                            {% endif %}
+                        </span>
                     </td>
 
                     <td>
@@ -1137,7 +1196,10 @@
                     </td>
 
                     <td class="text-start" style="max-width: 220px;">
-                        <div class="fw-semibold">{{ item.reason }}</div>
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                            <span class="badge bg-info-subtle text-info-emphasis border">{{ leave_type_label(item.leave_type or 'leave') }}</span>
+                            <div class="fw-semibold">{{ item.reason }}</div>
+                        </div>
                         {% if item.remark %}
                         <div class="small text-muted mt-1">备注：{{ item.remark }}</div>
                         {% endif %}
@@ -1213,12 +1275,38 @@
                                     <i class="bi bi-check-circle me-1"></i>批准请假（扣 88.5）
                                 </button>
                             </form>
+                            {% elif item.leave_type == 'public_rest' %}
+                            <form action="/employees/leaves/flexible-replacement/{{ item.id }}"
+                                  method="post"
+                                  data-employee-ajax-form="1"
+                                  onsubmit="return confirm('确定批准公休并安排所选机动员工顶班吗？');">
+                                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
+                                    <option value="">选择机动员工</option>
+                                    {% for employee in flexible_replacement_employees %}
+                                    <option value="{{ employee.id }}">{{ employee.display_name }}</option>
+                                    {% endfor %}
+                                </select>
+                                <input type="text"
+                                       name="approval_note"
+                                       class="form-control form-control-sm mb-1"
+                                       placeholder="审批备注，可不填">
+                                <button type="submit" class="btn btn-sm btn-primary w-100">
+                                    <i class="bi bi-person-gear me-1"></i>批准公休并机动顶班
+                                </button>
+                            </form>
                             {% else %}
                             <form action="/employees/leaves/rest-replacement/{{ item.id }}"
                                   method="post"
                                   data-employee-ajax-form="1"
                                   onsubmit="return confirm('确定批准请假并进入休班顶班流程吗？');">
                                 <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
+                                    <option value="">选择休班员工</option>
+                                    {% for employee in leave_rest_replacement_candidates_map.get(item.id, []) %}
+                                    <option value="{{ employee.id }}">{{ employee.display_name }}（{{ employee_type_label(employee.employee_type) }}）</option>
+                                    {% endfor %}
+                                </select>
                                 <input type="text"
                                        name="approval_note"
                                        class="form-control form-control-sm mb-1"
@@ -1565,7 +1653,10 @@
                     </td>
 
                     <td class="text-start" style="max-width: 260px;">
-                        <div class="fw-semibold">{{ item.reason }}</div>
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                            <span class="badge bg-info-subtle text-info-emphasis border">{{ leave_type_label(item.leave_type or 'leave') }}</span>
+                            <div class="fw-semibold">{{ item.reason }}</div>
+                        </div>
                         {% if item.remark %}
                         <div class="small text-muted mt-1">备注：{{ item.remark }}</div>
                         {% endif %}
@@ -2335,7 +2426,7 @@
             <div class="fw-bold text-dark mb-1">结算口径</div>
             <div>
                 应发工资 = 基础工资 + 单量提成 + 奖金项 + 工资调整流水 - 各类扣款。
-                应发工资还会加上“员工社保”；实发工资 = 应发工资 - 代缴社保。员工社保和代缴社保都可由管理员在结算列表中手动填写调整。
+                应发工资还会加上“员工社保”；实发工资 = 应发工资 - 员工社保 - 代缴社保。员工社保和代缴社保都可由管理员在结算列表中手动填写调整。
                 其中，请假扣款、迟到扣款、旷工扣款、工作失误扣款、顶班补贴、临时奖金等都来自工资流水表。
             </div>
         </div>
@@ -2357,9 +2448,7 @@
                     <th>员工</th>
                     <th>基础工资</th>
                     <th>单量提成</th>
-                    <th>个人门店达标奖</th>
                     <th>奖金</th>
-                    <th>扣款</th>
                     <th>手工调整</th>
                     <th style="width: 150px;">员工社保</th>
                     <th>应发工资</th>
@@ -2381,7 +2470,7 @@
                     {% if item %}data-settlement-id="{{ item.id }}"{% endif %}>
                     <td>
                         <div class="fw-bold">{{ emp.display_name }}</div>
-                        <div class="small text-muted">{{ '管理员' if emp.role == 'admin' else '普通员工' }}</div>
+                        <div class="small text-muted">{{ employee_type_label('management' if emp.role == 'admin' else emp.employee_type) }}</div>
                     </td>
 
                     {% if item %}
@@ -2394,15 +2483,7 @@
                     </td>
 
                     <td>
-                        <span class="fw-bold text-success">¥{{ '%.2f'|format(item.personal_store_bonus_total or 0) }}</span>
-                    </td>
-
-                    <td>
                         <span class="fw-bold text-success">¥{{ '%.2f'|format(item.bonus_total or 0) }}</span>
-                    </td>
-
-                    <td>
-                        <span class="fw-bold text-danger">¥{{ '%.2f'|format(item.deduction_total or 0) }}</span>
                     </td>
 
                     <td>
@@ -2416,7 +2497,7 @@
                     {% set employee_social_security_amount = item.employee_social_security_amount or 0 %}
                     {% set social_security_amount = item.social_security_amount or 0 %}
                     {% set payable_salary = (item.final_salary or 0) + employee_social_security_amount %}
-                    {% set actual_salary = payable_salary - social_security_amount %}
+                    {% set actual_salary = payable_salary - employee_social_security_amount - social_security_amount %}
 
                     <td>
                         {% if item.status != 'draft' %}
@@ -2543,7 +2624,7 @@
                     </td>
 
                     {% else %}
-                    <td colspan="11" class="text-muted py-3">
+                    <td colspan="9" class="text-muted py-3">
                         尚未生成该员工本月工资结算
                     </td>
                     <td>
@@ -2553,7 +2634,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="13" class="text-muted py-5">
+                    <td colspan="11" class="text-muted py-5">
                         <i class="bi bi-inbox fs-1 d-block mb-3"></i>
                         暂无员工可结算
                     </td>
@@ -2573,7 +2654,7 @@
     {
         "user_id": {{ row.employee.id }},
         "employee_name": {{ row.employee.display_name|tojson }},
-        "role_label": {{ ('管理员' if row.employee.role == 'admin' else '普通员工')|tojson }},
+        "employee_type_label": {{ employee_type_label('management' if row.employee.role == 'admin' else row.employee.employee_type)|tojson }},
         "settlement": {{ row.payload|tojson }}
     }
     {% set salary_init_ns.first = false %}
@@ -3824,7 +3905,7 @@
             {% set employee_social_security_amount = settlement.employee_social_security_amount or 0 %}
             {% set social_security_amount = settlement.social_security_amount or 0 %}
             {% set payable_salary = (settlement.final_salary or 0) + employee_social_security_amount %}
-            {% set actual_salary = payable_salary - social_security_amount %}
+            {% set actual_salary = payable_salary - employee_social_security_amount - social_security_amount %}
             <div class="row g-3">
                 <div class="col-md-6 col-xl-3">
                     <div class="border rounded-3 p-3 bg-light h-100">
@@ -4392,7 +4473,13 @@
                     <td class="fw-bold text-muted">#{{ item.id }}</td>
 
                     <td>
-                        <span class="fw-bold">{{ item.leave_date }}</span>
+                        <span class="fw-bold">
+                            {% if item.leave_end_date and item.leave_end_date != item.leave_date %}
+                            {{ item.leave_date }} 至 {{ item.leave_end_date }}
+                            {% else %}
+                            {{ item.leave_date }}
+                            {% endif %}
+                        </span>
                     </td>
 
                     <td>
@@ -4473,7 +4560,7 @@
                                 <div class="small text-muted">确认时间：{{ item.replacement_response_at }}</div>
                             {% endif %}
                         {% else %}
-                            <span class="text-muted small">等待顶班确认</span>
+                            <span class="text-muted small">等待管理员审批</span>
                         {% endif %}
                     </td>
 
@@ -4491,6 +4578,18 @@
                                        value="{{ item.leave_date }}"
                                        class="form-control form-control-sm mb-1"
                                        required>
+                                <input type="date"
+                                       name="leave_end_date"
+                                       min="{{ tomorrow_date }}"
+                                       value="{{ item.leave_end_date or item.leave_date }}"
+                                       class="form-control form-control-sm mb-1">
+                                <select name="leave_type" class="form-select form-select-sm mb-1" required>
+                                    {% for value, label in leave_type_options %}
+                                    {% if value != 'public_rest' or current_user_can_apply_public_rest %}
+                                    <option value="{{ value }}" {% if (item.leave_type or 'leave') == value %}selected{% endif %}>{{ label }}</option>
+                                    {% endif %}
+                                    {% endfor %}
+                                </select>
                                 <input type="text"
                                        name="reason"
                                        value="{{ item.reason }}"
@@ -4613,6 +4712,7 @@
             <form action="/employees/leaves/apply"
                   data-employee-ajax-form="1"
                   data-current-month-leave-count="{{ my_current_month_leave_count or 0 }}"
+                  data-can-apply-public-rest="{{ 1 if current_user_can_apply_public_rest else 0 }}"
                   method="post">
                 <div class="modal-body">
                     <input type="hidden" name="store" value="{{ current_store or '' }}">
@@ -4624,16 +4724,32 @@
                         </div>
                         <div class="small">
                             {% if current_user_is_logistics %}
-                            后勤员工请假至少提前一天提交；管理员同意后直接扣除固定日薪 88.5 元，并记录到考勤和员工流水；管理员拒绝则不产生任何变动。后勤员工不参与顶班、换班。
+                            后勤员工请假至少提前一天提交；可选择多天，系统会按上班日拆成逐日申请；管理员同意后每天扣除固定日薪 88.5 元，并记录到考勤和员工流水。后勤员工不参与顶班、换班。
                             {% else %}
-                            当天无法请假，至少提前一天提交。管理员审批后会安排休班员工或机动类型员工顶班；休班顶班人拒绝后，您可选择取消或坚持请假。
+                            当天无法申请，至少提前一天提交。普通请假可选择多天，系统会按上班日拆成逐日申请；审批后会逐日安排休班员工或机动类型员工顶班。公休审批后不扣工资，排班会改为“公休”，并同步触发机动顶班。
                             {% endif %}
                         </div>
                     </div>
 
                     <div class="mb-3">
                         <label class="form-label fw-bold">
-                            请假日期 <span class="text-danger">*</span>
+                            申请类型 <span class="text-danger">*</span>
+                        </label>
+                        <select name="leave_type" class="form-select" required>
+                            {% for value, label in leave_type_options %}
+                            {% if value != 'public_rest' or current_user_can_apply_public_rest %}
+                            <option value="{{ value }}">{{ label }}</option>
+                            {% endif %}
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">
+                            公休仅限非后勤、非机动、非试用、非钟点工员工申请。
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">
+                            开始日期 <span class="text-danger">*</span>
                         </label>
                         <input type="date"
                                name="leave_date"
@@ -4642,6 +4758,17 @@
                                required>
                         <div class="form-text">
                             最早可选择：{{ tomorrow_date }}
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">结束日期</label>
+                        <input type="date"
+                               name="leave_end_date"
+                               class="form-control"
+                               min="{{ tomorrow_date }}">
+                        <div class="form-text">
+                            普通请假会按开始至结束日期中的上班日拆成单日申请；公休会按整个时间段处理。
                         </div>
                     </div>
 
@@ -5266,7 +5393,7 @@ function updateEmployeeStatCards(counts) {
         if (text === "在职员工") valueEl.textContent = counts.active_count ?? valueEl.textContent;
         if (text === "已停用" || text === "已停用/离职") valueEl.textContent = counts.inactive_count ?? valueEl.textContent;
         if (text === "在职管理员") valueEl.textContent = counts.admin_count ?? valueEl.textContent;
-        if (text === "在职普通员工") valueEl.textContent = counts.operator_count ?? valueEl.textContent;
+        if (text === "在职员工") valueEl.textContent = counts.operator_count ?? valueEl.textContent;
     });
 }
 
@@ -5284,6 +5411,7 @@ function employeeTypeLabel(employeeType) {
     const labels = {
         management: "管理",
         regular: "普通",
+        probation: "试用",
         logistics: "后勤",
         flexible: "机动",
         foreman: "领班",
@@ -5307,6 +5435,22 @@ function renderEmployeeActionCell(emp) {
         return `<button class="btn btn-sm btn-outline-secondary" disabled>当前账号不可操作</button>`;
     }
 
+    const promoteButton = emp.role !== "admin" && emp.is_active && emp.employee_type === "probation"
+        ? `
+            <form action="/employees/promote/${emp.id}"
+                  method="post"
+                  class="d-inline"
+                  data-employee-ajax-form="1"
+                  onsubmit="return confirm('确定将【${escapeHtml(emp.display_name)}】从试用员工转为普通员工吗？转正后将立即可以申请公休。');">
+                <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                <input type="hidden" name="status_filter" value="${escapeHtml(currentEmployeeStatusFilter())}">
+                <button type="submit" class="btn btn-sm btn-success">
+                    <i class="bi bi-person-check me-1"></i>转正
+                </button>
+            </form>
+        `
+        : "";
+
     const typeButton = emp.role !== "admin"
         ? `
             <button type="button"
@@ -5319,6 +5463,7 @@ function renderEmployeeActionCell(emp) {
 
     if (emp.is_active) {
         return `
+            ${promoteButton}
             ${typeButton}
             ${emp.role !== "admin" ? `
             <form action="/employees/reset-password/${emp.id}"
@@ -5597,6 +5742,30 @@ function renderLeavePenaltyHint(leave, mode = "employee") {
     return `<div class="small text-danger mt-1">${escapeHtml(suffix)}</div>`;
 }
 
+function renderLeaveReasonBlock(leave, mode = "employee") {
+    const leaveTypeLabel = escapeHtml(leave.leave_type_label || "请假");
+    const reason = escapeHtml(leave.reason || "");
+    const remark = leave.remark ? `<div class="small text-muted mt-1">备注：${escapeHtml(leave.remark)}</div>` : "";
+    return `
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+            <span class="badge bg-info-subtle text-info-emphasis border">${leaveTypeLabel}</span>
+            <div class="fw-semibold">${reason}</div>
+        </div>
+        ${remark}
+        ${renderLeavePenaltyHint(leave, mode)}
+    `;
+}
+
+const leaveRestReplacementOptionsMap = {
+    {% for item in leave_approval_requests %}
+    "{{ item.id }}": `
+        {% for employee in leave_rest_replacement_candidates_map.get(item.id, []) %}
+        <option value="{{ employee.id }}">{{ employee.display_name|e }}（{{ employee_type_label(employee.employee_type)|e }}）</option>
+        {% endfor %}
+    `,
+    {% endfor %}
+};
+
 function renderLeaveApprovalActionCell(leave) {
     if (["pending", "approved", "approved_with_flexible", "replacement_rejected_wait_employee", "force_leave_deducted"].includes(leave.status)) {
         return `
@@ -5621,6 +5790,45 @@ function renderLeaveApprovalActionCell(leave) {
         `<option value="{{ employee.id }}">{{ employee.display_name|e }}</option>`,
         {% endfor %}
     ].join("");
+    const restOptions = leaveRestReplacementOptionsMap[String(leave.id)] || "";
+
+    if (leave.leave_type === "public_rest") {
+        return `
+            <div class="d-flex flex-column gap-2">
+                <form action="/employees/leaves/flexible-replacement/${leave.id}"
+                      method="post"
+                      data-employee-ajax-form="1"
+                      onsubmit="return confirm('确定批准公休并安排所选机动员工顶班吗？');">
+                    <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                    <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
+                        <option value="">选择机动员工</option>
+                        ${flexibleOptions}
+                    </select>
+                    <input type="text"
+                           name="approval_note"
+                           class="form-control form-control-sm mb-1"
+                           placeholder="审批备注，可不填">
+                    <button type="submit" class="btn btn-sm btn-primary w-100">
+                        <i class="bi bi-person-gear me-1"></i>批准公休并机动顶班
+                    </button>
+                </form>
+
+                <form action="/employees/leaves/reject/${leave.id}"
+                      method="post"
+                      data-employee-ajax-form="1"
+                      onsubmit="return confirm('确定拒绝这条申请吗？');">
+                    <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                    <input type="text"
+                           name="approval_note"
+                           class="form-control form-control-sm mb-1"
+                           placeholder="拒绝原因，建议填写">
+                    <button type="submit" class="btn btn-sm btn-outline-danger w-100">
+                        <i class="bi bi-x-circle me-1"></i>拒绝
+                    </button>
+                </form>
+            </div>
+        `;
+    }
 
     return `
         <div class="d-flex flex-column gap-2">
@@ -5629,6 +5837,10 @@ function renderLeaveApprovalActionCell(leave) {
                   data-employee-ajax-form="1"
                   onsubmit="return confirm('确定批准请假并进入休班顶班流程吗？');">
                 <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
+                <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
+                    <option value="">选择休班员工</option>
+                    ${restOptions}
+                </select>
                 <input type="text"
                        name="approval_note"
                        class="form-control form-control-sm mb-1"
@@ -5680,17 +5892,14 @@ function updateLeaveApprovalRow(leave) {
     const cells = row.children;
     if (cells.length < 12) return;
 
+    cells[2].innerHTML = `<span class="fw-bold">${escapeHtml(leave.period_label || leave.leave_date)}</span>`;
     cells[3].innerHTML = `<span class="badge bg-light text-dark border">${escapeHtml(leave.shift_label)}</span>`;
     cells[4].innerHTML = renderReplacementInfo(leave);
     cells[8].innerHTML = (leave.status === "approved" || leave.status === "approved_with_flexible" || leave.status === "force_leave_deducted")
         ? `<span class="fw-bold text-danger">${fmtMoney(leave.final_deduct_amount)}</span>`
         : `<span class="text-muted">-</span>`;
     cells[9].innerHTML = leaveStatusBadge(leave.status, leave.status_label);
-    cells[6].innerHTML = `
-        <div class="fw-semibold">${escapeHtml(leave.reason || "")}</div>
-        ${leave.remark ? `<div class="small text-muted mt-1">备注：${escapeHtml(leave.remark)}</div>` : ""}
-        ${renderLeavePenaltyHint(leave, "admin")}
-    `;
+    cells[6].innerHTML = renderLeaveReasonBlock(leave, "admin");
 
     if (leave.approval_note || leave.approved_by_name) {
         cells[10].innerHTML = `
@@ -5735,13 +5944,11 @@ function renderMyLeaveRow(leave) {
     return `
         <tr id="my-leave-row-${leave.id}" data-leave-id="${leave.id}">
             <td class="fw-bold text-muted">#${leave.id}</td>
-            <td><span class="fw-bold">${escapeHtml(leave.leave_date)}</span></td>
+            <td><span class="fw-bold">${escapeHtml(leave.period_label || leave.leave_date)}</span></td>
             <td><span class="badge bg-light text-dark border">${escapeHtml(leave.shift_label)}</span></td>
             <td><span class="text-muted small">${escapeHtml(leave.apply_date)}</span></td>
             <td class="text-start" style="max-width: 260px;">
-                <div class="fw-semibold">${escapeHtml(leave.reason)}</div>
-                ${leave.remark ? `<div class="small text-muted mt-1">备注：${escapeHtml(leave.remark)}</div>` : ""}
-                ${renderLeavePenaltyHint(leave, "employee")}
+                ${renderLeaveReasonBlock(leave, "employee")}
             </td>
             <td><span class="fw-bold text-danger">${fmtMoney(leave.estimated_deduct_amount)}</span></td>
             <td>
@@ -5776,6 +5983,8 @@ function renderMyLeaveApprovalInfo(leave) {
 }
 
 function renderMyLeaveActionCell(leave) {
+    const applyLeaveForm = document.querySelector("form[action='/employees/leaves/apply']");
+    const canApplyPublicRest = applyLeaveForm && applyLeaveForm.dataset.canApplyPublicRest === "1";
     if (leave.status === "pending_admin_review") {
         return `
             <div class="d-flex flex-column gap-2">
@@ -5790,6 +5999,17 @@ function renderMyLeaveActionCell(leave) {
                            value="${escapeHtml(leave.leave_date)}"
                            class="form-control form-control-sm mb-1"
                            required>
+                    <input type="date"
+                           name="leave_end_date"
+                           min="{{ tomorrow_date }}"
+                           value="${escapeHtml(leave.leave_end_date || leave.leave_date)}"
+                           class="form-control form-control-sm mb-1">
+                    <select name="leave_type" class="form-select form-select-sm mb-1" required>
+                        <option value="leave"${leave.leave_type === "leave" ? " selected" : ""}>请假</option>
+                        ${leave.leave_type === "public_rest" || canApplyPublicRest
+                            ? `<option value="public_rest"${leave.leave_type === "public_rest" ? " selected" : ""}>公休</option>`
+                            : ``}
+                    </select>
                     <input type="text"
                            name="reason"
                            value="${escapeHtml(leave.reason)}"
@@ -6501,7 +6721,7 @@ function renderSalarySettlementActionCell(item) {
 }
 
 function renderSalarySettlementEmployeeCell(item) {
-    const roleLabel = escapeHtml(item.role_label || "员工");
+    const employeeTypeLabel = escapeHtml(item.employee_type_label || item.role_label || "员工");
     const flowCount = Number(item.salary_flow_count || (item.salary_flows || []).length || 0);
     return `
         <button type="button"
@@ -6511,13 +6731,29 @@ function renderSalarySettlementEmployeeCell(item) {
                 aria-controls="salary-settlement-detail-row-user-${item.user_id}">
             <span>
                 <div class="fw-bold">${escapeHtml(item.employee_name)}</div>
-                <div class="small text-muted">${roleLabel}<span class="ms-1">| ${flowCount} 条流水</span></div>
+                <div class="small text-muted">${employeeTypeLabel}<span class="ms-1">| ${flowCount} 条流水</span></div>
             </span>
             <span class="salary-settlement-chevron">
                 <i class="bi bi-chevron-down"></i>
             </span>
         </button>
     `;
+}
+
+function salarySettlementFlowToneClass(flow) {
+    const category = String(flow && flow.flow_category ? flow.flow_category : "").trim();
+    const type = String(flow && flow.flow_type ? flow.flow_type : "").trim();
+
+    if (category === "base_salary") return "salary-settlement-flow-base";
+    if (category === "personal_commission" || category === "team_commission") return "salary-settlement-flow-commission";
+    if (category === "personal_store_bonus" || category === "bonus") return "salary-settlement-flow-bonus";
+    if (category === "deduction") return "salary-settlement-flow-deduction";
+    if (category === "attendance") return "salary-settlement-flow-attendance";
+    if (category === "replacement_work") return "salary-settlement-flow-replacement";
+    if (category === "manual_adjustment" || category === "settlement") return "salary-settlement-flow-adjustment";
+    if (type.includes("deduct")) return "salary-settlement-flow-deduction";
+    if (type.includes("bonus") || type.includes("subsidy")) return "salary-settlement-flow-bonus";
+    return "salary-settlement-flow-other";
 }
 
 function renderSalarySettlementFlowItems(flows) {
@@ -6533,9 +6769,10 @@ function renderSalarySettlementFlowItems(flows) {
         const createdAtHtml = (flow.created_at && flow.created_at !== flow.flow_date)
             ? `<span class="small text-muted">入账 ${escapeHtml(flow.created_at)}</span>`
             : "";
+        const toneClass = salarySettlementFlowToneClass(flow);
 
         return `
-            <div class="salary-settlement-flow-item">
+            <div class="salary-settlement-flow-item ${toneClass}">
                 <div class="salary-settlement-flow-head">
                     <div>
                         <div class="fw-bold text-dark">${escapeHtml(flow.title || flow.flow_type_label || "工资流水")}</div>
@@ -6559,7 +6796,7 @@ function renderSalarySettlementDetailRow(item, expanded = false) {
         <tr id="salary-settlement-detail-row-user-${item.user_id}"
             class="salary-settlement-detail-row${expanded ? "" : " d-none"}"
             data-user-id="${item.user_id}">
-            <td colspan="13">
+            <td colspan="11">
                 <div class="salary-settlement-drawer">
                     <div class="salary-settlement-drawer-summary">
                         <div>
@@ -6594,7 +6831,7 @@ function renderSalarySettlementRow(item) {
     const employeeSocialSecurity = Number(item.employee_social_security_amount || 0);
     const socialSecurity = Number(item.social_security_amount || 0);
     const payableSalary = Number(item.payable_salary || (Number(item.final_salary || 0) + employeeSocialSecurity));
-    const actualSalary = Number(item.actual_salary || (payableSalary - socialSecurity));
+    const actualSalary = Number(item.actual_salary ?? (payableSalary - employeeSocialSecurity - socialSecurity));
     const employeeSocialSecurityHtml = (item.status !== "draft")
         ? `<span class="fw-bold text-success">¥${employeeSocialSecurity.toFixed(2)}</span>`
         : `
@@ -6639,18 +6876,14 @@ function renderSalarySettlementRow(item) {
             data-settlement-id="${item.id}">
             <td>
                 <div class="fw-bold">${escapeHtml(item.employee_name)}</div>
-                <div class="small text-muted">员工</div>
+                <div class="small text-muted">${escapeHtml(item.employee_type_label || item.role_label || "员工")}</div>
             </td>
 
             <td><span class="fw-bold">¥${Number(item.base_salary_total || 0).toFixed(2)}</span></td>
 
             <td><span class="fw-bold text-success">¥${Number(item.personal_commission_total || 0).toFixed(2)}</span></td>
 
-            <td><span class="fw-bold text-success">¥${Number(item.personal_store_bonus_total || 0).toFixed(2)}</span></td>
-
             <td><span class="fw-bold text-success">¥${Number(item.bonus_total || 0).toFixed(2)}</span></td>
-
-            <td><span class="fw-bold text-danger">¥${Number(item.deduction_total || 0).toFixed(2)}</span></td>
 
             <td>${manualHtml}</td>
 
@@ -6677,7 +6910,7 @@ function renderSalarySettlementRow(item) {
 
 function decorateSalarySettlementRow(row, item, expanded = false) {
     if (!row) return;
-    row.dataset.roleLabel = item.role_label || row.dataset.roleLabel || "员工";
+    row.dataset.employeeTypeLabel = item.employee_type_label || row.dataset.employeeTypeLabel || item.role_label || row.dataset.roleLabel || "员工";
 
     const firstCell = row.querySelector("td");
     if (firstCell) {
@@ -6719,7 +6952,7 @@ function updateSalarySettlementRow(item) {
     const row = document.getElementById(`salary-settlement-row-user-${item.user_id}`);
     if (!row) return;
 
-    item.role_label = item.role_label || row.dataset.roleLabel || "员工";
+    item.employee_type_label = item.employee_type_label || row.dataset.employeeTypeLabel || row.dataset.roleLabel || "员工";
     const oldDetailRow = document.getElementById(`salary-settlement-detail-row-user-${item.user_id}`);
     const wasExpanded = !!oldDetailRow && !oldDetailRow.classList.contains("d-none");
     const temp = document.createElement("tbody");
@@ -6753,7 +6986,7 @@ function enhanceSalarySettlementRowsFromInitialData() {
             ...entry.settlement,
             user_id: entry.user_id,
             employee_name: entry.employee_name,
-            role_label: entry.role_label
+            employee_type_label: entry.employee_type_label || entry.role_label
         });
     });
 }
@@ -6761,7 +6994,7 @@ function enhanceSalarySettlementRowsFromInitialData() {
 // Override the salary-settlement drawer renderers with clean text to avoid
 // legacy mojibake fragments in older inline strings.
 renderSalarySettlementEmployeeCell = function (item) {
-    const roleLabel = escapeHtml(item.role_label || "员工");
+    const employeeTypeLabel = escapeHtml(item.employee_type_label || item.role_label || "员工");
     const flowCount = Number(item.salary_flow_count || (item.salary_flows || []).length || 0);
     return `
         <button type="button"
@@ -6771,7 +7004,7 @@ renderSalarySettlementEmployeeCell = function (item) {
                 aria-controls="salary-settlement-detail-row-user-${item.user_id}">
             <span>
                 <div class="fw-bold">${escapeHtml(item.employee_name)}</div>
-                <div class="small text-muted">${roleLabel}<span class="ms-1">| ${flowCount} 条流水</span></div>
+                <div class="small text-muted">${employeeTypeLabel}<span class="ms-1">| ${flowCount} 条流水</span></div>
             </span>
             <span class="salary-settlement-chevron">
                 <i class="bi bi-chevron-down"></i>
@@ -6795,7 +7028,7 @@ renderSalarySettlementFlowItems = function (flows) {
             : "";
 
         return `
-            <div class="salary-settlement-flow-item">
+            <div class="salary-settlement-flow-item ${salarySettlementFlowToneClass(flow)}">
                 <div class="salary-settlement-flow-head">
                     <div>
                         <div class="fw-bold text-dark">${escapeHtml(flow.title || flow.flow_type_label || "工资流水")}</div>
@@ -6819,7 +7052,7 @@ renderSalarySettlementDetailRow = function (item, expanded = false) {
         <tr id="salary-settlement-detail-row-user-${item.user_id}"
             class="salary-settlement-detail-row${expanded ? "" : " d-none"}"
             data-user-id="${item.user_id}">
-            <td colspan="13">
+            <td colspan="11">
                 <div class="salary-settlement-drawer">
                     <div class="salary-settlement-drawer-summary">
                         <div>
@@ -7018,7 +7251,10 @@ function handleEmployeeAjaxResult(result) {
     }
 
     if (result.action === "leave_created") {
-        prependMyLeaveRow(payload.leave);
+        const leaves = Array.isArray(payload.leaves)
+            ? payload.leaves
+            : (payload.leave ? [payload.leave] : []);
+        leaves.forEach(leave => prependMyLeaveRow(leave));
 
         const modalEl = document.getElementById("leaveApplyModal");
         const modal = modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
@@ -7027,7 +7263,8 @@ function handleEmployeeAjaxResult(result) {
         const form = document.querySelector("form[action='/employees/leaves/apply']");
         if (form) {
             const currentCount = parseInt(form.dataset.currentMonthLeaveCount || "0", 10) || 0;
-            form.dataset.currentMonthLeaveCount = String(currentCount + 1);
+            const countDelta = parseInt(payload.leave_count_delta_current_month || "0", 10) || 0;
+            form.dataset.currentMonthLeaveCount = String(currentCount + countDelta);
             form.reset();
         }
     }
@@ -7207,13 +7444,26 @@ function shouldSubmitLeaveApplyForm(form) {
         return true;
     }
 
+    const leaveTypeInput = form.querySelector("[name='leave_type']");
+    const leaveType = leaveTypeInput ? leaveTypeInput.value : "leave";
+    const startInput = form.querySelector("[name='leave_date']");
+    const endInput = form.querySelector("[name='leave_end_date']");
+    const startDate = startInput && startInput.value ? new Date(`${startInput.value}T00:00:00`) : null;
+    const endDate = endInput && endInput.value ? new Date(`${endInput.value}T00:00:00`) : startDate;
+    const selectedDayCount = startDate && endDate && endDate >= startDate
+        ? Math.floor((endDate - startDate) / 86400000) + 1
+        : 1;
     const confirmInput = form.querySelector("input[name='confirm_excessive_leave']");
     if (confirmInput && confirmInput.value === "1") {
-        return confirm("确定提交请假申请吗？提交后将先通知当天休班员工确认顶班。");
+        return confirm(leaveType === "public_rest"
+            ? "确定提交公休申请吗？提交后需由管理员安排机动员工顶班。"
+            : (selectedDayCount > 1
+                ? `确定提交 ${selectedDayCount} 天范围的请假申请吗？系统会按上班日拆成逐日申请。`
+                : "确定提交请假申请吗？提交后需由管理员审批。"));
     }
 
     const currentCount = parseInt(form.dataset.currentMonthLeaveCount || "0", 10) || 0;
-    if (currentCount >= 3) {
+    if (leaveType === "leave" && currentCount + selectedDayCount >= 4) {
         pendingExcessiveLeaveForm = form;
         const modalEl = document.getElementById("leaveExcessiveConfirmModal");
         if (modalEl) {
@@ -7223,7 +7473,11 @@ function shouldSubmitLeaveApplyForm(form) {
         return false;
     }
 
-    return confirm("确定提交请假申请吗？提交后将先通知当天休班员工确认顶班。");
+    return confirm(leaveType === "public_rest"
+        ? "确定提交公休申请吗？提交后需由管理员安排机动员工顶班。"
+        : (selectedDayCount > 1
+            ? `确定提交 ${selectedDayCount} 天范围的请假申请吗？系统会按上班日拆成逐日申请。`
+            : "确定提交请假申请吗？提交后需由管理员审批。"));
 }
 
 function prepareHourlySubsidyBatchForm(form, actionLabel) {
@@ -7321,7 +7575,12 @@ document.addEventListener("DOMContentLoaded", function () {
         const form = event.target.closest("form[data-employee-ajax-form='1']");
         if (!form) return;
 
+        const cancelledByInlineHandler = event.defaultPrevented;
         event.preventDefault();
+        if (cancelledByInlineHandler) {
+            return;
+        }
+
         if (!shouldSubmitLeaveApplyForm(form)) {
             return;
         }

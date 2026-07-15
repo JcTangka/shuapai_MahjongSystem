@@ -3,7 +3,7 @@
 {% block title %}顾客管理 - 耍牌系统{% endblock %}
 
 {% block breadcrumb %}
-<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 顾客管理 <span class="mx-2">/</span> {% if tab == 'public_traffic' %}公域流量池{% elif tab == 'contact_customers' %}我的接触顾客{% elif tab == 'my_new_customer_pull' %}我的待拉新{% elif tab == 'team_new_customer_pull' %}团队待拉新{% else %}门店顾客{% endif %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 顾客管理 <span class="mx-2">/</span> {% if tab == 'public_traffic' %}公域流量池{% elif tab == 'contact_customers' %}我的接触顾客{% elif tab == 'old_to_new' %}老带新{% elif tab == 'my_new_customer_pull' %}我的待拉新{% elif tab == 'team_new_customer_pull' %}团队待拉新{% else %}门店顾客{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -20,12 +20,14 @@
                     记录公域端口引流顾客，并按全历史已组齐牌局自动识别转化。
                 {% elif tab == 'contact_customers' %}
                     按接待店长统计周期内接触过的顾客，并维护标签、群聊和备注跟进状态。
+                {% elif tab == 'old_to_new' %}
+                    统计周期内当前门店的新客中，尚未登记到公域流量池的顾客数量。
                 {% elif tab == 'my_new_customer_pull' %}
                     个人查看目前耍牌万能替身号占位符，并跟进实际拉新。
                 {% elif tab == 'team_new_customer_pull' %}
                     团队查看目前耍牌万能替身号占位符，并跟进实际拉新。
                 {% else %}
-                    维护各门店顾客资料、门店绑定、押金和同场记录。
+                    维护各门店顾客资料、门店绑定和同场记录。
                 {% endif %}
             </div>
         </div>
@@ -35,7 +37,7 @@
     <button class="btn btn-primary text-white rounded-pill px-4" data-bs-toggle="modal" data-bs-target="#addPublicTrafficLeadModal">
         <i class="bi bi-person-plus-fill me-1"></i>登记公域流量顾客
     </button>
-    {% elif tab in ['contact_customers', 'my_new_customer_pull', 'team_new_customer_pull'] %}
+    {% elif tab in ['contact_customers', 'old_to_new', 'my_new_customer_pull', 'team_new_customer_pull'] %}
     {% else %}
     <button class="btn btn-primary text-white rounded-pill px-4" data-bs-toggle="modal" data-bs-target="#addCustomerModal">
         <i class="bi bi-person-plus-fill me-1"></i>新增顾客
@@ -111,7 +113,7 @@
     <div class="card border-0 shadow-sm"><div class="card-body p-0">
         <table class="table table-hover align-middle mb-0 text-center">
             <thead class="table-light"><tr>
-                <th>序号</th><th>拉新店长</th><th>门店</th><th>来源牌局</th><th style="min-width: 140px;">用户昵称</th><th style="min-width: 160px;">用户微信号</th><th>是否添加标签</th><th>是否拉群</th><th>是否修改备注</th><th>是否拉新成功</th>{% if tab == 'my_new_customer_pull' %}<th>是否转入团队待拉新</th>{% endif %}
+                <th>序号</th><th>拉新店长</th><th>门店</th><th>来源牌局</th><th style="min-width: 140px;">用户昵称</th><th style="min-width: 160px;">用户微信号</th><th style="min-width: 180px;">备注</th><th>添加微信激活标签</th><th>门店私域群聊邀请</th><th>微信名片备注修改</th><th>是否拉新成功</th>{% if tab == 'my_new_customer_pull' %}<th>是否转入团队待拉新</th>{% endif %}
             </tr></thead>
             <tbody>
             {% for item in pull_record_list %}
@@ -122,6 +124,7 @@
                     <td class="small text-muted">{{ item.source_label }}</td>
                     <td><input type="hidden" name="record_id" value="{{ item.id }}"><input type="text" class="form-control form-control-sm pull-status-text" name="customer_nickname_{{ item.id }}" value="{{ item.customer_nickname }}" data-row-id="{{ item.id }}"></td>
                     <td><input type="text" class="form-control form-control-sm pull-status-text" name="customer_wechat_id_{{ item.id }}" value="{{ item.customer_wechat_id }}" data-row-id="{{ item.id }}"></td>
+                    <td><textarea class="form-control form-control-sm" name="remark_{{ item.id }}" rows="1" placeholder="备注顾客情况">{{ item.remark }}</textarea></td>
                     <td><input class="form-check-input pull-status-checkbox" type="checkbox" name="has_tag_{{ item.id }}" value="1" data-row-id="{{ item.id }}" {% if item.has_tag %}checked{% endif %}></td>
                     <td><input class="form-check-input pull-status-checkbox" type="checkbox" name="in_group_chat_{{ item.id }}" value="1" data-row-id="{{ item.id }}" {% if item.in_group_chat %}checked{% endif %}></td>
                     <td><input class="form-check-input pull-status-checkbox" type="checkbox" name="remark_updated_{{ item.id }}" value="1" data-row-id="{{ item.id }}" {% if item.remark_updated %}checked{% endif %}></td>
@@ -131,7 +134,7 @@
                     {% endif %}
                 </tr>
             {% else %}
-                <tr><td colspan="{% if tab == 'my_new_customer_pull' %}11{% else %}10{% endif %}" class="text-muted py-5"><i class="bi bi-person-plus fs-1 d-block mb-3"></i>当前时间范围暂无待拉新记录。</td></tr>
+                <tr><td colspan="{% if tab == 'my_new_customer_pull' %}12{% else %}11{% endif %}" class="text-muted py-5"><i class="bi bi-person-plus fs-1 d-block mb-3"></i>当前时间范围暂无待拉新记录。</td></tr>
             {% endfor %}
             </tbody>
         </table>
@@ -214,11 +217,9 @@
                     <th>最后到店</th>
                     <th>本门店次数</th>
                     <th>常玩玩法</th>
-                    <th>是否进群</th>
-                    <th>是否添加标签</th>
-                    <th style="min-width: 180px;">备注</th>
-                    <th>押金</th>
-                    <th>状态</th>
+                    <th>门店私域群聊邀请</th>
+                    <th>添加微信激活标签</th>
+                    <th>微信名片备注修改</th>
                     <th>操作</th>
                 </tr>
             </thead>
@@ -283,33 +284,34 @@
                     </td>
 
                     <td>
-                        <input type="text" class="form-control form-control-sm" name="store_remark_{{ cust.id }}"
-                               value="{{ cust.store_remark }}" placeholder="填写备注"
+                        <input class="form-check-input" type="checkbox" name="remark_updated_{{ cust.id }}" value="1"
+                               {% if cust.remark_updated %}checked{% endif %}
                                {% if not cust.current_store_link_id %}disabled{% endif %}>
                     </td>
 
-                    <td class="text-success fw-bold">
-                        ¥{{ cust.guarantee_deposit }}
-                    </td>
-
                     <td>
-                        {% if cust.is_loss %}
-                            <span class="badge bg-danger">已流失</span>
-                        {% else %}
-                            <span class="badge bg-success">活跃</span>
-                        {% endif %}
-                    </td>
-
-                    <td>
-                        <button type="button" class="btn btn-sm btn-outline-info"
-                                onclick="openDetailModal({{ cust.id }})">
-                            查看详情
-                        </button>
+                        <div class="d-inline-flex gap-2">
+                            <button type="button" class="btn btn-sm btn-outline-info"
+                                    onclick="openDetailModal({{ cust.id }})">
+                                查看详情
+                            </button>
+                            {% if current_user.role == 'admin' %}
+                            <button type="button"
+                                    class="btn btn-sm btn-outline-danger"
+                                    data-customer-id="{{ cust.id }}"
+                                    data-store="{{ current_store }}"
+                                    data-search-query="{{ search_query }}"
+                                    data-sort-by="{{ sort_by }}"
+                                    onclick="deleteCustomerFromList(this)">
+                                删除
+                            </button>
+                            {% endif %}
+                        </div>
                     </td>
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="13" class="text-muted py-5">
+                    <td colspan="11" class="text-muted py-5">
                         <i class="bi bi-people fs-1 d-block mb-3"></i>
                         暂无符合条件的顾客数据。
                     </td>
@@ -421,6 +423,7 @@
                     <th>微信号</th>
                     <th>是否转化</th>
                     <th>转化门店</th>
+                    <th>操作</th>
                 </tr>
             </thead>
             <tbody id="publicTrafficLeadTbody">
@@ -441,10 +444,35 @@
                         {% endif %}
                     </td>
                     <td>{{ lead.first_store or '-' }}</td>
+                    <td>
+                        <div class="d-inline-flex gap-2">
+                            <button type="button"
+                                    class="btn btn-sm btn-outline-primary"
+                                    data-lead-id="{{ lead.id }}"
+                                    data-source-port="{{ lead.source_port }}"
+                                    data-wechat-id="{{ lead.wechat_id }}"
+                                    onclick="openEditPublicTrafficLeadModal(this)">
+                                <i class="bi bi-pencil-square me-1"></i>编辑
+                            </button>
+                            <form action="/public-traffic-leads/{{ lead.id }}/delete"
+                                  method="post"
+                                  class="d-inline"
+                                  onsubmit="return confirm('确定删除该公域流量顾客吗？');">
+                                <input type="hidden" name="store" value="{{ current_store }}">
+                                <input type="hidden" name="public_date_filter" value="{{ public_date_filter or 'today' }}">
+                                <input type="hidden" name="public_start_date" value="{{ public_start_date or '' }}">
+                                <input type="hidden" name="public_end_date" value="{{ public_end_date or '' }}">
+                                <input type="hidden" name="public_source_port" value="{{ public_source_port or 'all' }}">
+                                <button type="submit" class="btn btn-sm btn-outline-danger">
+                                    <i class="bi bi-trash me-1"></i>删除
+                                </button>
+                            </form>
+                        </div>
+                    </td>
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="5" class="text-muted py-5">
+                    <td colspan="6" class="text-muted py-5">
                         <i class="bi bi-broadcast-pin fs-1 d-block mb-3"></i>
                         当前日期范围暂无公域流量顾客。
                     </td>
@@ -466,6 +494,122 @@
         <span id="publicTrafficLoadText">已显示 {{ public_loaded_count or 0 }} / {{ public_total_record_count or 0 }} 条，滚动到底部继续加载</span>
     {% elif public_total_record_count %}
         已显示全部 {{ public_total_record_count or 0 }} 条
+    {% endif %}
+</div>
+
+{% elif tab == 'old_to_new' %}
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body">
+        <form method="get" action="/customers" class="row g-3 align-items-end">
+            <input type="hidden" name="tab" value="old_to_new">
+
+            <div class="col-lg-3 col-md-6">
+                <label class="form-label fw-bold text-secondary">当前门店</label>
+                <select class="form-select" name="store">
+                    {% for store_name in store_list %}
+                    <option value="{{ store_name }}" {% if current_store == store_name %}selected{% endif %}>{{ store_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-lg-3 col-md-6">
+                <label class="form-label fw-bold text-secondary">日期</label>
+                <select class="form-select" name="old_to_new_date_filter" id="oldToNewDateFilter" onchange="toggleOldToNewCustomDateRange()">
+                    <option value="today" {% if old_to_new_date_filter == 'today' %}selected{% endif %}>今天</option>
+                    <option value="yesterday" {% if old_to_new_date_filter == 'yesterday' %}selected{% endif %}>昨天</option>
+                    <option value="this_month" {% if old_to_new_date_filter == 'this_month' %}selected{% endif %}>本月</option>
+                    <option value="last_month" {% if old_to_new_date_filter == 'last_month' %}selected{% endif %}>上月</option>
+                    <option value="custom" {% if old_to_new_date_filter == 'custom' %}selected{% endif %}>自定义</option>
+                </select>
+            </div>
+
+            {% if current_user.role == 'admin' %}
+            <div class="col-lg-3 col-md-6">
+                <label class="form-label fw-bold text-secondary">产生员工</label>
+                <select class="form-select" name="old_to_new_employee">
+                    <option value="all" {% if old_to_new_employee == 'all' %}selected{% endif %}>全部员工</option>
+                    {% for employee_name in employee_names %}
+                    <option value="{{ employee_name }}" {% if old_to_new_employee == employee_name %}selected{% endif %}>{{ employee_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endif %}
+
+            <div class="col-lg-3 col-md-6 old-to-new-custom-date d-none">
+                <label class="form-label fw-bold text-secondary">开始日期</label>
+                <input type="date" class="form-control" name="old_to_new_start_date" value="{{ old_to_new_start_date or '' }}">
+            </div>
+            <div class="col-lg-3 col-md-6 old-to-new-custom-date d-none">
+                <label class="form-label fw-bold text-secondary">结束日期</label>
+                <input type="date" class="form-control" name="old_to_new_end_date" value="{{ old_to_new_end_date or '' }}">
+            </div>
+
+            <div class="col-lg-3 col-md-6">
+                <button type="submit" class="btn btn-primary rounded-pill px-4 me-2">
+                    <i class="bi bi-search me-1"></i>查询
+                </button>
+                <a href="/customers?store={{ current_store }}&tab=old_to_new" class="btn btn-outline-secondary rounded-pill px-4">
+                    <i class="bi bi-arrow-clockwise me-1"></i>重置
+                </a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-md-4">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="text-secondary small mb-1">周期内老带新人数</div>
+                <div class="h3 fw-bold text-success mb-0">{{ old_to_new_customer_count or 0 }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+    <div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th>序号</th>
+                    <th>微信昵称</th>
+                    <th>微信号</th>
+                    <th>到店日期</th>
+                </tr>
+            </thead>
+            <tbody id="oldToNewCustomerTbody">
+                {% for item in old_to_new_customer_list %}
+                <tr id="old-to-new-row-{{ (list_offset or 0) + loop.index }}">
+                    <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
+                    <td class="fw-bold">{{ item.nickname }}</td>
+                    <td>{{ item.wechat_id }}</td>
+                    <td>{{ item.visit_date }}</td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="4" class="text-muted py-5">
+                        <i class="bi bi-person-check fs-1 d-block mb-3"></i>
+                        当前时间范围暂无老带新顾客。
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div id="oldToNewInfiniteLoader"
+     class="text-center text-muted py-3"
+     data-loaded="{{ old_to_new_loaded_count or 0 }}"
+     data-total="{{ old_to_new_customer_count or 0 }}"
+     data-page-size="{{ list_page_size or 40 }}"
+     data-has-more="{{ 'true' if old_to_new_has_more else 'false' }}">
+    {% if old_to_new_has_more %}
+        <span class="spinner-border spinner-border-sm me-2 d-none" id="oldToNewLoadSpinner"></span>
+        <span id="oldToNewLoadText">已显示 {{ old_to_new_loaded_count or 0 }} / {{ old_to_new_customer_count or 0 }} 条，滚动到底部继续加载</span>
+    {% elif old_to_new_customer_count %}
+        已显示全部 {{ old_to_new_customer_count or 0 }} 条
     {% endif %}
 </div>
 
@@ -577,9 +721,9 @@
                         <th>昵称</th>
                         <th>微信号</th>
                         <th>所属门店</th>
-                        <th>是否添加标签</th>
-                        <th>是否拉进群聊</th>
-                        <th>是否修改备注</th>
+                        <th>添加微信激活标签</th>
+                        <th>门店私域群聊邀请</th>
+                        <th>微信名片备注修改</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -600,6 +744,10 @@
                         <td>{{ item.store_name or '-' }}</td>
                         <td>
                             <input type="hidden" name="wechat_id" value="{{ item.wechat_id }}">
+                            <input type="hidden" name="contact_row_key" value="{{ row_index }}">
+                            <input type="hidden" name="contact_store_name" value="{{ item.store_name or '' }}">
+                            <input type="hidden" name="contact_nickname" value="{{ item.nickname or '' }}">
+                            <input type="hidden" name="contact_is_new" value="{{ 1 if item.is_new else 0 }}">
                             <input class="form-check-input contact-followup-checkbox" type="checkbox" name="has_tag_{{ row_index }}" value="1"
                                    data-wechat="{{ item.wechat_id }}" data-field="has_tag" {% if item.has_tag %}checked{% endif %}>
                         </td>
@@ -672,6 +820,43 @@
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                     <button type="submit" class="btn btn-primary px-4">确定登记</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="editPublicTrafficLeadModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>编辑公域流量顾客</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form id="editPublicTrafficLeadForm" action="" method="post">
+                <input type="hidden" name="store" value="{{ current_store }}">
+                <input type="hidden" name="public_date_filter" value="{{ public_date_filter or 'today' }}">
+                <input type="hidden" name="public_start_date" value="{{ public_start_date or '' }}">
+                <input type="hidden" name="public_end_date" value="{{ public_end_date or '' }}">
+                <input type="hidden" name="public_source_port" value="{{ public_source_port or 'all' }}">
+
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">选择引流端口</label>
+                        <select class="form-select" name="source_port" id="editPublicTrafficSourcePort" required>
+                            {% for source_port in source_ports %}
+                            <option value="{{ source_port }}">{{ source_port }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">微信号</label>
+                        <input type="text" name="wechat_id" id="editPublicTrafficWechatId" class="form-control" required>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary px-4">保存修改</button>
                 </div>
             </form>
         </div>
@@ -755,14 +940,6 @@
                                     <option value="女">女</option>
                                     <option value="未知">未知</option>
                                 </select>
-                            </div>
-                            <div class="col-md-2">
-                                <label class="form-label text-muted small">押金 (元)</label>
-                                <input type="number" name="guarantee_deposit" id="detail_deposit" class="form-control text-success fw-bold">
-                            </div>
-                            <div class="col-md-2">
-                                <label class="form-label text-muted small">当前状态</label>
-                                <input type="text" id="detail_status" class="form-control-plaintext fw-bold" readonly>
                             </div>
                         </div>
                     </div>
@@ -944,18 +1121,6 @@
             document.getElementById('detail_nickname').value = info.nickname;
             document.getElementById('detail_wechat').value = info.wechat_id;
             document.getElementById('detail_gender').value = info.gender;
-            document.getElementById('detail_deposit').value = info.guarantee_deposit;
-
-            const statusInput = document.getElementById('detail_status');
-            if (info.is_loss) {
-                statusInput.value = "已流失";
-                statusInput.classList.add("text-danger");
-                statusInput.classList.remove("text-success");
-            } else {
-                statusInput.value = "活跃";
-                statusInput.classList.add("text-success");
-                statusInput.classList.remove("text-danger");
-            }
 
             document.getElementById('detail_last_visit').innerText = info.last_visit_date || "暂无记录";
 
@@ -1264,6 +1429,30 @@
             .replaceAll("'", "\\'");
     }
 
+    function deleteCustomerFromList(button) {
+        if (!confirm('确定删除该顾客吗？删除后不可恢复。')) return;
+
+        const form = document.createElement('form');
+        form.method = 'post';
+        form.action = `/customer/${encodeURIComponent(button.dataset.customerId || '')}/delete`;
+        form.className = 'd-none';
+
+        [
+            ['store', button.dataset.store || ''],
+            ['search_query', button.dataset.searchQuery || ''],
+            ['sort_by', button.dataset.sortBy || 'default'],
+        ].forEach(([name, value]) => {
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = name;
+            input.value = value;
+            form.appendChild(input);
+        });
+
+        document.body.appendChild(form);
+        form.submit();
+    }
+
     let customerInfiniteObserver = null;
     let customerLoadingMore = false;
 
@@ -1329,10 +1518,33 @@
         });
     }
 
+    function openEditPublicTrafficLeadModal(button) {
+        const form = document.getElementById('editPublicTrafficLeadForm');
+        const sourcePortSelect = document.getElementById('editPublicTrafficSourcePort');
+        const wechatInput = document.getElementById('editPublicTrafficWechatId');
+        const modalEl = document.getElementById('editPublicTrafficLeadModal');
+        if (!form || !sourcePortSelect || !wechatInput || !modalEl) return;
+
+        const leadId = button.dataset.leadId || '';
+        form.action = `/public-traffic-leads/${encodeURIComponent(leadId)}/update`;
+        sourcePortSelect.value = button.dataset.sourcePort || '';
+        wechatInput.value = button.dataset.wechatId || '';
+
+        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    }
+
     function toggleContactCustomDateRange() {
         const select = document.getElementById('contactDateFilter');
         const isCustom = select && select.value === 'custom';
         document.querySelectorAll('.contact-custom-date').forEach(el => {
+            el.classList.toggle('d-none', !isCustom);
+        });
+    }
+
+    function toggleOldToNewCustomDateRange() {
+        const select = document.getElementById('oldToNewDateFilter');
+        const isCustom = select && select.value === 'custom';
+        document.querySelectorAll('.old-to-new-custom-date').forEach(el => {
             el.classList.toggle('d-none', !isCustom);
         });
     }
@@ -1465,6 +1677,60 @@
         contactCustomerInfiniteObserver.observe(loader);
     }
 
+    let oldToNewInfiniteObserver = null;
+    let oldToNewLoadingMore = false;
+
+    async function loadMoreOldToNewCustomers() {
+        const loader = document.getElementById('oldToNewInfiniteLoader');
+        const tbody = document.getElementById('oldToNewCustomerTbody');
+        if (!loader || !tbody || oldToNewLoadingMore || loader.dataset.hasMore !== 'true') return;
+
+        oldToNewLoadingMore = true;
+        const spinner = document.getElementById('oldToNewLoadSpinner');
+        const text = document.getElementById('oldToNewLoadText');
+        if (spinner) spinner.classList.remove('d-none');
+        if (text) text.textContent = '正在加载更多...';
+
+        const loaded = parseInt(loader.dataset.loaded || '0', 10) || 0;
+        const pageSize = parseInt(loader.dataset.pageSize || '40', 10) || 40;
+        const url = new URL(window.location.href);
+        url.searchParams.set('list_offset', String(loaded));
+        url.searchParams.set('list_limit', String(pageSize));
+
+        try {
+            const resp = await fetch(url.toString(), { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            if (!resp.ok) throw new Error('加载失败');
+            const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+            doc.querySelectorAll('tr[id^="old-to-new-row-"]').forEach(row => {
+                if (!document.getElementById(row.id)) tbody.appendChild(document.importNode(row, true));
+            });
+            const newLoader = doc.getElementById('oldToNewInfiniteLoader');
+            if (newLoader) {
+                loader.dataset.loaded = newLoader.dataset.loaded || loader.dataset.loaded;
+                loader.dataset.total = newLoader.dataset.total || loader.dataset.total;
+                loader.dataset.hasMore = newLoader.dataset.hasMore || 'false';
+                loader.innerHTML = newLoader.innerHTML;
+            }
+        } catch (err) {
+            console.error(err);
+            loader.innerHTML = '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadMoreOldToNewCustomers()">加载失败，点击重试</button>';
+            loader.dataset.hasMore = 'true';
+        } finally {
+            oldToNewLoadingMore = false;
+            setupOldToNewInfiniteScroll();
+        }
+    }
+
+    function setupOldToNewInfiniteScroll() {
+        const loader = document.getElementById('oldToNewInfiniteLoader');
+        if (oldToNewInfiniteObserver) oldToNewInfiniteObserver.disconnect();
+        if (!loader || loader.dataset.hasMore !== 'true') return;
+        oldToNewInfiniteObserver = new IntersectionObserver(entries => {
+            if (entries.some(entry => entry.isIntersecting)) loadMoreOldToNewCustomers();
+        }, { rootMargin: '240px 0px', threshold: 0.01 });
+        oldToNewInfiniteObserver.observe(loader);
+    }
+
     function updatePullStatusBadge(rowId) {
         const checks = document.querySelectorAll(`.pull-status-checkbox[data-row-id="${CSS.escape(String(rowId))}"]`);
         if (!checks.length) return;
@@ -1586,10 +1852,12 @@
     document.addEventListener('DOMContentLoaded', function() {
         togglePublicCustomDateRange();
         toggleContactCustomDateRange();
+        toggleOldToNewCustomDateRange();
         togglePullCustomDateRange();
         setupPublicTrafficInfiniteScroll();
         setupContactFollowupSync();
         setupContactCustomerInfiniteScroll();
+        setupOldToNewInfiniteScroll();
         setupPullStatusSync();
         setupPullDuplicateGuard();
         setupPullRecordInfiniteScroll();

@@ -180,9 +180,9 @@
 </div>
 
 {% if display_mode == "monthly_summary" %}
-  <!-- ================== 月度总结（保留原三张图） ================== -->
+  <!-- ================== 月度总结 ================== -->
   <div class="row g-3">
-    <!-- 1) 本月组齐桌数 -->
+    <!-- 本月组齐桌数 -->
     <div class="col-12">
       <div class="card shadow-sm">
         <div class="card-body">
@@ -192,36 +192,6 @@
           </div>
           <div style="height: 260px;">
             <canvas id="tablesChart"></canvas>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 2) 本月代客收款金额 -->
-    <div class="col-12">
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <div class="d-flex justify-content-between align-items-center mb-2">
-            <div class="fw-bold">本月代客收款金额</div>
-            <div class="text-secondary">总计：<span class="fw-bold">{{ "%.2f"|format(monthly_stats.totals.pay_amounts) }}</span></div>
-          </div>
-          <div style="height: 260px;">
-            <canvas id="payChart"></canvas>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 3) 本月代客验券金额 -->
-    <div class="col-12">
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <div class="d-flex justify-content-between align-items-center mb-2">
-            <div class="fw-bold">本月代客验券金额</div>
-            <div class="text-secondary">总计：<span class="fw-bold">{{ "%.2f"|format(monthly_stats.totals.verify_amounts) }}</span></div>
-          </div>
-          <div style="height: 260px;">
-            <canvas id="verifyChart"></canvas>
           </div>
         </div>
       </div>
@@ -296,64 +266,6 @@
       </div>
     </div>
   </div>
-
-  <!-- 下半部分：各班次业绩汇总 -->
-  <div class="card shadow-sm performance-card-wrap" >
-    <div class="card-body">
-      <div class="table-responsive performance-card-wrap">
-        <table class="table table-bordered performance-table">
-          <thead class="table-light">
-            <tr class="summary-title-row">
-              <th colspan="{{ 3 + shift_stats.day_list|length }}">各班次业绩汇总</th>
-            </tr>
-            <tr>
-              <th class="sticky-col sticky-name name-cell">班次</th>
-              <th class="sticky-col sticky-metric">日期</th>
-              {% for d in shift_stats.day_list %}
-                <th class="day-head">{{ d.day }}</th>
-              {% endfor %}
-               <th class="day-head">汇总</th>
-            </tr>
-            <tr>
-              <th class="sticky-col sticky-name name-cell"></th>
-              <th class="sticky-col sticky-metric"></th>
-              {% for d in shift_stats.day_list %}
-                <th class="day-head text-primary">
-                  {% set weekday_map = ["星期一","星期二","星期三","星期四","星期五","星期六","星期日"] %}
-                  {{ weekday_map[d.weekday()] }}
-                </th>
-              {% endfor %}
-              <th class="day-head text-primary">本月合计</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in shift_stats.summary_rows %}
-              {% set ns = namespace(total_orders=0, total_pay=0.0) %}
-
-              <tr>
-                <td class="sticky-col sticky-name name-cell" rowspan="2">{{ shift_label.get(row.shift_type, row.shift_type) }}</td>
-                <td class="sticky-col sticky-metric orders-row-label" style="background: #f3f7ff">销售订单</td>
-                {% for item in row.daily %}
-                  {% set ns.total_orders = ns.total_orders + item.orders %}
-                  <td class="orders-cell">{{ item.orders }}</td>
-                {% endfor %}
-                <td class="total-col">{{ ns.total_orders }}</td>
-              </tr>
-
-              <tr>
-                <td class="sticky-col sticky-metric pay-row-label"  style="background: #f3f7ff">代客收款金额</td>
-                {% for item in row.daily %}
-                  {% set ns.total_pay = ns.total_pay + item.pay_amount %}
-                  <td class="pay-cell">{{ "%.2f"|format(item.pay_amount) }}</td>
-                {% endfor %}
-                <td class="total-col">{{ "%.2f"|format(ns.total_pay) }}</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
 {% endif %}
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -375,8 +287,6 @@
   {% if display_mode == "monthly_summary" %}
     const operators = {{ monthly_stats.operators | tojson }};
     const tables = {{ monthly_stats.tables | tojson }};
-    const payAmounts = {{ monthly_stats.pay_amounts | tojson }};
-    const verifyAmounts = {{ monthly_stats.verify_amounts | tojson }};
 
     function makeHBarChart(canvasId, labels, data, valueFormatter) {
       const ctx = document.getElementById(canvasId);
@@ -417,11 +327,8 @@
     }
 
     const fmtTable = (v) => `${Number(v).toFixed(0)} 桌`;
-    const fmtMoney = (v) => `¥${Number(v).toFixed(2)}`;
 
     makeHBarChart("tablesChart", operators, tables, fmtTable);
-    makeHBarChart("payChart", operators, payAmounts, fmtMoney);
-    makeHBarChart("verifyChart", operators, verifyAmounts, fmtMoney);
   {% endif %}
 </script>
 {% endblock %}

@@ -11,6 +11,14 @@
     .issue-card {
         border-left: 5px solid #0d6efd;
     }
+    .issue-card-pinned {
+        border-left-color: #f59f00;
+        background: #fff8e1;
+        border-color: #ffd666;
+    }
+    .issue-card-pinned .issue-title {
+        color: #7a4b00;
+    }
     .issue-title {
         font-size: 1.15rem;
         font-weight: 800;
@@ -63,11 +71,16 @@
 
 <div class="d-flex flex-column gap-3">
     {% for issue in issue_cards %}
-    <div class="card issue-card shadow-sm">
+    <div class="card issue-card {% if issue.is_pinned %}issue-card-pinned{% endif %} shadow-sm">
         <div class="card-body">
             <div class="d-flex justify-content-between gap-3">
                 <div class="flex-grow-1">
-                    <div class="issue-title">{{ issue.question }}</div>
+                    <div class="issue-title">
+                        {% if issue.is_pinned %}
+                        <span class="badge bg-warning text-dark me-2"><i class="bi bi-pin-angle-fill me-1"></i>置顶</span>
+                        {% endif %}
+                        {{ issue.question }}
+                    </div>
                     <div class="text-muted small mt-2">
                         更新：{{ issue.updated_at_str }}
                         {% if current_user.role == 'admin' %}
@@ -87,6 +100,12 @@
                             data-bs-target="#editIssueModal{{ issue.id }}">
                         编辑
                     </button>
+                    <form method="post" action="/common-issues/{{ issue.id }}/pin" class="mb-0">
+                        <input type="hidden" name="keyword" value="{{ keyword }}">
+                        <button type="submit" class="btn btn-sm {% if issue.is_pinned %}btn-warning{% else %}btn-outline-warning{% endif %}">
+                            {% if issue.is_pinned %}取消置顶{% else %}置顶{% endif %}
+                        </button>
+                    </form>
                     <form method="post" action="/common-issues/{{ issue.id }}/delete" class="mb-0"
                           onsubmit="return confirm('确定硬删除这个常见问题及所有原因解决方法吗？');">
                         <input type="hidden" name="keyword" value="{{ keyword }}">
