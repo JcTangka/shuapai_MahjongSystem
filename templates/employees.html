@@ -268,6 +268,11 @@
         border-color: rgba(173, 181, 189, 0.35);
     }
 
+    .salary-settlement-flow-notice {
+        background: rgba(255, 193, 7, 0.12);
+        border-color: rgba(255, 193, 7, 0.45);
+    }
+
     .salary-settlement-flow-head {
         display: flex;
         justify-content: space-between;
@@ -712,6 +717,7 @@
                     <option value="today" {% if duty_filters.date_filter == 'today' %}selected{% endif %}>今天</option>
                     <option value="yesterday" {% if duty_filters.date_filter == 'yesterday' %}selected{% endif %}>昨天</option>
                     <option value="this_month" {% if duty_filters.date_filter == 'this_month' %}selected{% endif %}>本月</option>
+                    <option value="last_month" {% if duty_filters.date_filter == 'last_month' %}selected{% endif %}>上月</option>
                     <option value="custom" {% if duty_filters.date_filter == 'custom' %}selected{% endif %}>自定义</option>
                 </select>
             </div>
@@ -1591,6 +1597,79 @@
             data-bs-target="#attendanceAddModal">
         <i class="bi bi-plus-circle me-1"></i>新增考勤异常
     </button>
+</div>
+
+<div class="card employee-module-card mb-3">
+    <div class="card-body">
+        <form method="get" action="/employees" class="row g-3 align-items-end">
+            <input type="hidden" name="store" value="{{ current_store }}">
+            <input type="hidden" name="tab" value="attendance_manage">
+
+            <div class="col-md-2">
+                <label class="form-label fw-bold">日期</label>
+                <select class="form-select"
+                        name="attendance_date_filter"
+                        id="attendanceDateFilter"
+                        onchange="toggleAttendanceCustomDateRange()">
+                    <option value="all" {% if attendance_filters.date_filter == 'all' %}selected{% endif %}>全部日期</option>
+                    <option value="today" {% if attendance_filters.date_filter == 'today' %}selected{% endif %}>今天</option>
+                    <option value="yesterday" {% if attendance_filters.date_filter == 'yesterday' %}selected{% endif %}>昨天</option>
+                    <option value="this_month" {% if attendance_filters.date_filter == 'this_month' %}selected{% endif %}>本月</option>
+                    <option value="last_month" {% if attendance_filters.date_filter == 'last_month' %}selected{% endif %}>上月</option>
+                    <option value="custom" {% if attendance_filters.date_filter == 'custom' %}selected{% endif %}>自定义</option>
+                </select>
+            </div>
+
+            <div class="col-md-2 attendance-custom-date">
+                <label class="form-label fw-bold">开始日期</label>
+                <input type="date"
+                       class="form-control"
+                       name="attendance_start_date"
+                       value="{{ attendance_filters.start_date }}">
+            </div>
+
+            <div class="col-md-2 attendance-custom-date">
+                <label class="form-label fw-bold">结束日期</label>
+                <input type="date"
+                       class="form-control"
+                       name="attendance_end_date"
+                       value="{{ attendance_filters.end_date }}">
+            </div>
+
+            <div class="col-md-2">
+                <label class="form-label fw-bold">类型</label>
+                <select class="form-select" name="attendance_event_type">
+                    <option value="all" {% if attendance_filters.event_type == 'all' %}selected{% endif %}>全部类型</option>
+                    <option value="late" {% if attendance_filters.event_type == 'late' %}selected{% endif %}>迟到</option>
+                    <option value="absent" {% if attendance_filters.event_type == 'absent' %}selected{% endif %}>旷工</option>
+                    <option value="other" {% if attendance_filters.event_type == 'other' %}selected{% endif %}>其他</option>
+                    <option value="leave" {% if attendance_filters.event_type == 'leave' %}selected{% endif %}>请假</option>
+                    <option value="shift_swap" {% if attendance_filters.event_type == 'shift_swap' %}selected{% endif %}>换班</option>
+                </select>
+            </div>
+
+            <div class="col-md-2">
+                <label class="form-label fw-bold">员工</label>
+                <select class="form-select" name="attendance_employee">
+                    <option value="all" {% if attendance_filters.employee == 'all' %}selected{% endif %}>全部员工</option>
+                    {% for emp in attendance_employee_options %}
+                    <option value="{{ emp.id }}" {% if attendance_filters.employee|string == emp.id|string %}selected{% endif %}>
+                        {{ emp.display_name }}{% if not emp.is_active %}（已停用）{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-md-2 d-flex gap-2">
+                <button type="submit" class="btn btn-primary flex-fill">
+                    <i class="bi bi-search me-1"></i>筛选
+                </button>
+                <a href="/employees?store={{ current_store }}&tab=attendance_manage" class="btn btn-outline-secondary">
+                    重置
+                </a>
+            </div>
+        </form>
+    </div>
 </div>
 
 <div class="card employee-module-card">
@@ -5330,7 +5409,16 @@ function toggleDutyCustomDateRange() {
     });
 }
 
+function toggleAttendanceCustomDateRange() {
+    const select = document.getElementById('attendanceDateFilter');
+    const show = select && select.value === 'custom';
+    document.querySelectorAll('.attendance-custom-date').forEach(el => {
+        el.style.display = show ? '' : 'none';
+    });
+}
+
 document.addEventListener('DOMContentLoaded', toggleDutyCustomDateRange);
+document.addEventListener('DOMContentLoaded', toggleAttendanceCustomDateRange);
 
 /**
  * V3 员工管理：AJAX 局部刷新
@@ -6751,6 +6839,7 @@ function salarySettlementFlowToneClass(flow) {
     if (category === "attendance") return "salary-settlement-flow-attendance";
     if (category === "replacement_work") return "salary-settlement-flow-replacement";
     if (category === "manual_adjustment" || category === "settlement") return "salary-settlement-flow-adjustment";
+    if (category === "notice") return "salary-settlement-flow-notice";
     if (type.includes("deduct")) return "salary-settlement-flow-deduction";
     if (type.includes("bonus") || type.includes("subsidy")) return "salary-settlement-flow-bonus";
     return "salary-settlement-flow-other";
@@ -6763,9 +6852,11 @@ function renderSalarySettlementFlowItems(flows) {
 
     return flows.map(flow => {
         const amount = Number(flow.amount || 0);
-        const amountHtml = amount >= 0
-            ? `<div class="fs-6 fw-bold text-success">+¥${amount.toFixed(2)}</div>`
-            : `<div class="fs-6 fw-bold text-danger">-¥${Math.abs(amount).toFixed(2)}</div>`;
+        const amountHtml = flow.amount_display
+            ? `<div class="fs-6 fw-bold text-warning-emphasis">${escapeHtml(flow.amount_display)}</div>`
+            : (amount >= 0
+                ? `<div class="fs-6 fw-bold text-success">+¥${amount.toFixed(2)}</div>`
+                : `<div class="fs-6 fw-bold text-danger">-¥${Math.abs(amount).toFixed(2)}</div>`);
         const createdAtHtml = (flow.created_at && flow.created_at !== flow.flow_date)
             ? `<span class="small text-muted">入账 ${escapeHtml(flow.created_at)}</span>`
             : "";
@@ -6802,7 +6893,7 @@ function renderSalarySettlementDetailRow(item, expanded = false) {
                         <div>
                             <div class="fw-bold text-dark">本月工资流水明细</div>
                             <div class="small text-muted mt-1">
-                                共 ${Number(item.salary_flow_count || (item.salary_flows || []).length || 0)} 条流水，包含自动结算项、手工调整、补贴和扣款。
+                                共 ${Number(item.salary_flow_count || (item.salary_flows || []).length || 0)} 条明细，包含自动结算项、规则说明、手工调整、补贴和扣款。
                             </div>
                         </div>
                         <span class="badge bg-light text-dark border">最细粒度工资构成</span>
@@ -7020,9 +7111,11 @@ renderSalarySettlementFlowItems = function (flows) {
 
     return flows.map(flow => {
         const amount = Number(flow.amount || 0);
-        const amountHtml = amount >= 0
-            ? `<div class="fs-6 fw-bold text-success">+¥${amount.toFixed(2)}</div>`
-            : `<div class="fs-6 fw-bold text-danger">-¥${Math.abs(amount).toFixed(2)}</div>`;
+        const amountHtml = flow.amount_display
+            ? `<div class="fs-6 fw-bold text-warning-emphasis">${escapeHtml(flow.amount_display)}</div>`
+            : (amount >= 0
+                ? `<div class="fs-6 fw-bold text-success">+¥${amount.toFixed(2)}</div>`
+                : `<div class="fs-6 fw-bold text-danger">-¥${Math.abs(amount).toFixed(2)}</div>`);
         const createdAtHtml = (flow.created_at && flow.created_at !== flow.flow_date)
             ? `<span class="small text-muted">入账 ${escapeHtml(flow.created_at)}</span>`
             : "";
@@ -7058,7 +7151,7 @@ renderSalarySettlementDetailRow = function (item, expanded = false) {
                         <div>
                             <div class="fw-bold text-dark">本月工资流水明细</div>
                             <div class="small text-muted mt-1">
-                                共 ${Number(item.salary_flow_count || (item.salary_flows || []).length || 0)} 条流水，包含自动结算项、手工调整、补贴和扣款。
+                                共 ${Number(item.salary_flow_count || (item.salary_flows || []).length || 0)} 条明细，包含自动结算项、规则说明、手工调整、补贴和扣款。
                             </div>
                         </div>
                         <span class="badge bg-light text-dark border">最细粒度工资构成</span>

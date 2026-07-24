@@ -98,12 +98,6 @@
     background: rgba(25, 135, 84, 0.08);
   }
 
-  /* 分类颜色：代客收款金额 */
-  .performance-table .pay-row-label,
-  .performance-table .pay-cell {
-    background: rgba(255, 193, 7, 0.12);
-  }
-
   /* 汇总列颜色 */
   .performance-table .total-col {
     background: rgba(13, 110, 253, 0.10);
@@ -232,10 +226,10 @@
           </thead>
           <tbody>
             {% for row in shift_stats.operator_rows %}
-              {% set ns = namespace(total_orders=0, total_pay=0.0) %}
+              {% set ns = namespace(total_orders=0) %}
 
               <tr>
-                <td class="sticky-col sticky-name name-cell" rowspan="3">{{ row.name }}</td>
+                <td class="sticky-col sticky-name name-cell" rowspan="2">{{ row.name }}</td>
                 <td class="sticky-col sticky-metric shift-row-label"  style="background: #f3f7ff">班次</td>
                 {% for item in row.daily %}
                   <td class="shift-cell">{{ shift_label.get(item.shift_type, "休息") }}</td>
@@ -250,15 +244,6 @@
                   <td class="orders-cell">{{ item.orders }}</td>
                 {% endfor %}
                 <td class="total-col">{{ ns.total_orders }}</td>
-              </tr>
-
-              <tr>
-                <td class="sticky-col sticky-metric pay-row-label"  style="background: #f3f7ff">代客收款金额</td>
-                {% for item in row.daily %}
-                  {% set ns.total_pay = ns.total_pay + item.pay_amount %}
-                  <td class="pay-cell">{{ "%.2f"|format(item.pay_amount) }}</td>
-                {% endfor %}
-                <td class="total-col">{{ "%.2f"|format(ns.total_pay) }}</td>
               </tr>
             {% endfor %}
           </tbody>

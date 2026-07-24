@@ -491,7 +491,7 @@
                 <div class="border rounded-3 p-3 bg-light h-100">
                     <div class="stat-card-title">普通微信收款</div>
                     <div class="fs-4 fw-bold text-success">¥{{ normal_wechat_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">shuapai9725</div>
+                    <div class="small text-muted mt-1">shuaipai3725</div>
                 </div>
             </div>
             <div class="col-md-6 col-xl">
@@ -567,7 +567,7 @@
                 <div class="border rounded-3 p-3 bg-light h-100">
                     <div class="stat-card-title">普通微信收款</div>
                     <div class="fs-4 fw-bold text-success">¥{{ normal_wechat_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">shuapai9725</div>
+                    <div class="small text-muted mt-1">shuaipai3725</div>
                 </div>
             </div>
             <div class="col-md-6 col-xl">
@@ -651,7 +651,7 @@
                 <div class="border rounded-3 p-3 bg-light h-100">
                     <div class="stat-card-title">普通微信收款</div>
                     <div class="fs-4 fw-bold text-success">¥{{ normal_wechat_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">shuapai9725</div>
+                    <div class="small text-muted mt-1">shuaipai3725</div>
                 </div>
             </div>
             <div class="col-md-6 col-xl">
@@ -922,8 +922,17 @@
                         {% endif %}
                     </td>
                     <td>
-                        <div class="fw-bold text-dark">{{ game.player_1 or '-' }}</div>
-                        <div class="small text-muted">{{ game.player_1_wechat or '-' }}</div>
+                        <div class="fw-bold text-dark">{{ game.self_arrival_app_nickname or game.player_1 or '-' }}</div>
+                        <div class="small text-muted">
+                            {% if game.self_arrival_app_nickname or game.self_arrival_phone %}
+                                小程序：{{ game.self_arrival_app_nickname or '-' }} / {{ game.self_arrival_phone or '-' }}<br>
+                            {% endif %}
+                            {% if game.player_1 or game.player_1_wechat %}
+                                微信：{{ game.player_1 or '-' }} / {{ game.player_1_wechat or '-' }}
+                            {% elif not game.self_arrival_app_nickname and not game.self_arrival_phone %}
+                                -
+                            {% endif %}
+                        </div>
                     </td>
                     <td>
                         <div class="fw-bold text-primary">{{ game.payment_method or '-' }}</div>
@@ -1022,6 +1031,8 @@
                                     data-fee="{{ game.room_fee or 0 }}"
                                     data-note-added="{{ game.tags or '否' }}"
                                     data-table-note="{{ game.table_note or '' }}"
+                                    data-app-nickname="{{ game.self_arrival_app_nickname or '' }}"
+                                    data-phone="{{ game.self_arrival_phone or '' }}"
                                     data-p1="{{ game.player_1 or '' }}"
                                     data-p1-wx="{{ game.player_1_wechat or '' }}">
                                 <i class="bi bi-pencil-square"></i> 编辑
@@ -1311,13 +1322,23 @@
                         </div>
 
                         <div class="col-md-6">
-                            <label class="form-label fw-bold">微信昵称 <span class="text-danger">*</span></label>
-                            <input type="text" class="form-control" name="player_1" id="self_arrival_add_player_1" placeholder="请输入微信昵称" required>
+                            <label class="form-label fw-bold">小程序昵称</label>
+                            <input type="text" class="form-control" name="self_arrival_app_nickname" id="self_arrival_add_app_nickname" placeholder="请输入小程序昵称">
                         </div>
 
                         <div class="col-md-6">
-                            <label class="form-label fw-bold">微信号 <span class="text-danger">*</span></label>
-                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_add_player_1_wechat" placeholder="请输入微信号" required>
+                            <label class="form-label fw-bold">电话</label>
+                            <input type="text" class="form-control" name="self_arrival_phone" id="self_arrival_add_phone" placeholder="请输入电话">
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">微信昵称</label>
+                            <input type="text" class="form-control" name="player_1" id="self_arrival_add_player_1" placeholder="请输入微信昵称">
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">微信号</label>
+                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_add_player_1_wechat" placeholder="请输入微信号">
                         </div>
 
                         <div class="col-md-6">
@@ -1427,13 +1448,23 @@
                         </div>
 
                         <div class="col-md-6">
-                            <label class="form-label fw-bold">微信昵称 <span class="text-danger">*</span></label>
-                            <input type="text" class="form-control" name="player_1" id="self_arrival_edit_player_1" placeholder="请输入微信昵称" required>
+                            <label class="form-label fw-bold">小程序昵称</label>
+                            <input type="text" class="form-control" name="self_arrival_app_nickname" id="self_arrival_edit_app_nickname" placeholder="请输入小程序昵称">
                         </div>
 
                         <div class="col-md-6">
-                            <label class="form-label fw-bold">微信号 <span class="text-danger">*</span></label>
-                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_edit_player_1_wechat" placeholder="请输入微信号" required>
+                            <label class="form-label fw-bold">电话</label>
+                            <input type="text" class="form-control" name="self_arrival_phone" id="self_arrival_edit_phone" placeholder="请输入电话">
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">微信昵称</label>
+                            <input type="text" class="form-control" name="player_1" id="self_arrival_edit_player_1" placeholder="请输入微信昵称">
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">微信号</label>
+                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_edit_player_1_wechat" placeholder="请输入微信号">
                         </div>
 
                         <div class="col-md-6">
@@ -2174,7 +2205,7 @@
                         <div class="col-6">
                             <label class="form-label"><i class="bi bi-wechat text-success me-1"></i>普通微信收款</label>
                             <input type="number" step="0.1" name="normal_wechat_pay" id="inputNormalWechat" class="form-control" placeholder="0">
-                            <div class="form-text">shuapai9725</div>
+                            <div class="form-text">shuaipai3725</div>
                         </div>
                         <div class="col-6">
                             <label class="form-label"><i class="bi bi-gift text-success me-1"></i>企业微信红包收款</label>
@@ -2565,20 +2596,37 @@
             return false;
         }
 
+        const appNicknameInput = document.getElementById(`self_arrival_${mode}_app_nickname`);
+        const phoneInput = document.getElementById(`self_arrival_${mode}_phone`);
         const nicknameInput = document.getElementById(`self_arrival_${mode}_player_1`);
         const wechatInput = document.getElementById(`self_arrival_${mode}_player_1_wechat`);
         const paymentSelect = document.getElementById(`self_arrival_${mode}_payment_method`);
         const feeInput = document.getElementById(`self_arrival_${mode}_room_fee`);
         const tableNoteInput = document.getElementById(`self_arrival_${mode}_table_note`);
 
+        const appNickname = (appNicknameInput?.value || '').trim();
+        const phone = (phoneInput?.value || '').trim();
         const nickname = (nicknameInput?.value || '').trim();
         const wechat = (wechatInput?.value || '').trim();
         const paymentMethod = (paymentSelect?.value || '').trim();
         const fee = parseFloat(feeInput?.value || 0) || 0;
         const tableNote = (tableNoteInput?.value || '').trim();
 
-        if (!nickname || !wechat) {
+        const hasAppPairValue = !!(appNickname || phone);
+        const hasWechatPairValue = !!(nickname || wechat);
+        const appPairComplete = !!(appNickname && phone);
+        const wechatPairComplete = !!(nickname && wechat);
+
+        if (hasAppPairValue && !appPairComplete) {
+            alert('小程序昵称和电话必须同时填写');
+            return false;
+        }
+        if (hasWechatPairValue && !wechatPairComplete) {
             alert('微信昵称和微信号必须同时填写');
+            return false;
+        }
+        if (!appPairComplete && !wechatPairComplete) {
+            alert('请至少完整填写一组：小程序昵称+电话，或微信昵称+微信号');
             return false;
         }
 
@@ -2946,6 +2994,8 @@
         document.getElementById('self_arrival_edit_room_name').value = btn.dataset.room || '';
         setEditOrderStartParts('self_arrival_edit', btn.dataset.orderStart || '');
         setOrderEndInitial('self_arrival_edit', btn.dataset.orderEnd || '', btn.dataset.orderEndManual || '0');
+        document.getElementById('self_arrival_edit_app_nickname').value = btn.dataset.appNickname || '';
+        document.getElementById('self_arrival_edit_phone').value = btn.dataset.phone || '';
         document.getElementById('self_arrival_edit_player_1').value = btn.dataset.p1 || '';
         document.getElementById('self_arrival_edit_player_1_wechat').value = btn.dataset.p1Wx || '';
         document.getElementById('self_arrival_edit_payment_method').value = btn.dataset.payment || '';
@@ -3439,6 +3489,14 @@
                         <div class="detail-label">接待店长</div>
                         <div class="detail-value">${data.who_did || '-'}</div>
                     </div>
+                    <div class="col-md-6">
+                        <div class="detail-label">小程序昵称 / 电话</div>
+                        <div class="detail-value">${data.self_arrival_app_nickname || '-'} / ${data.self_arrival_phone || '-'}</div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="detail-label">微信昵称 / 微信号</div>
+                        <div class="detail-value">${(data.players && data.players[0] ? data.players[0].name : '') || '-'} / ${(data.players && data.players[0] ? data.players[0].wechat : '') || '-'}</div>
+                    </div>
                 `;
 
                 remarksHtml = `
@@ -3566,7 +3624,7 @@
                                 </div>
                                 ${data.store_name === '金牛万达店' ? `
                                 <div class="col-md-4">
-                                    <div class="detail-label">普通微信收款（shuapai9725）</div>
+                                    <div class="detail-label">普通微信收款（shuaipai3725）</div>
                                     <div class="detail-value">${data.normal_wechat_pay || 0}</div>
                                 </div>
                                 <div class="col-md-4">

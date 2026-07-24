@@ -85,6 +85,10 @@ class GameRecord(SQLModel, table=True):
     # self_arrival = 自主到店登记单（直接进入已组齐）
     record_source: str = Field(default="normal", index=True)
 
+    # V4：自主到店登记专用，下单用户的小程序资料。
+    self_arrival_app_nickname: Optional[str] = None
+    self_arrival_phone: Optional[str] = None
+
     # 接待店长：
     # 1. 未组齐新增时：谁点“确定新增”，who_did 先记谁
     # 2. 点击“组齐”时：再覆盖为谁点“组齐”
@@ -328,6 +332,35 @@ class ContactCustomerFollowup(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.now, index=True)
     updated_by: Optional[str] = Field(default=None, index=True)
 
+
+class SelfArrivalCustomer(SQLModel, table=True):
+    """
+    自主到店用户池。
+    同一门店内优先按“小程序昵称+电话”合并；只有微信资料时按“微信昵称+微信号”合并。
+    """
+    __tablename__ = "selfarrivalcustomer"
+    __table_args__ = (
+        UniqueConstraint("store_name", "identity_key", name="uq_selfarrivalcustomer_store_identity"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    store_name: str = Field(index=True)
+    identity_key: str = Field(index=True)
+
+    app_nickname: Optional[str] = Field(default=None, index=True)
+    phone: Optional[str] = Field(default=None, index=True)
+    wechat_nickname: Optional[str] = None
+    wechat_id: Optional[str] = Field(default=None, index=True)
+
+    last_source_game_id: Optional[int] = Field(default=None, foreign_key="gamerecord.id", index=True)
+    last_arrival_at: datetime = Field(default_factory=datetime.now, index=True)
+    store_visit_count: int = Field(default=0, index=True)
+    first_receptionist: Optional[str] = Field(default=None, index=True)
+    receptionist: Optional[str] = Field(default=None, index=True)
+
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_by: Optional[str] = Field(default=None, index=True)
 
 
 
@@ -1404,6 +1437,7 @@ def create_db_and_tables():
     migrate_customer_soft_delete_fields()
     migrate_customer_store_link_table()
     migrate_contact_customer_followup_table()
+    migrate_self_arrival_customer_table()
     migrate_new_customer_pull_record_table()
     migrate_game_record_table()
     migrate_game_payment_item_table()
@@ -1522,6 +1556,59 @@ def migrate_contact_customer_followup_table():
             CREATE INDEX IF NOT EXISTS ix_contactcustomerfollowup_updated_at
             ON contactcustomerfollowup (updated_at)
         """))
+
+
+def migrate_self_arrival_customer_table():
+    """
+    自主到店用户池表。
+    保存从已组齐牌局-自主到店登记同步出来的用户维度数据。
+    """
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS selfarrivalcustomer (
+                id INTEGER PRIMARY KEY,
+                store_name TEXT NOT NULL,
+                identity_key TEXT NOT NULL,
+                app_nickname TEXT,
+                phone TEXT,
+                wechat_nickname TEXT,
+                wechat_id TEXT,
+                last_source_game_id INTEGER,
+                last_arrival_at DATETIME NOT NULL,
+                store_visit_count INTEGER NOT NULL DEFAULT 0,
+                first_receptionist TEXT,
+                receptionist TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_by TEXT,
+                CONSTRAINT uq_selfarrivalcustomer_store_identity UNIQUE (store_name, identity_key)
+            )
+            """))
+        columns = conn.execute(text("PRAGMA table_info(selfarrivalcustomer)")).fetchall()
+        column_names = {col[1] for col in columns}
+        if "first_receptionist" not in column_names:
+            conn.execute(text("ALTER TABLE selfarrivalcustomer ADD COLUMN first_receptionist TEXT"))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ix_selfarrivalcustomer_store_identity
+            ON selfarrivalcustomer (store_name, identity_key)
+        """))
+        for col_name in [
+            "store_name",
+            "identity_key",
+            "app_nickname",
+            "phone",
+            "wechat_id",
+            "last_source_game_id",
+            "last_arrival_at",
+            "store_visit_count",
+            "first_receptionist",
+            "receptionist",
+        ]:
+            conn.execute(text(f"""
+                CREATE INDEX IF NOT EXISTS ix_selfarrivalcustomer_{col_name}
+                ON selfarrivalcustomer ({col_name})
+            """))
+
 
 def migrate_new_customer_pull_record_table():
     """
@@ -1970,6 +2057,7 @@ def migrate_game_record_table():
     6. updated_by
     7. record_source
     8. external_store_name   <-- 溢出单专用字段
+    9. self_arrival_app_nickname / self_arrival_phone   <-- 自主到店专用字段
 
     迁移原则：
     - 有旧值就保留
@@ -1977,6 +2065,7 @@ def migrate_game_record_table():
     - room_name / payment_method 保持可空
     - record_source 若旧表没有，则补 'normal'
     - external_store_name 若旧表没有，则补 NULL
+    - 自主到店小程序资料字段若旧表没有，则补 NULL
     """
 
     with engine.begin() as conn:
@@ -2016,6 +2105,8 @@ def migrate_game_record_table():
             "external_store_name",
             "order_end_time",
             "order_end_time_manually_set",
+            "self_arrival_app_nickname",
+            "self_arrival_phone",
         ]
 
         need_rebuild = False
@@ -2093,6 +2184,8 @@ def migrate_game_record_table():
         has_old_updated_by = "updated_by" in col_map
         has_old_record_source = "record_source" in col_map
         has_old_external_store_name = "external_store_name" in col_map
+        has_old_self_arrival_app_nickname = "self_arrival_app_nickname" in col_map
+        has_old_self_arrival_phone = "self_arrival_phone" in col_map
 
         # 重命名旧表
         conn.execute(text("ALTER TABLE gamerecord RENAME TO gamerecord_old"))
@@ -2140,6 +2233,8 @@ def migrate_game_record_table():
 
                 status TEXT NOT NULL DEFAULT 'unformed',
                 record_source TEXT NOT NULL DEFAULT 'normal',
+                self_arrival_app_nickname TEXT,
+                self_arrival_phone TEXT,
                 who_did TEXT,
 
                 is_payAll INTEGER NOT NULL DEFAULT 0,
@@ -2189,6 +2284,8 @@ def migrate_game_record_table():
 
                 COALESCE(status, 'unformed') AS status,
                 {"COALESCE(record_source, 'normal')" if has_old_record_source else "'normal'"} AS record_source,
+                {"self_arrival_app_nickname" if has_old_self_arrival_app_nickname else "NULL"} AS self_arrival_app_nickname,
+                {"self_arrival_phone" if has_old_self_arrival_phone else "NULL"} AS self_arrival_phone,
                 who_did,
 
                 COALESCE(is_payAll, 0) AS is_payAll,
@@ -2234,6 +2331,8 @@ def migrate_game_record_table():
                 order_end_time_manually_set,
                 status,
                 record_source,
+                self_arrival_app_nickname,
+                self_arrival_phone,
                 who_did,
                 is_payAll,
                 wechat_pay,
@@ -3053,7 +3152,6 @@ def get_shift_performance_stats(
     1. 只要 who_did 是该店长，就算该店长业绩，不区分门店；
     2. 统计项：
        - 销售订单：status='formed' 的桌数
-       - 代客收款金额：在这些 formed 中，payment_method='代客收款' 的金额总和
     3. 若某天是“休息(off)”，则该天产生的业绩统一并入“前一天的晚班”。
     """
     month_start, month_end = get_month_date_range(year, month)
@@ -3113,12 +3211,10 @@ def get_shift_performance_stats(
     # 4) 初始化“最终归属日期”的逐日统计
     # 注意：这里存的是“业绩最终应该落在哪一天那一列”
     operator_daily_orders = {}
-    operator_daily_pay = {}
 
     for name in operator_names:
         for d in day_list:
             operator_daily_orders[(name, d)] = 0
-            operator_daily_pay[(name, d)] = 0.0
 
     # 5) 核心归属逻辑：
     #    如果当天排班是 off，则业绩归到前一天；并且前一天在表头班次显示为晚班
@@ -3146,12 +3242,8 @@ def get_shift_performance_stats(
 
         if key not in operator_daily_orders:
             operator_daily_orders[key] = 0
-            operator_daily_pay[key] = 0.0
 
         operator_daily_orders[key] += 1
-
-        if g.payment_method == "代客收款":
-            operator_daily_pay[key] += float((g.wechat_pay or 0) + (g.Alipay or 0))
 
     # 5.2 自主到店登记：也计入销售订单
     for r in self_arrival_records:
@@ -3174,9 +3266,7 @@ def get_shift_performance_stats(
 
         if key not in operator_daily_orders:
             operator_daily_orders[key] = 0
-            operator_daily_pay[key] = 0.0
 
-        # 自主到店登记只给“销售订单 +1”，不增加代客收款金额
         operator_daily_orders[key] += 1
 
     # 6) 上半部分：耍牌绩效考核表
@@ -3204,8 +3294,7 @@ def get_shift_performance_stats(
             daily.append({
                 "date": d,
                 "shift_type": display_shift,
-                "orders": operator_daily_orders.get((name, d), 0),
-                "pay_amount": round(operator_daily_pay.get((name, d), 0.0), 2)
+                "orders": operator_daily_orders.get((name, d), 0)
             })
         operator_rows.append({
             "name": name,

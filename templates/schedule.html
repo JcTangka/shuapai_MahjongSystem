@@ -38,6 +38,83 @@
   .schedule-wrap {
     overflow-x: auto;
   }
+
+  .schedule-table td.schedule-cell-marked {
+    background: var(--schedule-event-bg);
+    box-shadow: inset 0 0 0 2px var(--schedule-event-border);
+    vertical-align: top;
+    white-space: normal;
+  }
+
+  .schedule-event-tags {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px;
+    min-height: 18px;
+  }
+
+  .schedule-event-tag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 34px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--schedule-event-accent);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+  }
+
+  .schedule-event-0 {
+    --schedule-event-bg: #fff4d6;
+    --schedule-event-border: #f59f00;
+    --schedule-event-accent: #e67700;
+  }
+
+  .schedule-event-1 {
+    --schedule-event-bg: #e7f5ff;
+    --schedule-event-border: #339af0;
+    --schedule-event-accent: #1971c2;
+  }
+
+  .schedule-event-2 {
+    --schedule-event-bg: #ebfbee;
+    --schedule-event-border: #40c057;
+    --schedule-event-accent: #2b8a3e;
+  }
+
+  .schedule-event-3 {
+    --schedule-event-bg: #fff0f6;
+    --schedule-event-border: #f06595;
+    --schedule-event-accent: #c2255c;
+  }
+
+  .schedule-event-4 {
+    --schedule-event-bg: #f3f0ff;
+    --schedule-event-border: #845ef7;
+    --schedule-event-accent: #5f3dc4;
+  }
+
+  .schedule-event-5 {
+    --schedule-event-bg: #e6fcf5;
+    --schedule-event-border: #20c997;
+    --schedule-event-accent: #087f5b;
+  }
+
+  .schedule-event-6 {
+    --schedule-event-bg: #fff5f5;
+    --schedule-event-border: #ff6b6b;
+    --schedule-event-accent: #e03131;
+  }
+
+  .schedule-event-7 {
+    --schedule-event-bg: #f8f9fa;
+    --schedule-event-border: #868e96;
+    --schedule-event-accent: #495057;
+  }
 </style>
 
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
@@ -112,8 +189,11 @@
           {% for d in day_list %}
             {% set key = (name, d) %}
             {% set st = shifts_map.get(key, "off") %}
+            {% set marks = schedule_event_marks.get(key, []) %}
+            {% set primary_mark = marks[0] if marks else none %}
 
-            <td class="text-center day-col">
+            <td class="text-center day-col {% if primary_mark %}schedule-cell-marked {{ primary_mark.color_class }}{% endif %}"
+                {% if primary_mark %}title="{{ primary_mark.tooltip }}"{% endif %}>
               {% if current_user.role == "admin" %}
                 {% if key in flexible_locked_shift_keys %}
                 <span class="badge bg-primary">{{ shift_label.get(st, "休息") }}</span>
@@ -130,6 +210,13 @@
                 <span class="badge bg-light text-dark border">
                   {{ shift_label.get(st, "休息") }}
                 </span>
+              {% endif %}
+              {% if marks %}
+                <div class="schedule-event-tags mt-1">
+                  {% for mark in marks %}
+                    <span class="schedule-event-tag" title="{{ mark.tooltip }}">{{ mark.label }}</span>
+                  {% endfor %}
+                </div>
               {% endif %}
             </td>
           {% endfor %}
