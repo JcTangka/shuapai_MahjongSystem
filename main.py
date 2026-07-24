@@ -20,7 +20,7 @@ import itertools
 
 #  导入数据库模型
 from database import (GameRecord, GamePaymentItem, Store, Room, User,
-                      Customer, CustomerStoreLink,
+                      Customer, CustomerStoreLink, CustomerComplaintRecord,
                       Blacklist, BrandBlacklistEntry, PlayFrequency, CustomerPlayTypeStat, create_db_and_tables, get_session,
                       ShiftSchedule, MaintenanceRecord, upsert_shift, get_month_shifts_map, get_month_date_range, normalize_shift_type,
                       get_manager_performance_stats, get_shift_performance_stats,
@@ -5484,7 +5484,7 @@ dimension:
 3. 新增顾客数：按 created_at 落在时间区间内
 4. 新增顾客转化率：新增顾客中，在当前时间区间内完成过 >=1 次成功组局
 5. 复购顾客数：当前时间区间内完成过 >=2 次成功组局的顾客数
-6. 顾客复购率：复购顾客数 / 顾客总数
+6. 顾客复购率：复购顾客数 / 当前区间内至少成功组局 1 次的顾客数
 """
 def get_brand_store_dashboard_stats(
     session: Session,
@@ -5505,7 +5505,7 @@ def get_brand_store_dashboard_stats(
     4. 新增顾客数：按 created_at 落在时间区间内
     5. 新增顾客转化率：新增顾客中，在当前时间区间内完成过 >=1 次成功组局
     6. 复购顾客数：当前时间区间内完成过 >=2 次成功组局的顾客数
-    7. 顾客复购率：复购顾客数 / 顾客总数
+    7. 顾客复购率：复购顾客数 / 当前区间内至少成功组局 1 次的顾客数
     """
 
     is_store = (dimension == "store" and store_name)
@@ -5539,6 +5539,15 @@ def get_brand_store_dashboard_stats(
         g for g in formed_games
         if start_date <= _game_effective_order_dt(g).date() <= end_date
     ]
+    self_arrival_games = [
+        g for g in formed_games
+        if _normalize_text(g.record_source) == FORMED_SOURCE_SELF_ARRIVAL
+    ]
+    self_arrival_customer_stats = _calculate_self_arrival_customer_dashboard_stats(
+        self_arrival_games,
+        start_date,
+        end_date
+    )
 
     # 正常营收单：排除 overflow
     normal_period_games = [
@@ -5562,18 +5571,19 @@ def get_brand_store_dashboard_stats(
         if g.payment_method == "代客收款"
     ), 2)
 
-    voucher_revenue = round(sum(
-        _received_amount_for_game(g, payment_breakdowns)
-        for g in normal_period_games
-        if g.payment_method == "代客验券"
-    ), 2)
-
-    other_revenue = round(total_revenue - offline_revenue - voucher_revenue, 2)
+    other_revenue = round(total_revenue - offline_revenue, 2)
     if other_revenue < 0:
         other_revenue = 0.0
+    offline_revenue_rate = round((offline_revenue / total_revenue * 100) if total_revenue else 0, 2)
+    other_revenue_rate = round((other_revenue / total_revenue * 100) if total_revenue else 0, 2)
 
     # ========= 5. 桌数 / 订单数（溢出单要计入） =========
     order_count = len(period_games)
+    self_arrival_order_count = len([
+        g for g in period_games
+        if _normalize_text(g.record_source) == FORMED_SOURCE_SELF_ARRIVAL
+    ])
+    private_order_count = order_count - self_arrival_order_count
 
     # ========= 6. 当前时间区间内顾客成功组局次数 =========
     # 这里继续按全部 formed 统计，包含溢出单
@@ -5624,15 +5634,18 @@ def get_brand_store_dashboard_stats(
         if cnt >= 2
     }
     repurchase_customer_count = len(repurchase_customer_ids)
+    active_customer_count = len(period_visit_count_by_customer_id)
 
     repurchase_rate = round(
-        (repurchase_customer_count / customer_total * 100) if customer_total else 0,
+        (repurchase_customer_count / active_customer_count * 100) if active_customer_count else 0,
         2
     )
 
     # ========= 10. 趋势图（日） =========
     revenue_by_day = {d.strftime("%Y-%m-%d"): 0.0 for d in _daterange(start_date, end_date)}
     orders_by_day = {d.strftime("%Y-%m-%d"): 0 for d in _daterange(start_date, end_date)}
+    private_orders_by_day = {d.strftime("%Y-%m-%d"): 0 for d in _daterange(start_date, end_date)}
+    self_arrival_orders_by_day = {d.strftime("%Y-%m-%d"): 0 for d in _daterange(start_date, end_date)}
 
     # 收入趋势：只算正常营收单
     for g in normal_period_games:
@@ -5643,10 +5656,15 @@ def get_brand_store_dashboard_stats(
     for g in period_games:
         day_key = _game_effective_order_dt(g).strftime("%Y-%m-%d")
         orders_by_day[day_key] += 1
+        if _normalize_text(g.record_source) == FORMED_SOURCE_SELF_ARRIVAL:
+            self_arrival_orders_by_day[day_key] += 1
+        else:
+            private_orders_by_day[day_key] += 1
 
     trend_labels = list(revenue_by_day.keys())
     revenue_trend = [round(revenue_by_day[k], 2) for k in trend_labels]
-    order_trend = [orders_by_day[k] for k in trend_labels]
+    private_order_trend = [private_orders_by_day[k] for k in trend_labels]
+    self_arrival_order_trend = [self_arrival_orders_by_day[k] for k in trend_labels]
 
     # ========= 11. 溢出单补充统计 =========
     overflow_order_count = len(overflow_period_games)
@@ -5665,8 +5683,9 @@ def get_brand_store_dashboard_stats(
         "revenue": {
             "total": total_revenue,
             "offline": offline_revenue,
-            "voucher": voucher_revenue,
             "other": other_revenue,
+            "offline_rate": offline_revenue_rate,
+            "other_rate": other_revenue_rate,
         },
 
         "customer": {
@@ -5674,12 +5693,17 @@ def get_brand_store_dashboard_stats(
             "new": new_customer_count,
             "converted_new": converted_new_customer_count,
             "new_conversion_rate": new_customer_conversion_rate,
+            "active": active_customer_count,
             "repurchase": repurchase_customer_count,
             "repurchase_rate": repurchase_rate,
         },
 
+        "self_arrival_customer": self_arrival_customer_stats,
+
         "order": {
-            "count": order_count
+            "count": order_count,
+            "private": private_order_count,
+            "self_arrival": self_arrival_order_count,
         },
 
         "overflow": {
@@ -5690,17 +5714,18 @@ def get_brand_store_dashboard_stats(
         "charts": {
             "trend_labels": trend_labels,
             "revenue_trend": revenue_trend,
-            "order_trend": order_trend,
-            "revenue_composition": [
-                offline_revenue,
-                voucher_revenue,
-                other_revenue
-            ],
+            "private_order_trend": private_order_trend,
+            "self_arrival_order_trend": self_arrival_order_trend,
             "customer_funnel": [
                 customer_total,
                 new_customer_count,
                 converted_new_customer_count,
                 repurchase_customer_count
+            ],
+            "self_arrival_customer_funnel": [
+                self_arrival_customer_stats["total"],
+                self_arrival_customer_stats["new"],
+                self_arrival_customer_stats["repurchase"]
             ]
         }
     }
@@ -14347,7 +14372,10 @@ async def customer_search(
     matched_customers = session.exec(
         select(Customer).where(
             Customer.is_deleted == False,
-            Customer.nickname.contains(keyword)
+            or_(
+                Customer.nickname.contains(keyword),
+                Customer.wechat_id.contains(keyword)
+            )
         )
     ).all()
 
@@ -14369,6 +14397,7 @@ async def customer_search(
     matched_customers.sort(
         key=lambda c: (
             0 if (c.nickname or "") == keyword else 1,
+            0 if (c.wechat_id or "") == keyword else 1,
             len(c.nickname or ""),
             -c.id
         )
@@ -18027,6 +18056,116 @@ def _customer_is_old_before_contact(
     return False
 
 
+def _get_customer_in_store_by_id(
+        session: Session,
+        customer_id: Optional[int],
+        store_name: str
+) -> Optional[Customer]:
+    if not customer_id:
+        return None
+    customer = session.get(Customer, customer_id)
+    if not customer or getattr(customer, "is_deleted", False):
+        return None
+    link = session.exec(
+        select(CustomerStoreLink).where(
+            CustomerStoreLink.customer_id == customer.id,
+            CustomerStoreLink.store_name == store_name
+        )
+    ).first()
+    return customer if link else None
+
+
+def _get_customer_in_store_by_wechat(
+        session: Session,
+        wechat_id: str,
+        store_name: str
+) -> Optional[Customer]:
+    clean_wechat = _normalize_text(wechat_id)
+    if not clean_wechat:
+        return None
+    customer = session.exec(
+        select(Customer).where(
+            Customer.is_deleted == False,
+            Customer.wechat_id == clean_wechat
+        )
+    ).first()
+    if not customer:
+        return None
+    link = session.exec(
+        select(CustomerStoreLink).where(
+            CustomerStoreLink.customer_id == customer.id,
+            CustomerStoreLink.store_name == store_name
+        )
+    ).first()
+    return customer if link else None
+
+
+def _customer_complaint_payload(record: CustomerComplaintRecord) -> dict:
+    return {
+        "id": record.id,
+        "store_name": record.store_name,
+        "complained_customer_id": record.complained_customer_id,
+        "complained_nickname": record.complained_nickname or "",
+        "complained_wechat_id": record.complained_wechat_id or "",
+        "complainant_customer_id": record.complainant_customer_id,
+        "complainant_nickname": record.complainant_nickname or "",
+        "complainant_wechat_id": record.complainant_wechat_id or "",
+        "complaint_content": record.complaint_content or "",
+        "complaint_date": record.complaint_date.strftime("%Y-%m-%d") if record.complaint_date else "",
+        "created_at": record.created_at.strftime("%Y-%m-%d %H:%M") if record.created_at else "",
+        "created_by": record.created_by or "",
+    }
+
+
+def _calculate_self_arrival_customer_dashboard_stats(
+        games: List[GameRecord],
+        start_date: date,
+        end_date: date
+) -> dict:
+    grouped: Dict[str, List[GameRecord]] = {}
+    for game in games:
+        key = _self_arrival_user_identity_key(
+            game.self_arrival_app_nickname,
+            game.self_arrival_phone,
+            game.player_1,
+            game.player_1_wechat,
+        )
+        if not key:
+            continue
+        grouped.setdefault(key, []).append(game)
+
+    total_count = len(grouped)
+    new_count = 0
+    active_count = 0
+    repurchase_count = 0
+
+    for key_games in grouped.values():
+        key_games.sort(key=_self_arrival_game_order_dt)
+        first_dt = _self_arrival_game_order_dt(key_games[0])
+        if start_date <= first_dt.date() <= end_date:
+            new_count += 1
+
+        period_count = sum(
+            1
+            for game in key_games
+            if start_date <= _self_arrival_game_order_dt(game).date() <= end_date
+        )
+        if period_count >= 1:
+            active_count += 1
+        if period_count >= 2:
+            repurchase_count += 1
+
+    repurchase_rate = round((repurchase_count / active_count * 100) if active_count else 0, 2)
+
+    return {
+        "total": total_count,
+        "new": new_count,
+        "active": active_count,
+        "repurchase": repurchase_count,
+        "repurchase_rate": repurchase_rate,
+    }
+
+
 @app.get("/customers")
 async def read_customers(
         request: Request,
@@ -18080,6 +18219,7 @@ async def read_customers(
         "self_arrival_users",
         "self_arrival_pending_users",
         "old_to_new",
+        "customer_complaints",
         "my_new_customer_pull",
         "team_new_customer_pull",
     } else "store_customers"
@@ -18174,6 +18314,32 @@ async def read_customers(
             "public_loaded_count": list_offset + len(public_lead_list),
             "public_total_record_count": len(all_leads),
             "public_has_more": (list_offset + len(public_lead_list)) < len(all_leads),
+            "list_offset": list_offset,
+            "list_page_size": LIST_PAGE_SIZE,
+        })
+
+    if tab == "customer_complaints":
+        complaint_records = session.exec(
+            select(CustomerComplaintRecord).where(
+                CustomerComplaintRecord.store_name == store
+            ).order_by(
+                CustomerComplaintRecord.complaint_date.desc(),
+                CustomerComplaintRecord.created_at.desc(),
+                CustomerComplaintRecord.id.desc()
+            )
+        ).all()
+        complaint_list = [
+            _customer_complaint_payload(record)
+            for record in complaint_records[list_offset:list_offset + list_limit]
+        ]
+
+        return templates.TemplateResponse("customers.html", {
+            **common_context,
+            "complaint_record_list": complaint_list,
+            "complaint_record_count": len(complaint_records),
+            "complaint_loaded_count": list_offset + len(complaint_list),
+            "complaint_has_more": (list_offset + len(complaint_list)) < len(complaint_records),
+            "today_date": date.today().strftime("%Y-%m-%d"),
             "list_offset": list_offset,
             "list_page_size": LIST_PAGE_SIZE,
         })
@@ -18893,6 +19059,22 @@ def _build_contact_customers_url(
     return "/customers?" + urlencode(params)
 
 
+def _build_customer_complaints_url(
+    store: str,
+    success: str = "",
+    error: str = "",
+) -> str:
+    params = {
+        "store": store or "牛王庙店",
+        "tab": "customer_complaints",
+    }
+    if success:
+        params["success"] = success
+    if error:
+        params["error"] = error
+    return "/customers?" + urlencode(params)
+
+
 def _build_self_arrival_users_url(
     store: str,
     date_filter: str = "today",
@@ -19334,7 +19516,7 @@ async def add_customer(
         session.refresh(new_cust)
 
     # 3. 创建门店关联
-    # 手动录入即进入该门店顾客池，但未组局，所以 last_visit_at_store 为空
+    # 手动录入即进入该门店组局散客池，但未组局，所以 last_visit_at_store 为空
     existing_link = session.exec(
         select(CustomerStoreLink).where(
             CustomerStoreLink.customer_id == new_cust.id,
@@ -19401,7 +19583,7 @@ async def save_store_customer_followup(
             store,
             search_query,
             sort_by,
-            success=f"门店顾客跟进信息已保存（{saved_count} 条）"
+            success=f"组局散客跟进信息已保存（{saved_count} 条）"
         ),
         status_code=303
     )
@@ -19489,6 +19671,226 @@ async def save_self_arrival_users(
 
     return RedirectResponse(
         url=target_url,
+        status_code=303
+    )
+
+
+@app.post("/customer-complaints/add")
+async def add_customer_complaint_record(
+        store: str = Form(""),
+        complained_customer_id: str = Form(""),
+        complained_nickname: str = Form(""),
+        complained_wechat_id: str = Form(""),
+        complainant_nickname: str = Form(""),
+        complainant_wechat_id: str = Form(""),
+        complaint_content: str = Form(""),
+        complaint_date: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    store = _normalize_text(store)
+    if store not in get_active_store_name_list(session):
+        return RedirectResponse(
+            url=_build_customer_complaints_url(store, error="门店不存在或已停用"),
+            status_code=303
+        )
+
+    complained_nickname = _normalize_text(complained_nickname)
+    complained_wechat_id = _normalize_text(complained_wechat_id)
+    complainant_nickname = _normalize_text(complainant_nickname)
+    complainant_wechat_id = _normalize_text(complainant_wechat_id)
+    complaint_content = _normalize_text(complaint_content)
+
+    if not complained_nickname and not complained_wechat_id:
+        return RedirectResponse(
+            url=_build_customer_complaints_url(store, error="请填写被投诉人的微信昵称或微信号"),
+            status_code=303
+        )
+    if not complainant_nickname and not complainant_wechat_id:
+        return RedirectResponse(
+            url=_build_customer_complaints_url(store, error="请填写投诉人的微信昵称或微信号"),
+            status_code=303
+        )
+    if not complaint_content:
+        return RedirectResponse(
+            url=_build_customer_complaints_url(store, error="请填写投诉内容"),
+            status_code=303
+        )
+
+    try:
+        parsed_complaint_date = (
+            datetime.strptime(complaint_date, "%Y-%m-%d").date()
+            if _normalize_text(complaint_date)
+            else date.today()
+        )
+    except Exception:
+        return RedirectResponse(
+            url=_build_customer_complaints_url(store, error="投诉日期格式不正确"),
+            status_code=303
+        )
+
+    complained_customer_id_int = None
+    if _normalize_text(complained_customer_id).isdigit():
+        complained_customer_id_int = int(_normalize_text(complained_customer_id))
+
+    complained_customer = _get_customer_in_store_by_id(session, complained_customer_id_int, store)
+    if not complained_customer:
+        complained_customer = _get_customer_in_store_by_wechat(session, complained_wechat_id, store)
+    if complained_customer:
+        complained_nickname = complained_customer.nickname or complained_nickname
+        complained_wechat_id = complained_customer.wechat_id or complained_wechat_id
+
+    complainant_customer = _get_customer_in_store_by_wechat(session, complainant_wechat_id, store)
+    if complainant_customer:
+        complainant_nickname = complainant_customer.nickname or complainant_nickname
+        complainant_wechat_id = complainant_customer.wechat_id or complainant_wechat_id
+
+    record = CustomerComplaintRecord(
+        store_name=store,
+        complained_customer_id=complained_customer.id if complained_customer else None,
+        complained_nickname=complained_nickname or "-",
+        complained_wechat_id=complained_wechat_id or "-",
+        complainant_customer_id=complainant_customer.id if complainant_customer else None,
+        complainant_nickname=complainant_nickname or "-",
+        complainant_wechat_id=complainant_wechat_id or "-",
+        complaint_content=complaint_content,
+        complaint_date=parsed_complaint_date,
+        created_at=datetime.now(),
+        created_by=user.display_name
+    )
+    session.add(record)
+    session.commit()
+
+    return RedirectResponse(
+        url=_build_customer_complaints_url(store, success="投诉记录已新增"),
+        status_code=303
+    )
+
+
+@app.post("/customer-complaints/{record_id}/update")
+async def update_customer_complaint_record(
+        record_id: int,
+        store: str = Form(""),
+        complained_customer_id: str = Form(""),
+        complained_nickname: str = Form(""),
+        complained_wechat_id: str = Form(""),
+        complainant_nickname: str = Form(""),
+        complainant_wechat_id: str = Form(""),
+        complaint_content: str = Form(""),
+        complaint_date: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    record = session.get(CustomerComplaintRecord, record_id)
+    if not record:
+        return RedirectResponse(
+            url=_build_customer_complaints_url(store, error="投诉记录不存在"),
+            status_code=303
+        )
+
+    store = _normalize_text(store) or record.store_name
+    if store not in get_active_store_name_list(session):
+        return RedirectResponse(
+            url=_build_customer_complaints_url(record.store_name, error="门店不存在或已停用"),
+            status_code=303
+        )
+
+    complained_nickname = _normalize_text(complained_nickname)
+    complained_wechat_id = _normalize_text(complained_wechat_id)
+    complainant_nickname = _normalize_text(complainant_nickname)
+    complainant_wechat_id = _normalize_text(complainant_wechat_id)
+    complaint_content = _normalize_text(complaint_content)
+
+    if not complained_nickname and not complained_wechat_id:
+        return RedirectResponse(
+            url=_build_customer_complaints_url(store, error="请填写被投诉人的微信昵称或微信号"),
+            status_code=303
+        )
+    if not complainant_nickname and not complainant_wechat_id:
+        return RedirectResponse(
+            url=_build_customer_complaints_url(store, error="请填写投诉人的微信昵称或微信号"),
+            status_code=303
+        )
+    if not complaint_content:
+        return RedirectResponse(
+            url=_build_customer_complaints_url(store, error="请填写投诉内容"),
+            status_code=303
+        )
+
+    try:
+        parsed_complaint_date = (
+            datetime.strptime(complaint_date, "%Y-%m-%d").date()
+            if _normalize_text(complaint_date)
+            else date.today()
+        )
+    except Exception:
+        return RedirectResponse(
+            url=_build_customer_complaints_url(store, error="投诉日期格式不正确"),
+            status_code=303
+        )
+
+    complained_customer_id_int = None
+    if _normalize_text(complained_customer_id).isdigit():
+        complained_customer_id_int = int(_normalize_text(complained_customer_id))
+
+    complained_customer = _get_customer_in_store_by_id(session, complained_customer_id_int, store)
+    if not complained_customer:
+        complained_customer = _get_customer_in_store_by_wechat(session, complained_wechat_id, store)
+    if complained_customer:
+        complained_nickname = complained_customer.nickname or complained_nickname
+        complained_wechat_id = complained_customer.wechat_id or complained_wechat_id
+
+    complainant_customer = _get_customer_in_store_by_wechat(session, complainant_wechat_id, store)
+    if complainant_customer:
+        complainant_nickname = complainant_customer.nickname or complainant_nickname
+        complainant_wechat_id = complainant_customer.wechat_id or complainant_wechat_id
+
+    record.store_name = store
+    record.complained_customer_id = complained_customer.id if complained_customer else None
+    record.complained_nickname = complained_nickname or "-"
+    record.complained_wechat_id = complained_wechat_id or "-"
+    record.complainant_customer_id = complainant_customer.id if complainant_customer else None
+    record.complainant_nickname = complainant_nickname or "-"
+    record.complainant_wechat_id = complainant_wechat_id or "-"
+    record.complaint_content = complaint_content
+    record.complaint_date = parsed_complaint_date
+    session.add(record)
+    session.commit()
+
+    return RedirectResponse(
+        url=_build_customer_complaints_url(store, success="投诉记录已更新"),
+        status_code=303
+    )
+
+
+@app.post("/customer-complaints/{record_id}/delete")
+async def delete_customer_complaint_record(
+        record_id: int,
+        store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    record = session.get(CustomerComplaintRecord, record_id)
+    target_store = _normalize_text(store) or (record.store_name if record else "")
+    if not record:
+        return RedirectResponse(
+            url=_build_customer_complaints_url(target_store, error="投诉记录不存在"),
+            status_code=303
+        )
+
+    session.delete(record)
+    session.commit()
+    return RedirectResponse(
+        url=_build_customer_complaints_url(target_store, success="投诉记录已删除"),
         status_code=303
     )
 
@@ -19825,7 +20227,7 @@ async def save_contact_customer_followup(
 
     success_message = "接触顾客跟进状态已保存"
     if added_to_store_count:
-        success_message += f"，新增入门店顾客 {added_to_store_count} 位"
+        success_message += f"，新增入组局散客 {added_to_store_count} 位"
     if synced_store_link_count:
         success_message += f"，同步门店状态 {synced_store_link_count} 条"
 
@@ -20085,6 +20487,32 @@ async def get_customer_details(
             "jump_url": f"/maintenance-records?store={rec.store_name}&year={rec.record_date.year}&month={rec.record_date.month}&focus_record_id={rec.id}"
         })
 
+    complaint_wechat = _normalize_text(cust.wechat_id)
+    complained_filters = [CustomerComplaintRecord.complained_customer_id == cust.id]
+    complainant_filters = [CustomerComplaintRecord.complainant_customer_id == cust.id]
+    if complaint_wechat:
+        complained_filters.append(CustomerComplaintRecord.complained_wechat_id == complaint_wechat)
+        complainant_filters.append(CustomerComplaintRecord.complainant_wechat_id == complaint_wechat)
+
+    complained_records = session.exec(
+        select(CustomerComplaintRecord).where(
+            or_(*complained_filters)
+        ).order_by(
+            CustomerComplaintRecord.complaint_date.desc(),
+            CustomerComplaintRecord.created_at.desc(),
+            CustomerComplaintRecord.id.desc()
+        )
+    ).all()
+    complainant_records = session.exec(
+        select(CustomerComplaintRecord).where(
+            or_(*complainant_filters)
+        ).order_by(
+            CustomerComplaintRecord.complaint_date.desc(),
+            CustomerComplaintRecord.created_at.desc(),
+            CustomerComplaintRecord.id.desc()
+        )
+    ).all()
+
     return {
         "info": {
             "id": cust.id,
@@ -20099,6 +20527,8 @@ async def get_customer_details(
         "blacklist": blacklist_data,
         "play_frequency": play_data,
         "maintenance_records": maintenance_data,
+        "complained_records": [_customer_complaint_payload(record) for record in complained_records],
+        "complainant_records": [_customer_complaint_payload(record) for record in complainant_records],
         "can_manage_store_links": (user.role == "admin" or "operator")
     }
 
@@ -20117,7 +20547,7 @@ async def add_customer_store_link(
     # # 建议权限：仅 admin 可操作
     # if user.role != "admin""operator":
     #     return RedirectResponse(
-    #         url=f"/customers?store={current_store or '牛王庙店'}&error=无权限，仅超级管理员可新增顾客门店绑定",
+    #         url=f"/customers?store={current_store or '牛王庙店'}&error=无权限，仅超级管理员可新增组局散客门店绑定",
     #         status_code=303
     #     )
 
@@ -20162,7 +20592,7 @@ async def add_customer_store_link(
     session.commit()
 
     return RedirectResponse(
-        url=_build_customers_url(current_store or store_name, success="顾客门店绑定新增成功"),
+        url=_build_customers_url(current_store or store_name, success="组局散客门店绑定新增成功"),
         status_code=303
     )
 
@@ -20180,13 +20610,13 @@ async def update_customer_store_link(
 
     # if user.role != "admin":
     #     return RedirectResponse(
-    #         url=f"/customers?store={current_store or '牛王庙店'}&error=无权限，仅超级管理员可修改顾客门店绑定",
+    #         url=f"/customers?store={current_store or '牛王庙店'}&error=无权限，仅超级管理员可修改组局散客门店绑定",
     #         status_code=303
     #     )
 
     link = session.get(CustomerStoreLink, link_id)
     if not link:
-        raise HTTPException(status_code=404, detail="顾客门店绑定记录不存在")
+        raise HTTPException(status_code=404, detail="组局散客门店绑定记录不存在")
 
     new_store_name = (new_store_name or "").strip()
     if not new_store_name:
@@ -20222,7 +20652,7 @@ async def update_customer_store_link(
     session.commit()
 
     return RedirectResponse(
-        url=_build_customers_url(current_store or new_store_name, success="顾客门店绑定修改成功"),
+        url=_build_customers_url(current_store or new_store_name, success="组局散客门店绑定修改成功"),
         status_code=303
     )
 
@@ -20239,13 +20669,13 @@ async def delete_customer_store_link(
 
     # if user.role != "admin":
     #     return RedirectResponse(
-    #         url=f"/customers?store={current_store or '牛王庙店'}&error=无权限，仅超级管理员可撤销顾客门店绑定",
+    #         url=f"/customers?store={current_store or '牛王庙店'}&error=无权限，仅超级管理员可撤销组局散客门店绑定",
     #         status_code=303
     #     )
 
     link = session.get(CustomerStoreLink, link_id)
     if not link:
-        raise HTTPException(status_code=404, detail="顾客门店绑定记录不存在")
+        raise HTTPException(status_code=404, detail="组局散客门店绑定记录不存在")
 
     all_links = session.exec(
         select(CustomerStoreLink).where(CustomerStoreLink.customer_id == link.customer_id)
@@ -20261,7 +20691,7 @@ async def delete_customer_store_link(
     session.commit()
 
     return RedirectResponse(
-        url=_build_customers_url(current_store or link.store_name, success="顾客门店绑定已撤销"),
+        url=_build_customers_url(current_store or link.store_name, success="组局散客门店绑定已撤销"),
         status_code=303
     )
 
@@ -20904,9 +21334,10 @@ async def brand_store_data_page(
         # 传给 JS
         "trend_labels_json": json.dumps(stats["charts"]["trend_labels"], ensure_ascii=False),
         "revenue_trend_json": json.dumps(stats["charts"]["revenue_trend"], ensure_ascii=False),
-        "order_trend_json": json.dumps(stats["charts"]["order_trend"], ensure_ascii=False),
-        "revenue_composition_json": json.dumps(stats["charts"]["revenue_composition"], ensure_ascii=False),
+        "private_order_trend_json": json.dumps(stats["charts"]["private_order_trend"], ensure_ascii=False),
+        "self_arrival_order_trend_json": json.dumps(stats["charts"]["self_arrival_order_trend"], ensure_ascii=False),
         "customer_funnel_json": json.dumps(stats["charts"]["customer_funnel"], ensure_ascii=False),
+        "self_arrival_customer_funnel_json": json.dumps(stats["charts"]["self_arrival_customer_funnel"], ensure_ascii=False),
     })
 
 
@@ -22537,7 +22968,7 @@ async def api_handover_customer_search(
     keyword = (keyword or "").strip()
     limit = max(1, min(limit, 30))
 
-    # 先取当前门店顾客池里的 customer_id
+    # 先取当前门店组局散客池里的 customer_id
     customer_ids = session.exec(
         select(CustomerStoreLink.customer_id).where(CustomerStoreLink.store_name == store)
     ).all()

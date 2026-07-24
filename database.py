@@ -299,19 +299,45 @@ class CustomerStoreLink(SQLModel, table=True):
     customer_id: int = Field(foreign_key="customer.id")  # 关联顾客
     store_name: str  # 关联门店
 
-    # 顾客首次进入该门店顾客池的时间
+    # 顾客首次进入该门店组局散客池的时间
     created_at: date = Field(default_factory=date.today)
 
     # 可以在这里也加一个 last_visit，精确记录在这个店的最后一次时间
     last_visit_at_store: date = Field(default_factory=date.today)
 
-    # 门店顾客跟进信息，由店长在门店顾客列表中维护
+    # 组局散客跟进信息，由店长在组局散客列表中维护
     in_group_chat: bool = Field(default=False, index=True)
     has_tag: bool = Field(default=False, index=True)
     remark_updated: bool = Field(default=False, index=True)
     remark: Optional[str] = None
     followup_updated_at: datetime = Field(default_factory=datetime.now, index=True)
     followup_updated_by: Optional[str] = Field(default=None, index=True)
+
+
+class CustomerComplaintRecord(SQLModel, table=True):
+    """
+    客户异常行为及投诉记录。
+    不改 GameRecord 大表；用独立表保存投诉双方快照，并用可空 ID/微信号关联顾客。
+    """
+    __tablename__ = "customercomplaintrecord"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    store_name: str = Field(index=True)
+
+    complained_customer_id: Optional[int] = Field(default=None, foreign_key="customer.id", index=True)
+    complained_nickname: str = Field(index=True)
+    complained_wechat_id: str = Field(index=True)
+
+    complainant_customer_id: Optional[int] = Field(default=None, foreign_key="customer.id", index=True)
+    complainant_nickname: str = Field(index=True)
+    complainant_wechat_id: str = Field(index=True)
+
+    complaint_content: str
+    complaint_date: date = Field(default_factory=date.today, index=True)
+
+    source_game_id: Optional[int] = Field(default=None, foreign_key="gamerecord.id", index=True)
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    created_by: Optional[str] = Field(default=None, index=True)
 
 
 class ContactCustomerFollowup(SQLModel, table=True):
@@ -1436,6 +1462,7 @@ def create_db_and_tables():
     migrate_user_password_reset_fields()
     migrate_customer_soft_delete_fields()
     migrate_customer_store_link_table()
+    migrate_customer_complaint_record_table()
     migrate_contact_customer_followup_table()
     migrate_self_arrival_customer_table()
     migrate_new_customer_pull_record_table()
@@ -1481,6 +1508,46 @@ def migrate_customer_soft_delete_fields():
 
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customer_is_deleted ON customer(is_deleted)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customer_deleted_at ON customer(deleted_at)"))
+
+
+def migrate_customer_complaint_record_table():
+    """
+    客户异常行为及投诉记录表。
+    独立承载投诉业务，避免给 GameRecord 大表加列迁移。
+    """
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS customercomplaintrecord (
+                id INTEGER PRIMARY KEY,
+                store_name TEXT NOT NULL,
+                complained_customer_id INTEGER,
+                complained_nickname TEXT NOT NULL,
+                complained_wechat_id TEXT NOT NULL,
+                complainant_customer_id INTEGER,
+                complainant_nickname TEXT NOT NULL,
+                complainant_wechat_id TEXT NOT NULL,
+                complaint_content TEXT NOT NULL,
+                complaint_date DATE NOT NULL,
+                source_game_id INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT
+            )
+        """))
+        for col_name in [
+            "store_name",
+            "complained_customer_id",
+            "complained_wechat_id",
+            "complainant_customer_id",
+            "complainant_wechat_id",
+            "complaint_date",
+            "source_game_id",
+            "created_at",
+            "created_by",
+        ]:
+            conn.execute(text(f"""
+                CREATE INDEX IF NOT EXISTS ix_customercomplaintrecord_{col_name}
+                ON customercomplaintrecord ({col_name})
+            """))
 
 
 def migrate_shift_and_daily_salary_rules():
@@ -2009,7 +2076,7 @@ def migrate_customer_store_link_table():
     兼容老数据库：
     1. 如果 customerstorelink 表没有 created_at，则自动补上
     2. 如果 created_at 为空，则回填今天
-    3. 补充门店顾客跟进字段
+    3. 补充组局散客跟进字段
     """
     with engine.begin() as conn:
         # 检查表字段
@@ -3067,7 +3134,9 @@ def get_manager_performance_stats(
     {
       "operators": [...],
       "tables": [...],
-      "totals": {"tables": int}
+      "private_tables": [...],
+      "self_arrival_tables": [...],
+      "totals": {"tables": int, "private_tables": int, "self_arrival_tables": int}
     }
     """
     month_start, month_end = get_month_date_range(year, month)
@@ -3075,24 +3144,41 @@ def get_manager_performance_stats(
     # who_did 为空时归为“未标注”
     operator_col = func.coalesce(GameRecord.who_did, "未标注").label("operator")
 
-    # 1) 销售订单数 = 已组齐牌局数 + 自主到店登记数
+    # 1) 销售订单数 = 私域组局桌数 + 自主到店桌数
 
-    # 1.1 已组齐牌局
-    formed_stmt = (
+    # 1.1 私域组局：常规单 + 溢出单（排除自主到店单）
+    private_formed_stmt = (
         select(
             operator_col,
             func.count(GameRecord.id).label("cnt"),
         )
         .where(GameRecord.store_name == store_name)
         .where(GameRecord.status == "formed")
+        .where(func.coalesce(GameRecord.record_source, "normal") != "self_arrival")
         .where(GameRecord.record_date >= month_start)
         .where(GameRecord.record_date < month_end)
         .group_by(operator_col)
     )
-    formed_rows = session.exec(formed_stmt).all()
-    formed_map = {r.operator: int(r.cnt) for r in formed_rows}
+    private_formed_rows = session.exec(private_formed_stmt).all()
+    private_map = {r.operator: int(r.cnt) for r in private_formed_rows}
 
-    # 1.2 自主到店登记
+    # 1.2 自主到店：新口径来自 GameRecord.record_source=self_arrival
+    self_arrival_game_stmt = (
+        select(
+            operator_col,
+            func.count(GameRecord.id).label("cnt"),
+        )
+        .where(GameRecord.store_name == store_name)
+        .where(GameRecord.status == "formed")
+        .where(GameRecord.record_source == "self_arrival")
+        .where(GameRecord.record_date >= month_start)
+        .where(GameRecord.record_date < month_end)
+        .group_by(operator_col)
+    )
+    self_arrival_game_rows = session.exec(self_arrival_game_stmt).all()
+    self_arrival_map = {r.operator: int(r.cnt) for r in self_arrival_game_rows}
+
+    # 1.3 兼容旧自主到店登记表
     self_arrival_stmt = (
         select(
             func.coalesce(SelfArrivalRecord.operator_name, "未标注").label("operator"),
@@ -3104,13 +3190,14 @@ def get_manager_performance_stats(
         .group_by(func.coalesce(SelfArrivalRecord.operator_name, "未标注"))
     )
     self_arrival_rows = session.exec(self_arrival_stmt).all()
-    self_arrival_map = {r.operator: int(r.cnt) for r in self_arrival_rows}
+    for r in self_arrival_rows:
+        self_arrival_map[r.operator] = self_arrival_map.get(r.operator, 0) + int(r.cnt)
 
-    # 1.3 合并为销售订单总数
+    # 1.4 合并为销售订单总数
     sales_order_map = {}
-    all_sales_ops = set(formed_map.keys()) | set(self_arrival_map.keys())
+    all_sales_ops = set(private_map.keys()) | set(self_arrival_map.keys())
     for op in all_sales_ops:
-        sales_order_map[op] = formed_map.get(op, 0) + self_arrival_map.get(op, 0)
+        sales_order_map[op] = private_map.get(op, 0) + self_arrival_map.get(op, 0)
 
     # V3 员工管理联动：
     # 在职员工始终展示；已停用员工只展示到停用月份为止，下个月开始不展示
@@ -3126,14 +3213,20 @@ def get_manager_performance_stats(
     ]
 
     tables = [sales_order_map.get(op, 0) for op in operators]
+    private_tables = [private_map.get(op, 0) for op in operators]
+    self_arrival_tables = [self_arrival_map.get(op, 0) for op in operators]
 
     totals = {
         "tables": int(sum(tables)),
+        "private_tables": int(sum(private_tables)),
+        "self_arrival_tables": int(sum(self_arrival_tables)),
     }
 
     return {
         "operators": operators,
         "tables": tables,
+        "private_tables": private_tables,
+        "self_arrival_tables": self_arrival_tables,
         "totals": totals,
         "month_start": month_start,  # 便于前端展示（可选）
         "month_end": month_end,      # 便于前端展示（可选）

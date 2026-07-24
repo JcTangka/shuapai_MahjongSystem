@@ -2,8 +2,34 @@
 
 {% block title %}顾客管理 - 耍牌系统{% endblock %}
 
+{% block head_extra %}
+<style>
+.customer-autocomplete-wrapper { position: relative; }
+.customer-suggest-list {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 1080;
+    max-height: 220px;
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid rgba(0,0,0,.15);
+    border-radius: .375rem;
+    box-shadow: 0 .5rem 1rem rgba(0,0,0,.15);
+}
+.customer-suggest-item { padding: .5rem .75rem; cursor: pointer; border-bottom: 1px solid #f1f3f5; }
+.customer-suggest-item:last-child { border-bottom: 0; }
+.customer-suggest-item:hover { background: #f8f9fa; }
+.customer-suggest-name { font-weight: 700; }
+.customer-suggest-meta { color: #6c757d; font-size: .875rem; }
+.customer-suggest-empty { padding: .75rem; color: #6c757d; font-size: .875rem; }
+</style>
+{% endblock %}
+
 {% block breadcrumb %}
-<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 顾客管理 <span class="mx-2">/</span> {% if tab == 'public_traffic' %}公域流量池{% elif tab == 'contact_customers' %}我的接触顾客{% elif tab == 'self_arrival_users' %}自主到店用户{% elif tab == 'self_arrival_pending_users' %}自主到店待添加用户{% elif tab == 'old_to_new' %}老带新{% elif tab == 'my_new_customer_pull' %}我的待拉新{% elif tab == 'team_new_customer_pull' %}团队待拉新{% else %}门店顾客{% endif %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 顾客管理 <span class="mx-2">/</span> {% if tab == 'public_traffic' %}公域流量池{% elif tab == 'contact_customers' %}我的接触顾客{% elif tab == 'customer_complaints' %}客户异常行为及投诉记录{% elif tab == 'self_arrival_users' %}自主到店用户{% elif tab == 'self_arrival_pending_users' %}自主到店待添加用户{% elif tab == 'old_to_new' %}老带新{% elif tab == 'my_new_customer_pull' %}我的待拉新{% elif tab == 'team_new_customer_pull' %}团队待拉新{% else %}组局散客{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -20,10 +46,12 @@
                     记录公域端口引流顾客，并按全历史已组齐牌局自动识别转化。
                 {% elif tab == 'contact_customers' %}
                     按接待店长统计周期内接触过的顾客，并维护标签、群聊和备注跟进状态。
+                {% elif tab == 'customer_complaints' %}
+                    记录当前门店客户异常行为和投诉事项，并同步进顾客详情档案。
                 {% elif tab == 'self_arrival_users' %}
                     汇总已组齐牌局中自主到店登记产生的小程序用户，并补录微信资料。
                 {% elif tab == 'self_arrival_pending_users' %}
-                    跟进未添加微信的自主到店用户，补齐微信后自动转入门店顾客池。
+                    跟进未添加微信的自主到店用户，补齐微信后自动转入组局散客池。
                 {% elif tab == 'old_to_new' %}
                     统计周期内当前门店的新客中，尚未登记到公域流量池的顾客数量。
                 {% elif tab == 'my_new_customer_pull' %}
@@ -31,7 +59,7 @@
                 {% elif tab == 'team_new_customer_pull' %}
                     团队查看目前耍牌万能替身号占位符，并跟进实际拉新。
                 {% else %}
-                    维护各门店顾客资料、门店绑定和同场记录。
+                    维护各门店组局散客资料、门店绑定和同场记录。
                 {% endif %}
             </div>
         </div>
@@ -40,6 +68,10 @@
     {% if tab == 'public_traffic' %}
     <button class="btn btn-primary text-white rounded-pill px-4" data-bs-toggle="modal" data-bs-target="#addPublicTrafficLeadModal">
         <i class="bi bi-person-plus-fill me-1"></i>登记公域流量顾客
+    </button>
+    {% elif tab == 'customer_complaints' %}
+    <button class="btn btn-primary text-white rounded-pill px-4" data-bs-toggle="modal" data-bs-target="#addCustomerComplaintModal">
+        <i class="bi bi-plus-circle me-1"></i>新增投诉记录
     </button>
     {% elif tab in ['contact_customers', 'self_arrival_users', 'self_arrival_pending_users', 'old_to_new', 'my_new_customer_pull', 'team_new_customer_pull'] %}
     {% else %}
@@ -338,6 +370,127 @@
         <span id="customerLoadText">已显示 {{ loaded_customer_count or 0 }} / {{ total_customer_count or 0 }} 条，滚动到底部继续加载</span>
     {% elif total_customer_count %}
         已显示全部 {{ total_customer_count or 0 }} 条
+    {% endif %}
+</div>
+{% elif tab == 'customer_complaints' %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div class="d-flex align-items-center">
+        <label class="me-2 fw-bold text-secondary">当前门店：</label>
+        <div class="dropdown">
+            <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                {{ current_store }}
+            </button>
+            <ul class="dropdown-menu">
+                {% for store_name in store_list %}
+                <li>
+                    <a class="dropdown-item {% if store_name == current_store %}active{% endif %}"
+                       href="/customers?store={{ store_name }}&tab=customer_complaints">
+                       {{ store_name }}
+                    </a>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-md-12">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="text-secondary small mb-1">当前门店投诉记录数</div>
+                <div class="h3 fw-bold mb-0">{{ complaint_record_count or 0 }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+    <div class="card-body p-0">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th>序号</th>
+                    <th>被投诉人</th>
+                    <th>投诉人</th>
+                    <th class="text-start" style="min-width: 280px;">投诉内容</th>
+                    <th>投诉日期</th>
+                    <th>登记人</th>
+                    <th>登记时间</th>
+                    <th style="width: 130px;">操作</th>
+                </tr>
+            </thead>
+            <tbody id="customerComplaintTbody">
+                {% for item in complaint_record_list %}
+                <tr id="customer-complaint-row-{{ item.id }}">
+                    <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
+                    <td>
+                        <div class="fw-bold">{{ item.complained_nickname }}</div>
+                        <div class="small text-muted">{{ item.complained_wechat_id }}</div>
+                    </td>
+                    <td>
+                        <div class="fw-bold">{{ item.complainant_nickname }}</div>
+                        <div class="small text-muted">{{ item.complainant_wechat_id }}</div>
+                    </td>
+                    <td class="text-start">
+                        <div class="text-truncate"
+                             style="max-width: 420px;"
+                             title="{{ item.complaint_content }}">
+                            {{ item.complaint_content }}
+                        </div>
+                    </td>
+                    <td>{{ item.complaint_date }}</td>
+                    <td>{{ item.created_by or '-' }}</td>
+                    <td class="small text-muted">{{ item.created_at or '-' }}</td>
+                    <td>
+                        <div class="d-inline-flex gap-2">
+                            <button type="button"
+                                    class="btn btn-sm btn-outline-primary"
+                                    data-record-id="{{ item.id }}"
+                                    data-complained-customer-id="{{ item.complained_customer_id or '' }}"
+                                    data-complained-nickname="{{ item.complained_nickname }}"
+                                    data-complained-wechat="{{ item.complained_wechat_id }}"
+                                    data-complainant-nickname="{{ item.complainant_nickname }}"
+                                    data-complainant-wechat="{{ item.complainant_wechat_id }}"
+                                    data-complaint-date="{{ item.complaint_date }}"
+                                    data-complaint-content="{{ item.complaint_content }}"
+                                    onclick="openEditCustomerComplaintModal(this)">
+                                编辑
+                            </button>
+                            <form action="/customer-complaints/{{ item.id }}/delete"
+                                  method="post"
+                                  class="d-inline"
+                                  onsubmit="return confirm('确定删除这条投诉记录吗？');">
+                                <input type="hidden" name="store" value="{{ current_store }}">
+                                <button type="submit" class="btn btn-sm btn-outline-danger">删除</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="8" class="text-muted py-5">
+                        <i class="bi bi-exclamation-octagon fs-1 d-block mb-3"></i>
+                        当前门店暂无客户异常行为及投诉记录。
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div id="customerComplaintInfiniteLoader"
+     class="text-center text-muted py-3"
+     data-loaded="{{ complaint_loaded_count or 0 }}"
+     data-total="{{ complaint_record_count or 0 }}"
+     data-page-size="{{ list_page_size or 40 }}"
+     data-has-more="{{ 'true' if complaint_has_more else 'false' }}">
+    {% if complaint_has_more %}
+        <span class="spinner-border spinner-border-sm me-2 d-none" id="customerComplaintLoadSpinner"></span>
+        <span id="customerComplaintLoadText">已显示 {{ complaint_loaded_count or 0 }} / {{ complaint_record_count or 0 }} 条，滚动到底部继续加载</span>
+    {% elif complaint_record_count %}
+        已显示全部 {{ complaint_record_count or 0 }} 条
     {% endif %}
 </div>
 {% elif tab == 'public_traffic' %}
@@ -1093,6 +1246,154 @@
 </div>
 {% endif %}
 
+<div class="modal fade" id="addCustomerComplaintModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-exclamation-octagon me-2"></i>新增投诉记录</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form action="/customer-complaints/add" method="post" autocomplete="off">
+                <input type="hidden" name="store" value="{{ current_store }}">
+                <input type="hidden" name="complained_customer_id" id="complaint_complained_customer_id" value="">
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">被投诉人微信昵称</label>
+                            <div class="customer-autocomplete-wrapper">
+                                <input type="text"
+                                       class="form-control"
+                                       name="complained_nickname"
+                                       id="complaint_complained_nickname"
+                                       data-complaint-search-input="1"
+                                       placeholder="输入昵称或微信号检索当前组局散客"
+                                       required>
+                                <div class="customer-suggest-list" id="complaintCustomerSuggestList"></div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">被投诉人微信号</label>
+                            <input type="text"
+                                   class="form-control"
+                                   name="complained_wechat_id"
+                                   id="complaint_complained_wechat"
+                                   data-complaint-search-input="1"
+                                   placeholder="选择顾客后自动回填，也可手动填写"
+                                   required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">投诉人微信昵称</label>
+                            <div class="customer-autocomplete-wrapper">
+                                <input type="text"
+                                       class="form-control"
+                                       name="complainant_nickname"
+                                       id="complaint_complainant_nickname"
+                                       placeholder="输入昵称或微信号检索当前组局散客"
+                                       required>
+                                <div class="customer-suggest-list" id="complainantCustomerSuggestList"></div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">投诉人微信号</label>
+                            <input type="text"
+                                   class="form-control"
+                                   name="complainant_wechat_id"
+                                   id="complaint_complainant_wechat"
+                                   placeholder="选择顾客后自动回填，也可手动填写"
+                                   required>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold">日期</label>
+                            <input type="date" class="form-control" name="complaint_date" value="{{ today_date or '' }}" required>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label fw-bold">投诉内容</label>
+                            <textarea class="form-control" name="complaint_content" rows="5" required></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary px-4">确定新增</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="editCustomerComplaintModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>编辑投诉记录</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form action="" method="post" autocomplete="off" id="editCustomerComplaintForm">
+                <input type="hidden" name="store" value="{{ current_store }}">
+                <input type="hidden" name="complained_customer_id" id="edit_complaint_complained_customer_id" value="">
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">被投诉人微信昵称</label>
+                            <div class="customer-autocomplete-wrapper">
+                                <input type="text"
+                                       class="form-control"
+                                       name="complained_nickname"
+                                       id="edit_complaint_complained_nickname"
+                                       placeholder="输入昵称或微信号检索当前组局散客"
+                                       required>
+                                <div class="customer-suggest-list" id="editComplaintCustomerSuggestList"></div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">被投诉人微信号</label>
+                            <input type="text"
+                                   class="form-control"
+                                   name="complained_wechat_id"
+                                   id="edit_complaint_complained_wechat"
+                                   placeholder="选择顾客后自动回填，也可手动填写"
+                                   required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">投诉人微信昵称</label>
+                            <div class="customer-autocomplete-wrapper">
+                                <input type="text"
+                                       class="form-control"
+                                       name="complainant_nickname"
+                                       id="edit_complaint_complainant_nickname"
+                                       placeholder="输入昵称或微信号检索当前组局散客"
+                                       required>
+                                <div class="customer-suggest-list" id="editComplainantCustomerSuggestList"></div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">投诉人微信号</label>
+                            <input type="text"
+                                   class="form-control"
+                                   name="complainant_wechat_id"
+                                   id="edit_complaint_complainant_wechat"
+                                   placeholder="选择顾客后自动回填，也可手动填写"
+                                   required>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold">日期</label>
+                            <input type="date" class="form-control" name="complaint_date" id="edit_complaint_date" required>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label fw-bold">投诉内容</label>
+                            <textarea class="form-control" name="complaint_content" id="edit_complaint_content" rows="5" required></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary px-4">保存修改</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 <div class="modal fade" id="addPublicTrafficLeadModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -1364,9 +1665,26 @@
                         </div>
                     </div>
                     <div class="col-md-6">
-                        <div class="card border-0 shadow-sm opacity-50">
-                            <div class="card-header bg-white">被投诉记录 (开发中)</div>
-                            <div class="card-body text-center p-2"><small>暂无数据</small></div>
+                        <div class="card border-0 shadow-sm">
+                            <div class="card-header bg-white fw-bold">
+                                <i class="bi bi-exclamation-octagon me-1 text-danger"></i> 被投诉记录
+                            </div>
+                            <div class="card-body custom-scrollbar" style="max-height: 220px; overflow-y: auto;">
+                                <div id="complained_records_box" class="small text-muted">
+                                    暂无数据
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card border-0 shadow-sm mt-3">
+                    <div class="card-header bg-white fw-bold">
+                        <i class="bi bi-chat-left-text me-1 text-primary"></i> 投诉记录
+                    </div>
+                    <div class="card-body custom-scrollbar" style="max-height: 220px; overflow-y: auto;">
+                        <div id="complainant_records_box" class="small text-muted">
+                            暂无数据
                         </div>
                     </div>
                 </div>
@@ -1397,7 +1715,156 @@
                 keyboard: false
             });
         }
+
+        setupComplaintCustomerAutocomplete();
+
+        const complaintModal = document.getElementById('addCustomerComplaintModal');
+        if (complaintModal) {
+            complaintModal.addEventListener('hidden.bs.modal', function() {
+                ['complaintCustomerSuggestList', 'complainantCustomerSuggestList', 'editComplaintCustomerSuggestList', 'editComplainantCustomerSuggestList'].forEach(id => {
+                    const suggestBox = document.getElementById(id);
+                    if (suggestBox) {
+                        suggestBox.style.display = 'none';
+                        suggestBox.innerHTML = '';
+                    }
+                });
+                const hiddenId = document.getElementById('complaint_complained_customer_id');
+                if (hiddenId) hiddenId.value = '';
+            });
+        }
+
+        const editComplaintModal = document.getElementById('editCustomerComplaintModal');
+        if (editComplaintModal) {
+            editComplaintModal.addEventListener('hidden.bs.modal', function() {
+                ['editComplaintCustomerSuggestList', 'editComplainantCustomerSuggestList'].forEach(id => {
+                    const suggestBox = document.getElementById(id);
+                    if (suggestBox) {
+                        suggestBox.style.display = 'none';
+                        suggestBox.innerHTML = '';
+                    }
+                });
+            });
+        }
     });
+
+    function setupComplaintCustomerAutocomplete() {
+        setupComplaintPersonAutocomplete({
+            nicknameInputId: 'complaint_complained_nickname',
+            wechatInputId: 'complaint_complained_wechat',
+            suggestBoxId: 'complaintCustomerSuggestList',
+            hiddenCustomerIdId: 'complaint_complained_customer_id',
+        });
+        setupComplaintPersonAutocomplete({
+            nicknameInputId: 'complaint_complainant_nickname',
+            wechatInputId: 'complaint_complainant_wechat',
+            suggestBoxId: 'complainantCustomerSuggestList',
+            hiddenCustomerIdId: null,
+        });
+        setupComplaintPersonAutocomplete({
+            nicknameInputId: 'edit_complaint_complained_nickname',
+            wechatInputId: 'edit_complaint_complained_wechat',
+            suggestBoxId: 'editComplaintCustomerSuggestList',
+            hiddenCustomerIdId: 'edit_complaint_complained_customer_id',
+        });
+        setupComplaintPersonAutocomplete({
+            nicknameInputId: 'edit_complaint_complainant_nickname',
+            wechatInputId: 'edit_complaint_complainant_wechat',
+            suggestBoxId: 'editComplainantCustomerSuggestList',
+            hiddenCustomerIdId: null,
+        });
+    }
+
+    function setupComplaintPersonAutocomplete(config) {
+        const nicknameInput = document.getElementById(config.nicknameInputId);
+        const wechatInput = document.getElementById(config.wechatInputId);
+        const suggestBox = document.getElementById(config.suggestBoxId);
+        const hiddenId = config.hiddenCustomerIdId ? document.getElementById(config.hiddenCustomerIdId) : null;
+        let searchTimer = null;
+
+        if (!nicknameInput || !wechatInput || !suggestBox) return;
+
+        async function searchComplaintCustomer() {
+            const keyword = (nicknameInput.value || wechatInput.value || '').trim();
+            if (hiddenId) hiddenId.value = '';
+            if (!keyword) {
+                suggestBox.style.display = 'none';
+                suggestBox.innerHTML = '';
+                return;
+            }
+
+            try {
+                const resp = await fetch(`/api/customer-search?keyword=${encodeURIComponent(keyword)}&store_name=${encodeURIComponent('{{ current_store }}')}&limit=8`);
+                const data = await resp.json();
+                if (!Array.isArray(data) || data.length === 0) {
+                    suggestBox.innerHTML = '<div class="customer-suggest-empty">未找到当前组局散客，可继续手动填写</div>';
+                    suggestBox.style.display = 'block';
+                    return;
+                }
+
+                suggestBox.innerHTML = data.map(item => `
+                    <div class="customer-suggest-item"
+                         data-id="${escapeHtml(item.id)}"
+                         data-nickname="${escapeHtml(item.nickname || '')}"
+                         data-wechat="${escapeHtml(item.wechat_id || '')}">
+                        <div class="customer-suggest-name">${escapeHtml(item.nickname || '-')}</div>
+                        <div class="customer-suggest-meta">微信号：${escapeHtml(item.wechat_id || '-')}</div>
+                    </div>
+                `).join('');
+                suggestBox.style.display = 'block';
+            } catch (error) {
+                console.error(error);
+                suggestBox.innerHTML = '<div class="customer-suggest-empty">检索失败，请稍后重试</div>';
+                suggestBox.style.display = 'block';
+            }
+        }
+
+        function scheduleComplaintCustomerSearch() {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(searchComplaintCustomer, 220);
+        }
+
+        [nicknameInput, wechatInput].forEach(input => {
+            input.addEventListener('input', scheduleComplaintCustomerSearch);
+            input.addEventListener('focus', scheduleComplaintCustomerSearch);
+        });
+
+        suggestBox.addEventListener('click', function(event) {
+            const item = event.target.closest('.customer-suggest-item');
+            if (!item) return;
+            if (hiddenId) hiddenId.value = item.dataset.id || '';
+            nicknameInput.value = item.dataset.nickname || '';
+            wechatInput.value = item.dataset.wechat || '';
+            suggestBox.style.display = 'none';
+            suggestBox.innerHTML = '';
+        });
+
+        document.addEventListener('click', function(event) {
+            if (
+                !event.target.closest('#addCustomerComplaintModal .customer-autocomplete-wrapper') &&
+                !event.target.closest('#editCustomerComplaintModal .customer-autocomplete-wrapper')
+            ) {
+                suggestBox.style.display = 'none';
+            }
+        });
+    }
+
+    function openEditCustomerComplaintModal(button) {
+        const form = document.getElementById('editCustomerComplaintForm');
+        if (!form || !button) return;
+
+        const recordId = button.dataset.recordId || '';
+        form.action = `/customer-complaints/${encodeURIComponent(recordId)}/update`;
+
+        document.getElementById('edit_complaint_complained_customer_id').value = button.dataset.complainedCustomerId || '';
+        document.getElementById('edit_complaint_complained_nickname').value = button.dataset.complainedNickname || '';
+        document.getElementById('edit_complaint_complained_wechat').value = button.dataset.complainedWechat || '';
+        document.getElementById('edit_complaint_complainant_nickname').value = button.dataset.complainantNickname || '';
+        document.getElementById('edit_complaint_complainant_wechat').value = button.dataset.complainantWechat || '';
+        document.getElementById('edit_complaint_date').value = button.dataset.complaintDate || '';
+        document.getElementById('edit_complaint_content').value = button.dataset.complaintContent || '';
+
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('editCustomerComplaintModal')).show();
+    }
 
     async function openDetailModal(customerId) {
         currentCustomerId = customerId;
@@ -1410,6 +1877,8 @@
         document.getElementById('play_freq_tbody').innerHTML = '<tr><td colspan="2">加载中...</td></tr>';
         document.getElementById('blacklist_tbody').innerHTML = '<tr><td colspan="4">加载中...</td></tr>';
         document.getElementById('maintenance_records_box').innerHTML = '<div class="text-muted small text-center py-2">加载中...</div>';
+        document.getElementById('complained_records_box').innerHTML = '<div class="text-muted small text-center py-2">加载中...</div>';
+        document.getElementById('complainant_records_box').innerHTML = '<div class="text-muted small text-center py-2">加载中...</div>';
 
         try {
             const response = await fetch(`/customer/${customerId}`);
@@ -1437,6 +1906,8 @@
             renderPlayFrequency(data.play_frequency || []);
             renderBlacklist(data.blacklist || []);
             renderMaintenanceRecords(data.maintenance_records || []);
+            renderCustomerComplaintRecords('complained_records_box', data.complained_records || [], 'complainant');
+            renderCustomerComplaintRecords('complainant_records_box', data.complainant_records || [], 'complained');
         } catch (error) {
             console.error(error);
             alert("获取数据失败");
@@ -1630,6 +2101,40 @@
         });
     }
 
+    function renderCustomerComplaintRecords(boxId, list, counterpartType) {
+        const box = document.getElementById(boxId);
+        if (!box) return;
+        box.innerHTML = '';
+
+        if (list.length === 0) {
+            box.innerHTML = '<div class="text-muted small text-center py-2">暂无记录</div>';
+            return;
+        }
+
+        list.forEach(item => {
+            const counterpartName = counterpartType === 'complainant'
+                ? item.complainant_nickname
+                : item.complained_nickname;
+            const counterpartWechat = counterpartType === 'complainant'
+                ? item.complainant_wechat_id
+                : item.complained_wechat_id;
+            const label = counterpartType === 'complainant' ? '投诉人' : '被投诉人';
+            box.innerHTML += `
+                <div class="border rounded p-2 mb-2 bg-white">
+                    <div class="d-flex justify-content-between align-items-start gap-2">
+                        <div>
+                            <div class="fw-bold text-dark">${escapeHtml(item.complaint_date || '-')}</div>
+                            <div class="small text-muted">门店：${escapeHtml(item.store_name || '-')}</div>
+                            <div class="small text-muted">${label}：${escapeHtml(counterpartName || '-')} / ${escapeHtml(counterpartWechat || '-')}</div>
+                        </div>
+                        <div class="small text-muted text-nowrap">${escapeHtml(item.created_by || '')}</div>
+                    </div>
+                    <div class="mt-2 text-dark" style="white-space: pre-line;">${escapeHtml(item.complaint_content || '')}</div>
+                </div>
+            `;
+        });
+    }
+
     async function addCustomerStoreBinding() {
         if (!canManageStoreLinks) {
             alert('无权限操作');
@@ -1809,6 +2314,60 @@
             if (entries.some(entry => entry.isIntersecting)) loadMoreCustomers();
         }, { rootMargin: '240px 0px', threshold: 0.01 });
         customerInfiniteObserver.observe(loader);
+    }
+
+    let customerComplaintInfiniteObserver = null;
+    let customerComplaintLoadingMore = false;
+
+    async function loadMoreCustomerComplaints() {
+        const loader = document.getElementById('customerComplaintInfiniteLoader');
+        const tbody = document.getElementById('customerComplaintTbody');
+        if (!loader || !tbody || customerComplaintLoadingMore || loader.dataset.hasMore !== 'true') return;
+
+        customerComplaintLoadingMore = true;
+        const spinner = document.getElementById('customerComplaintLoadSpinner');
+        const text = document.getElementById('customerComplaintLoadText');
+        if (spinner) spinner.classList.remove('d-none');
+        if (text) text.textContent = '正在加载更多...';
+
+        const loaded = parseInt(loader.dataset.loaded || '0', 10) || 0;
+        const pageSize = parseInt(loader.dataset.pageSize || '40', 10) || 40;
+        const url = new URL(window.location.href);
+        url.searchParams.set('list_offset', String(loaded));
+        url.searchParams.set('list_limit', String(pageSize));
+
+        try {
+            const resp = await fetch(url.toString(), { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            if (!resp.ok) throw new Error('加载失败');
+            const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+            doc.querySelectorAll('tr[id^="customer-complaint-row-"]').forEach(row => {
+                if (!document.getElementById(row.id)) tbody.appendChild(document.importNode(row, true));
+            });
+            const newLoader = doc.getElementById('customerComplaintInfiniteLoader');
+            if (newLoader) {
+                loader.dataset.loaded = newLoader.dataset.loaded || loader.dataset.loaded;
+                loader.dataset.total = newLoader.dataset.total || loader.dataset.total;
+                loader.dataset.hasMore = newLoader.dataset.hasMore || 'false';
+                loader.innerHTML = newLoader.innerHTML;
+            }
+        } catch (err) {
+            console.error(err);
+            loader.innerHTML = '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadMoreCustomerComplaints()">加载失败，点击重试</button>';
+            loader.dataset.hasMore = 'true';
+        } finally {
+            customerComplaintLoadingMore = false;
+            setupCustomerComplaintInfiniteScroll();
+        }
+    }
+
+    function setupCustomerComplaintInfiniteScroll() {
+        const loader = document.getElementById('customerComplaintInfiniteLoader');
+        if (customerComplaintInfiniteObserver) customerComplaintInfiniteObserver.disconnect();
+        if (!loader || loader.dataset.hasMore !== 'true') return;
+        customerComplaintInfiniteObserver = new IntersectionObserver(entries => {
+            if (entries.some(entry => entry.isIntersecting)) loadMoreCustomerComplaints();
+        }, { rootMargin: '240px 0px', threshold: 0.01 });
+        customerComplaintInfiniteObserver.observe(loader);
     }
 
     let publicTrafficInfiniteObserver = null;
@@ -2268,6 +2827,7 @@
         togglePullCustomDateRange();
         toggleSelfArrivalCustomDateRange();
         setupPublicTrafficInfiniteScroll();
+        setupCustomerComplaintInfiniteScroll();
         setupSelfArrivalWechatStatusSync();
         setupSelfArrivalUsersFormGuard();
         setupSelfArrivalUserInfiniteScroll();

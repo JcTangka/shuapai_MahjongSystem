@@ -130,7 +130,7 @@
                             <li>
                                 <a href="/customers?store={{ current_store }}&tab=store_customers"
                                    class="nav-link ms-4 {% if page_name == 'customers' and (tab|default('store_customers')) == 'store_customers' %}active{% endif %}">
-                                    <i class="bi bi-shop me-2"></i>门店顾客
+                                    <i class="bi bi-shop me-2"></i>组局散客
                                 </a>
                             </li>
                             <li>
@@ -143,6 +143,12 @@
                                 <a href="/customers?store={{ current_store }}&tab=contact_customers"
                                    class="nav-link ms-4 {% if page_name == 'customers' and tab == 'contact_customers' %}active{% endif %}">
                                     <i class="bi bi-person-lines-fill me-2"></i>我的接触顾客
+                                </a>
+                            </li>
+                            <li>
+                                <a href="/customers?store={{ current_store }}&tab=customer_complaints"
+                                   class="nav-link ms-4 {% if page_name == 'customers' and tab == 'customer_complaints' %}active{% endif %}">
+                                    <i class="bi bi-exclamation-octagon me-2"></i>客户异常行为及投诉记录
                                 </a>
                             </li>
                             <li>
