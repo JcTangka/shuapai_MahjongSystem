@@ -21,7 +21,9 @@ import itertools
 #  导入数据库模型
 from database import (GameRecord, GamePaymentItem, Store, Room, User,
                       Customer, CustomerStoreLink, CustomerComplaintRecord,
-                      Blacklist, BrandBlacklistEntry, PlayFrequency, CustomerPlayTypeStat, create_db_and_tables, get_session,
+                      Blacklist, BrandBlacklistEntry, PlayFrequency, CustomerPlayTypeStat,
+                      GameSmokeSetting, CustomerRecommendationBlock, CustomerRecommendationTimeBucketStat,
+                      create_db_and_tables, get_session,
                       ShiftSchedule, MaintenanceRecord, upsert_shift, get_month_shifts_map, get_month_date_range, normalize_shift_type,
                       get_manager_performance_stats, get_shift_performance_stats,
                       HandoverTodo, HandoverTodoCustomerLink, FormedGameHandoverLink,SelfArrivalRecord,
@@ -4169,6 +4171,20 @@ FORMED_SOURCE_OPTIONS = {
     FORMED_SOURCE_OVERFLOW,
 }
 
+SMOKE_TYPE_SMOKING = "smoking"
+SMOKE_TYPE_NON_SMOKING = "non_smoking"
+SMOKE_TYPE_OPTIONS = {SMOKE_TYPE_SMOKING, SMOKE_TYPE_NON_SMOKING}
+SMOKE_TYPE_LABEL_MAP = {
+    SMOKE_TYPE_SMOKING: "有烟局",
+    SMOKE_TYPE_NON_SMOKING: "无烟局",
+}
+RECOMMENDATION_BLOCK_TEMPORARY = "temporary"
+RECOMMENDATION_BLOCK_PERMANENT = "permanent"
+RECOMMENDATION_BLOCK_MODES = {
+    RECOMMENDATION_BLOCK_TEMPORARY,
+    RECOMMENDATION_BLOCK_PERMANENT,
+}
+
 FORMED_GAMES_PAGE_SIZE = 40
 LIST_PAGE_SIZE = 40
 PUBLIC_TRAFFIC_SOURCE_PORTS = ("小红书", "抖音")
@@ -4748,6 +4764,43 @@ def _parse_order_start_dt(value: Optional[str]) -> Optional[datetime]:
     return None
 
 
+def _recommendation_game_start_dt(game: GameRecord) -> datetime:
+    return _parse_order_start_dt(game.order_start_time) or _game_effective_order_dt(game)
+
+
+def _recommendation_game_end_dt(game: GameRecord) -> datetime:
+    return _parse_order_start_dt(game.order_end_time) or (_recommendation_game_start_dt(game) + timedelta(hours=4))
+
+
+def _game_is_unended_for_recommendation(game: GameRecord, now: Optional[datetime] = None) -> bool:
+    if _normalize_text(game.status) != "formed":
+        return False
+    current_dt = now or datetime.now()
+    return current_dt < _recommendation_game_end_dt(game)
+
+
+def get_unended_recommendation_player_wechats(
+        session: Session,
+        store_name: Optional[str] = None,
+        now: Optional[datetime] = None
+) -> set:
+    stmt = select(GameRecord).where(GameRecord.status == "formed")
+    clean_store_name = _normalize_text(store_name)
+    if clean_store_name:
+        stmt = stmt.where(GameRecord.store_name == clean_store_name)
+
+    result = set()
+    current_dt = now or datetime.now()
+    for game in session.exec(stmt).all():
+        if not _game_is_unended_for_recommendation(game, current_dt):
+            continue
+        for idx in range(1, 5):
+            wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+            if wechat_id:
+                result.add(wechat_id)
+    return result
+
+
 def _new_customer_pull_source_label(record: NewCustomerPullRecord) -> str:
     order_text = record.order_start_time.strftime("%Y-%m-%d %H:%M") if record.order_start_time else ""
     room_text = _normalize_text(record.room_name) or "-"
@@ -4981,6 +5034,189 @@ def sync_customer_play_type_stats_for_changed_games(session: Session, *game_vers
 
     for wechat_id, play_label in sorted(affected_keys):
         _recompute_customer_play_type_stat_key(session, wechat_id, play_label)
+
+def _normalize_smoke_type(value: Optional[str]) -> str:
+    value = _normalize_text(value)
+    return value if value in SMOKE_TYPE_OPTIONS else SMOKE_TYPE_SMOKING
+
+def _game_smoke_type_value(game_or_snapshot) -> str:
+    return _normalize_smoke_type(_game_value(game_or_snapshot, "smoke_type"))
+
+def get_game_smoke_type(session: Session, game_id: Optional[int]) -> str:
+    if not game_id:
+        return SMOKE_TYPE_SMOKING
+    row = session.exec(
+        select(GameSmokeSetting).where(GameSmokeSetting.game_id == game_id)
+    ).first()
+    return _normalize_smoke_type(row.smoke_type if row else None)
+
+def get_game_smoke_type_map(session: Session, game_ids: List[int]) -> Dict[int, str]:
+    clean_ids = sorted({int(gid) for gid in game_ids if gid})
+    if not clean_ids:
+        return {}
+    rows = session.exec(
+        select(GameSmokeSetting).where(GameSmokeSetting.game_id.in_(clean_ids))
+    ).all()
+    result = {row.game_id: _normalize_smoke_type(row.smoke_type) for row in rows}
+    for gid in clean_ids:
+        result.setdefault(gid, SMOKE_TYPE_SMOKING)
+    return result
+
+def upsert_game_smoke_setting(
+        session: Session,
+        game_id: Optional[int],
+        smoke_type: Optional[str],
+        updated_by: Optional[str] = None
+) -> Optional[GameSmokeSetting]:
+    if not game_id:
+        return None
+    clean_smoke_type = _normalize_smoke_type(smoke_type)
+    row = session.exec(
+        select(GameSmokeSetting).where(GameSmokeSetting.game_id == game_id)
+    ).first()
+    now = datetime.now()
+    if not row:
+        row = GameSmokeSetting(
+            game_id=game_id,
+            smoke_type=clean_smoke_type,
+            created_at=now,
+        )
+    row.smoke_type = clean_smoke_type
+    row.updated_at = now
+    row.updated_by = updated_by
+    session.add(row)
+    return row
+
+
+def delete_game_smoke_setting(session: Session, game_id: Optional[int]) -> None:
+    if not game_id:
+        return
+    rows = session.exec(
+        select(GameSmokeSetting).where(GameSmokeSetting.game_id == game_id)
+    ).all()
+    for row in rows:
+        session.delete(row)
+
+
+def _game_recommendation_time_snapshot(session: Session, game: GameRecord) -> dict:
+    snapshot = _game_snapshot_for_play_type_stats(game)
+    snapshot["store_name"] = game.store_name
+    snapshot["smoke_type"] = get_game_smoke_type(session, game.id)
+    return snapshot
+
+def _game_recommendation_time_bucket(game_or_snapshot) -> int:
+    played_at = _game_play_type_played_at(game_or_snapshot)
+    return max(0, min(11, int(played_at.hour // 2)))
+
+def _game_recommendation_time_stat_keys(game_or_snapshot) -> List[Tuple[str, str, str, str, int]]:
+    if _normalize_text(_game_value(game_or_snapshot, "status")) != "formed":
+        return []
+    if _normalize_text(_game_value(game_or_snapshot, "record_source")) == FORMED_SOURCE_SELF_ARRIVAL:
+        return []
+
+    store_name = _normalize_text(_game_value(game_or_snapshot, "store_name"))
+    play_label = _game_play_type_label(game_or_snapshot)
+    if not store_name or not play_label:
+        return []
+
+    smoke_type = _game_smoke_type_value(game_or_snapshot)
+    time_bucket = _game_recommendation_time_bucket(game_or_snapshot)
+    result = []
+    seen = set()
+    for idx in range(1, 5):
+        wx = _normalize_text(_game_value(game_or_snapshot, f"player_{idx}_wechat"))
+        if not wx or wx in seen:
+            continue
+        seen.add(wx)
+        result.append((wx, store_name, play_label, smoke_type, time_bucket))
+    return result
+
+def _recompute_customer_recommendation_time_bucket_stat_key(
+        session: Session,
+        wechat_id: str,
+        store_name: str,
+        play_label: str,
+        smoke_type: str,
+        time_bucket: int
+):
+    games = session.exec(
+        select(GameRecord).where(
+            GameRecord.status == "formed",
+            GameRecord.record_source != FORMED_SOURCE_SELF_ARRIVAL,
+            GameRecord.store_name == store_name,
+            or_(
+                GameRecord.player_1_wechat == wechat_id,
+                GameRecord.player_2_wechat == wechat_id,
+                GameRecord.player_3_wechat == wechat_id,
+                GameRecord.player_4_wechat == wechat_id,
+            )
+        )
+    ).all()
+    smoke_by_game_id = get_game_smoke_type_map(session, [g.id for g in games if g.id])
+
+    count = 0
+    last_played_at = None
+    for game in games:
+        if _game_play_type_label(game) != play_label:
+            continue
+        if smoke_by_game_id.get(game.id, SMOKE_TYPE_SMOKING) != smoke_type:
+            continue
+        if _game_recommendation_time_bucket(game) != time_bucket:
+            continue
+        if not any(
+            _normalize_text(getattr(game, f"player_{idx}_wechat", None)) == wechat_id
+            for idx in range(1, 5)
+        ):
+            continue
+        played_at = _game_play_type_played_at(game)
+        count += 1
+        if last_played_at is None or played_at > last_played_at:
+            last_played_at = played_at
+
+    stat = session.exec(
+        select(CustomerRecommendationTimeBucketStat).where(
+            CustomerRecommendationTimeBucketStat.wechat_id == wechat_id,
+            CustomerRecommendationTimeBucketStat.store_name == store_name,
+            CustomerRecommendationTimeBucketStat.play_label == play_label,
+            CustomerRecommendationTimeBucketStat.smoke_type == smoke_type,
+            CustomerRecommendationTimeBucketStat.time_bucket == time_bucket,
+        )
+    ).first()
+
+    if count <= 0 or last_played_at is None:
+        if stat:
+            session.delete(stat)
+        return
+
+    now = datetime.now()
+    if not stat:
+        stat = CustomerRecommendationTimeBucketStat(
+            wechat_id=wechat_id,
+            store_name=store_name,
+            play_label=play_label,
+            smoke_type=smoke_type,
+            time_bucket=time_bucket,
+            play_count=count,
+            last_played_at=last_played_at,
+            updated_at=now,
+        )
+    else:
+        stat.play_count = count
+        stat.last_played_at = last_played_at
+        stat.updated_at = now
+    session.add(stat)
+
+def sync_customer_recommendation_time_bucket_stats_for_changed_games(session: Session, *game_versions):
+    affected_keys = set()
+    for game_version in game_versions:
+        if not game_version:
+            continue
+        if isinstance(game_version, GameRecord):
+            game_version = _game_recommendation_time_snapshot(session, game_version)
+        affected_keys.update(_game_recommendation_time_stat_keys(game_version))
+
+    for key in sorted(affected_keys):
+        _recompute_customer_recommendation_time_bucket_stat_key(session, *key)
 
 def _format_duplicate_game_label(game: GameRecord) -> str:
     order_time_text = _normalize_text(game.order_start_time)
@@ -6150,9 +6386,9 @@ def resolve_store_from_request(
     # 4. 最终兜底
     return "牛王庙店"
 
-HANDOVER_LEGACY_EMPTY_NOTE_SYSTEM_HINT = "【系统提示】该牌局当前已无参与人备注，请人工确认该同步事项是否仍需继续跟进。"
-HANDOVER_EMPTY_NOTE_SYSTEM_HINT = "【系统提示】该牌局当前已无参与人备注，系统已自动将该同步事项标记为已解决。"
-HANDOVER_EMPTY_NOTE_AUTO_RESOLVE_PROCESS_NOTE = "牌局参与人备注已全部删除，系统自动标记为已解决。"
+HANDOVER_LEGACY_EMPTY_NOTE_SYSTEM_HINT = "【系统提示】该牌局当前已无同步备注，请人工确认该同步事项是否仍需继续跟进。"
+HANDOVER_EMPTY_NOTE_SYSTEM_HINT = "【系统提示】该牌局当前已无同步备注，系统已自动将该同步事项标记为已解决。"
+HANDOVER_EMPTY_NOTE_AUTO_RESOLVE_PROCESS_NOTE = "牌局同步备注已全部删除，系统自动标记为已解决。"
 
 def get_game_noted_players_snapshot(session: Session, game: GameRecord) -> List[dict]:
     """
@@ -6173,29 +6409,30 @@ def get_game_noted_players_snapshot(session: Session, game: GameRecord) -> List[
     """
     result = []
 
-    for idx in range(1, 5):
-        nickname = _normalize_text(getattr(game, f"player_{idx}", None))
-        wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
-        note = _normalize_text(getattr(game, f"player_{idx}_note", None))
+    if game.status != "unformed":
+        for idx in range(1, 5):
+            nickname = _normalize_text(getattr(game, f"player_{idx}", None))
+            wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+            note = _normalize_text(getattr(game, f"player_{idx}_note", None))
 
-        if not note:
-            continue
+            if not note:
+                continue
 
-        customer_id = None
-        if wechat_id:
-            cust = session.exec(
-                select(Customer).where(Customer.wechat_id == wechat_id)
-            ).first()
-            if cust:
-                customer_id = cust.id
+            customer_id = None
+            if wechat_id:
+                cust = session.exec(
+                    select(Customer).where(Customer.wechat_id == wechat_id)
+                ).first()
+                if cust:
+                    customer_id = cust.id
 
-        result.append({
-            "slot": idx,
-            "nickname": nickname,
-            "wechat_id": wechat_id,
-            "note": note,
-            "customer_id": customer_id
-        })
+            result.append({
+                "slot": idx,
+                "nickname": nickname,
+                "wechat_id": wechat_id,
+                "note": note,
+                "customer_id": customer_id
+            })
 
     table_note = _normalize_text(game.table_note)
     if table_note:
@@ -6214,6 +6451,7 @@ def build_formed_game_handover_summary(game: GameRecord) -> str:
     """
     事件概述固定模板：
     已组齐牌局备注同步（时间+#月序号）
+    未组齐牌局整桌备注同步（时间+#月序号）
 
     时间优先取订单开始时间；没有则回退到预约时间展示。
     """
@@ -6226,6 +6464,9 @@ def build_formed_game_handover_summary(game: GameRecord) -> str:
     else:
         time_text = game.start_time or ""
 
+    if game.status == "unformed":
+        return f"未组齐牌局整桌备注同步（{time_text} #{game.serial_number}）"
+
     return f"已组齐牌局备注同步（{time_text} #{game.serial_number}）"
 
 def build_formed_game_handover_detail(game: GameRecord, noted_players: List[dict]) -> str:
@@ -6234,7 +6475,10 @@ def build_formed_game_handover_detail(game: GameRecord, noted_players: List[dict
     """
     lines = []
 
-    lines.append("【来源】已组齐牌局备注自动同步")
+    if game.status == "unformed":
+        lines.append("【来源】未组齐牌局整桌备注自动同步")
+    else:
+        lines.append("【来源】已组齐牌局备注自动同步")
     lines.append(f"门店：{game.store_name or ''}")
     lines.append(f"牌局月序号：#{game.serial_number}")
 
@@ -6399,10 +6643,10 @@ def sync_formed_game_note_to_handover(
     old_noted_players_snapshot: List[dict]
 ):
     """
-    已组齐牌局备注 -> 待办联动核心逻辑
+    牌局同步备注 -> 待办联动核心逻辑
 
     规则：
-    1. 只看 player_1_note ~ player_4_note
+    1. 已组齐看 player_1_note ~ player_4_note + table_note；未组齐看 table_note
     2. 有备注：
        - 无关联待办则新建
        - 有关联待办则更新
@@ -13507,6 +13751,7 @@ async def employee_salary_settlement_lock(
 async def read_root(
         request: Request,
         store: str = "牛王庙店",
+        focus_game_id: Optional[int] = None,
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user) # <--- 注入用户
 ):
@@ -13549,6 +13794,18 @@ async def read_root(
 
     results.sort(key=_unformed_sort_key, reverse=True)
 
+    if focus_game_id and all(g.id != focus_game_id for g in results):
+        focus_game = session.get(GameRecord, focus_game_id)
+        if (
+            focus_game
+            and focus_game.status == "unformed"
+            and focus_game.store_name == store
+        ):
+            results.append(focus_game)
+            results.sort(key=_unformed_sort_key, reverse=True)
+
+    game_smoke_type_map = get_game_smoke_type_map(session, [g.id for g in results if g.id])
+
     return templates.TemplateResponse("index.html", {
         "request": request,
         "page_name": "unformed",
@@ -13556,7 +13813,10 @@ async def read_root(
         "store_list": store_list,  # 新增：传给前端所有门店
         "room_list": current_store_rooms,  # 新增：传给前端当前门店的包间
         "game_list": results,
+        "game_smoke_type_map": game_smoke_type_map,
+        "smoke_type_label_map": SMOKE_TYPE_LABEL_MAP,
         "today_date": date.today(),
+        "focus_game_id": focus_game_id,
         "current_user": user  # <--- 把用户信息传给前端 (base.html 要用)
     })
 
@@ -14537,6 +14797,8 @@ async def add_game(
         player_3_wechat: str = Form(""), player_4_wechat: str = Form(""),
 
         tags: str = Form(""),
+        table_note: str = Form(""),
+        smoke_type: str = Form(SMOKE_TYPE_SMOKING),
 
         # V2：未组齐阶段允许为空，前端后续再同步放开
         room_name: Optional[str] = Form(""),
@@ -14636,6 +14898,7 @@ async def add_game(
 
         # 未组齐区特殊备注来源：tags
         tags=_normalize_text(tags),
+        table_note=_normalize_text(table_note) or None,
 
         # V2：未组齐阶段允许为空
         room_name=room_name or None,
@@ -14653,12 +14916,25 @@ async def add_game(
     )
     session.add(new_game)
     session.flush()
+    upsert_game_smoke_setting(
+        session=session,
+        game_id=new_game.id,
+        smoke_type=smoke_type,
+        updated_by=user.display_name
+    )
     _ensure_game_players_in_store_customer_pool(
         session=session,
         game=new_game,
         store_name=store_name,
         mark_visit=False,
     )
+    sync_formed_game_note_to_handover(
+        session=session,
+        game=new_game,
+        operator=user,
+        old_noted_players_snapshot=[]
+    )
+    sync_customer_recommendation_time_bucket_stats_for_changed_games(session, new_game)
     session.commit()
 
     return RedirectResponse(url=f"/?store={store_name}", status_code=303)
@@ -14688,6 +14964,7 @@ async def update_game_status(
         raise HTTPException(status_code=404, detail="Game not found")
 
     old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
+    old_recommendation_time_snapshot = _game_recommendation_time_snapshot(session, game)
 
     # ===== 1) 组齐 =====
     if action == "confirm":
@@ -14776,6 +15053,7 @@ async def update_game_status(
         session.flush()
         _sync_new_customer_pull_records_for_game(session, game)
         sync_customer_play_type_stats_for_changed_games(session, game)
+        sync_customer_recommendation_time_bucket_stats_for_changed_games(session, old_recommendation_time_snapshot, game)
         session.commit()
         return RedirectResponse(
             url=f"/?store={store}",
@@ -14785,6 +15063,7 @@ async def update_game_status(
     # ===== 2) 退回未组齐 =====
     elif action == "revert":
         old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
+        old_recommendation_time_snapshot = _game_recommendation_time_snapshot(session, game)
         # V2：原操作保留；订单开始时间清空
         # 但玩家备注、整桌备注、room_fee 不清空
         game.status = "unformed"
@@ -14799,6 +15078,7 @@ async def update_game_status(
         session.flush()
         _sync_new_customer_pull_records_for_game(session, game)
         sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
+        sync_customer_recommendation_time_bucket_stats_for_changed_games(session, old_recommendation_time_snapshot, game)
         session.commit()
         return RedirectResponse(
             url=_build_formed_redirect_url(
@@ -14815,6 +15095,7 @@ async def update_game_status(
     # ===== 3) 撤销 =====
     elif action == "delete":
         old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
+        old_recommendation_time_snapshot = _game_recommendation_time_snapshot(session, game)
         if game.status == "unformed":
             if not _can_delete_unformed_game(user, game):
                 return RedirectResponse(
@@ -14844,9 +15125,11 @@ async def update_game_status(
         ).all()
         for row in pull_rows:
             session.delete(row)
+        delete_game_smoke_setting(session, game.id)
         session.delete(game)
         session.flush()
         sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot)
+        sync_customer_recommendation_time_bucket_stats_for_changed_games(session, old_recommendation_time_snapshot)
         session.commit()
 
         redirect_base = "/formed-games" if game.status == "formed" else "/"
@@ -14872,6 +15155,8 @@ async def update_game(
         player_3_wechat: str = Form(""), player_4_wechat: str = Form(""),
 
         tags: str = Form(""),
+        table_note: str = Form(""),
+        smoke_type: str = Form(SMOKE_TYPE_SMOKING),
 
         # V2：未组齐编辑允许为空
         room_name: Optional[str] = Form(""),
@@ -14889,6 +15174,8 @@ async def update_game(
         raise HTTPException(status_code=404, detail="Game not found")
 
     old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
+    old_recommendation_time_snapshot = _game_recommendation_time_snapshot(session, game)
+    old_noted_players_snapshot = get_game_noted_players_snapshot(session, game)
 
     # 1. 门店合法性校验
     store_obj = get_store_by_name(session, store_name)
@@ -14975,6 +15262,7 @@ async def update_game(
     game.player_4_wechat = _normalize_text(player_4_wechat)
 
     game.tags = _normalize_text(tags)
+    game.table_note = _normalize_text(table_note) or None
 
     # 未组齐阶段允许为空；已组齐编辑那套“包间必填”后面走专门接口处理
     game.room_name = room_name or None
@@ -14986,8 +15274,21 @@ async def update_game(
 
     session.add(game)
     session.flush()
+    upsert_game_smoke_setting(
+        session=session,
+        game_id=game.id,
+        smoke_type=smoke_type,
+        updated_by=user.display_name
+    )
+    sync_formed_game_note_to_handover(
+        session=session,
+        game=game,
+        operator=user,
+        old_noted_players_snapshot=old_noted_players_snapshot
+    )
     _sync_new_customer_pull_records_for_game(session, game)
     sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
+    sync_customer_recommendation_time_bucket_stats_for_changed_games(session, old_recommendation_time_snapshot, game)
     session.commit()
 
     redirect_base = "/formed-games" if game.status == "formed" else "/"
@@ -16426,6 +16727,7 @@ async def delete_self_arrival_game(
     ).all()
     for row in pull_rows:
         session.delete(row)
+    delete_game_smoke_setting(session, game.id)
     session.delete(game)
     _sync_self_arrival_customers_for_store(session, store)
     session.commit()
@@ -16684,6 +16986,7 @@ async def add_overflow_game(
     )
     _sync_new_customer_pull_records_for_game(session, new_game)
     sync_customer_play_type_stats_for_changed_games(session, new_game)
+    sync_customer_recommendation_time_bucket_stats_for_changed_games(session, new_game)
 
     duplicate_warning_message = ""
     duplicate_hit = _find_possible_duplicate_formed_game(
@@ -16837,6 +17140,7 @@ async def update_overflow_game(
         table_note=game.table_note
     )
     old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
+    old_recommendation_time_snapshot = _game_recommendation_time_snapshot(session, game)
 
     if _normalize_text(start_time_full):
         new_record_date, new_start_time_str = _parse_reservation_datetime_local(start_time_full)
@@ -16996,6 +17300,7 @@ async def update_overflow_game(
     )
     _sync_new_customer_pull_records_for_game(session, game)
     sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
+    sync_customer_recommendation_time_bucket_stats_for_changed_games(session, old_recommendation_time_snapshot, game)
 
     duplicate_warning_message = ""
     duplicate_hit = _find_possible_duplicate_formed_game(
@@ -17070,6 +17375,7 @@ async def delete_overflow_game(
         )
 
     old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
+    old_recommendation_time_snapshot = _game_recommendation_time_snapshot(session, game)
 
     is_admin = (user.role == "admin")
     is_owner = (game.who_did == user.display_name)
@@ -17094,9 +17400,11 @@ async def delete_overflow_game(
     ).all()
     for row in pull_rows:
         session.delete(row)
+    delete_game_smoke_setting(session, game.id)
     session.delete(game)
     session.flush()
     sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot)
+    sync_customer_recommendation_time_bucket_stats_for_changed_games(session, old_recommendation_time_snapshot)
     session.commit()
 
     return RedirectResponse(
@@ -17600,6 +17908,7 @@ async def update_formed_game(
         table_note=game.table_note
     )
     old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
+    old_recommendation_time_snapshot = _game_recommendation_time_snapshot(session, game)
 
     store_obj = get_store_by_name(session, store_name)
     if not store_obj:
@@ -17836,6 +18145,7 @@ async def update_formed_game(
     )
     _sync_new_customer_pull_records_for_game(session, game)
     sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
+    sync_customer_recommendation_time_bucket_stats_for_changed_games(session, old_recommendation_time_snapshot, game)
 
     duplicate_warning_message = ""
     duplicate_hit = _find_possible_duplicate_formed_game(
@@ -18930,6 +19240,47 @@ async def read_customers(
 
     total_customer_count = len(customer_data_list)
     page_customer_list = customer_data_list[list_offset:list_offset + list_limit]
+    page_customer_ids = [
+        item["id"]
+        for item in page_customer_list
+        if item.get("id") is not None
+    ]
+    recommendation_blocks_by_customer_id = {}
+    today = date.today()
+    if page_customer_ids:
+        block_rows = session.exec(
+            select(CustomerRecommendationBlock).where(
+                CustomerRecommendationBlock.customer_id.in_(page_customer_ids),
+                CustomerRecommendationBlock.store_name == store,
+                CustomerRecommendationBlock.is_active == True,
+            )
+        ).all()
+        for block in block_rows:
+            is_permanent = block.mode == RECOMMENDATION_BLOCK_PERMANENT
+            is_temporary_active = (
+                block.mode == RECOMMENDATION_BLOCK_TEMPORARY
+                and block.hidden_until is not None
+                and block.hidden_until >= today
+            )
+            if not (is_permanent or is_temporary_active):
+                continue
+            recommendation_blocks_by_customer_id[block.customer_id] = block
+
+    for item in page_customer_list:
+        block = recommendation_blocks_by_customer_id.get(item["id"])
+        item["recommendation_block_mode"] = block.mode if block else ""
+        item["recommendation_block_until"] = (
+            block.hidden_until.strftime("%Y-%m-%d")
+            if block and block.hidden_until else ""
+        )
+        item["recommendation_block_label"] = (
+            "一直不推荐"
+            if block and block.mode == RECOMMENDATION_BLOCK_PERMANENT
+            else f"近7天不推荐至 {item['recommendation_block_until']}"
+            if block and block.mode == RECOMMENDATION_BLOCK_TEMPORARY
+            else ""
+        )
+
     page_wechat_ids = [
         item["wechat_id"]
         for item in page_customer_list
@@ -19031,6 +19382,95 @@ def _build_store_customers_url(
     if error:
         params["error"] = error
     return "/customers?" + urlencode(params)
+
+
+@app.post("/customers/recommendation-block/toggle")
+async def toggle_customer_recommendation_block(
+        customer_id: int = Form(...),
+        store: str = Form(""),
+        mode: str = Form(...),
+        search_query: str = Form(""),
+        sort_by: str = Form("default"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    store = _normalize_text(store)
+    mode = _normalize_text(mode)
+    if mode not in RECOMMENDATION_BLOCK_MODES:
+        return RedirectResponse(
+            url=_build_store_customers_url(store, search_query, sort_by, error="推荐屏蔽类型无效"),
+            status_code=303
+        )
+
+    customer = session.get(Customer, customer_id)
+    if not customer or bool(getattr(customer, "is_deleted", False)):
+        return RedirectResponse(
+            url=_build_store_customers_url(store, search_query, sort_by, error="顾客不存在"),
+            status_code=303
+        )
+
+    link = session.exec(
+        select(CustomerStoreLink).where(
+            CustomerStoreLink.customer_id == customer_id,
+            CustomerStoreLink.store_name == store
+        )
+    ).first()
+    if not link:
+        return RedirectResponse(
+            url=_build_store_customers_url(store, search_query, sort_by, error="该顾客不在当前门店组局散客池中"),
+            status_code=303
+        )
+
+    today = date.today()
+    block = session.exec(
+        select(CustomerRecommendationBlock).where(
+            CustomerRecommendationBlock.customer_id == customer_id,
+            CustomerRecommendationBlock.store_name == store
+        )
+    ).first()
+
+    def _block_active_for_same_mode(row: CustomerRecommendationBlock) -> bool:
+        if not row or not row.is_active or row.mode != mode:
+            return False
+        if row.mode == RECOMMENDATION_BLOCK_PERMANENT:
+            return True
+        return bool(row.hidden_until and row.hidden_until >= today)
+
+    now = datetime.now()
+    if block and _block_active_for_same_mode(block):
+        block.is_active = False
+        block.updated_at = now
+        block.updated_by = user.display_name
+        session.add(block)
+        session.commit()
+        success_msg = "已取消该顾客的智能推荐屏蔽"
+    else:
+        if not block:
+            block = CustomerRecommendationBlock(
+                customer_id=customer_id,
+                store_name=store,
+                created_at=now,
+            )
+        block.mode = mode
+        block.hidden_until = (
+            today + timedelta(days=7)
+            if mode == RECOMMENDATION_BLOCK_TEMPORARY
+            else None
+        )
+        block.is_active = True
+        block.updated_at = now
+        block.updated_by = user.display_name
+        session.add(block)
+        session.commit()
+        success_msg = "已设置近7天不出现在智能推荐中" if mode == RECOMMENDATION_BLOCK_TEMPORARY else "已设置一直不出现在智能推荐中"
+
+    return RedirectResponse(
+        url=_build_store_customers_url(store, search_query, sort_by, success=success_msg),
+        status_code=303
+    )
 
 
 def _build_contact_customers_url(
@@ -20465,7 +20905,9 @@ async def get_customer_details(
         partner = session.get(Customer, partner_id)
         if partner:
             play_data.append({
+                "partner_id": partner.id,
                 "partner_name": partner.nickname,
+                "partner_wechat": partner.wechat_id,
                 "count": record.count
             })
 
@@ -20808,10 +21250,15 @@ async def delete_customer(
 async def add_blacklist(
         initiator_id: int = Form(...),
         target_wechat: str = Form(...),  # 通过微信号查找目标
-        reason: str = Form(...),
+        reason: str = Form(""),
         session: Session = Depends(get_session)
 ):
-    # 1. 找目标
+    # 1. 找发起人和目标
+    initiator = session.get(Customer, initiator_id)
+    if not initiator:
+        return {"success": False, "msg": "未找到发起顾客"}
+
+    target_wechat = _normalize_text(target_wechat)
     target = session.exec(select(Customer).where(Customer.wechat_id == target_wechat)).first()
 
     if not target:
@@ -20819,6 +21266,9 @@ async def add_blacklist(
 
     if target.id == initiator_id:
         return {"success": False, "msg": "不能拉黑自己"}
+
+    target_label = (target.nickname or target.wechat_id or "").strip() or "该"
+    reason = _normalize_text(reason) or f"拉黑了{target_label}用户"
 
     # 2. 检查是否已存在
     exists = session.exec(select(Blacklist).where(
@@ -20829,11 +21279,25 @@ async def add_blacklist(
     if exists:
         return {"success": False, "msg": "该顾客已在黑名单中"}
 
-    # 3. 创建记录
+    # 3. 创建主动记录，并补充反向展示记录
     new_bl = Blacklist(initiator_id=initiator_id, target_id=target.id, reason=reason)
     session.add(new_bl)
+
+    reverse_exists = session.exec(select(Blacklist).where(
+        Blacklist.initiator_id == target.id,
+        Blacklist.target_id == initiator_id
+    )).first()
+    if not reverse_exists:
+        initiator_label = (initiator.nickname or initiator.wechat_id or "").strip() or "该"
+        reverse_bl = Blacklist(
+            initiator_id=target.id,
+            target_id=initiator_id,
+            reason=f"被{initiator_label}用户拉黑"
+        )
+        session.add(reverse_bl)
+
     session.commit()
-    return {"success": True, "msg": "添加成功"}
+    return {"success": True, "msg": "添加成功，已同步到对方黑名单"}
 
 # ===  删除黑名单接口 (DELETE) ===
 @app.delete("/api/delete-blacklist/{record_id}")
@@ -22860,9 +23324,10 @@ async def locate_handover_todo(
 ):
     """
     待办定位：
-    1. 若该待办有关联牌局，则跳转到已组齐区并定位到该牌局
-    2. 若无关联牌局，则提示“手动创建待办项，无关联牌局”
-    3. 若有关联但牌局不存在，则提示“原有关联牌局已不存在”
+    1. 若该待办关联未组齐牌局，则跳转到未组齐区并高亮该牌局
+    2. 若该待办关联已组齐牌局，则跳转到已组齐区并定位到该牌局
+    3. 若无关联牌局，则提示“手动创建待办项，无关联牌局”
+    4. 若有关联但牌局不存在，则提示“原有关联牌局已不存在”
     """
     if not user:
         return RedirectResponse(url="/login", status_code=303)
@@ -22891,9 +23356,18 @@ async def locate_handover_todo(
             status_code=303
         )
 
+    if game.status == "unformed":
+        return RedirectResponse(
+            url="/?" + urlencode({
+                "store": game.store_name or target_store,
+                "focus_game_id": game.id,
+            }),
+            status_code=303
+        )
+
     if game.status != "formed":
         return RedirectResponse(
-            url=f"/handover-sync?store={target_store}&error=该待办关联牌局当前不在已组齐区，无法定位",
+            url=f"/handover-sync?store={target_store}&error=该待办关联牌局当前状态异常，无法定位",
             status_code=303
         )
 

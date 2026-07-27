@@ -94,6 +94,11 @@
     padding: 12px;
     background: #fafbfd;
 }
+
+.focus-highlight-row td {
+    background-color: #fff3cd !important;
+    box-shadow: inset 0 1px 0 rgba(255, 193, 7, 0.35), inset 0 -1px 0 rgba(255, 193, 7, 0.35);
+}
 </style>
 
 <div class="d-flex justify-content-between align-items-center mb-4">
@@ -135,13 +140,14 @@
                     <th>分数/玩法</th>
                     <th>参与人（缺）</th>
                     <th>特殊备注</th>
+                    <th>整桌备注</th>
                     <th>接待店长</th>
                     <th>操作</th>
                 </tr>
             </thead>
             <tbody>
                 {% for game in game_list %}
-                <tr>
+                <tr id="game-row-{{ game.id }}" class="{% if focus_game_id and focus_game_id == game.id %}focus-highlight-row{% endif %}">
                     <td class="fw-bold text-primary">#{{ game.serial_number }}</td>
 
                     <td>
@@ -160,6 +166,12 @@
                     <td>
                         <div class="text-danger fw-bold">{{ game.stakes }}</div>
                         <div class="small text-muted">{{ game.game_type }}</div>
+                        {% set smoke_type = game_smoke_type_map.get(game.id, 'smoking') if game_smoke_type_map else 'smoking' %}
+                        <div class="small mt-1">
+                            <span class="badge {% if smoke_type == 'non_smoking' %}bg-success{% else %}bg-warning text-dark{% endif %}">
+                                {{ smoke_type_label_map.get(smoke_type, '有烟局') if smoke_type_label_map else '有烟局' }}
+                            </span>
+                        </div>
                     </td>
 
                     <td>
@@ -198,6 +210,19 @@
                     </td>
 
                     <td>
+                        {% if game.table_note %}
+                            <span class="badge bg-secondary"
+                                  data-bs-toggle="tooltip"
+                                  data-bs-placement="top"
+                                  title="{{ game.table_note }}">
+                                <span class="remark-summary">{{ game.table_note }}</span>
+                            </span>
+                        {% else %}
+                            <span class="text-muted small">-</span>
+                        {% endif %}
+                    </td>
+
+                    <td>
                         <span class="badge bg-info text-dark bg-opacity-25 border border-info">
                             <i class="bi bi-person me-1"></i>{{ game.who_did or '-' }}
                         </span>
@@ -220,7 +245,9 @@
                                     data-room="{{ game.room_name or '' }}"
                                     data-stakes="{{ game.stakes }}"
                                     data-gametype="{{ game.game_type }}"
+                                    data-smoke-type="{{ game_smoke_type_map.get(game.id, 'smoking') if game_smoke_type_map else 'smoking' }}"
                                     data-tags="{{ game.tags or '' }}"
+                                    data-table-note="{{ game.table_note or '' }}"
                                     data-payment="{{ game.payment_method or '' }}"
                                     data-fee="{{ game.room_fee or 0 }}"
 
@@ -248,7 +275,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="8" class="text-muted py-5">
+                    <td colspan="9" class="text-muted py-5">
                         <i class="bi bi-inbox fs-1 d-block mb-3"></i>
                         当前门店暂无未组齐的牌局，快去新增一个吧！
                     </td>
@@ -297,9 +324,14 @@
                                     <label class="form-label fw-bold">分数大小</label>
                                     <select class="form-select" name="stakes_select" id="stakesSelect" onchange="toggleCustomStakes()">
                                         <option value="1-16">1-16</option>
+                                        <option value="1-32">1-32</option>
                                         <option value="2-32">2-32</option>
+                                        <option value="2-64">2-64</option>
                                         <option value="5-40">5-40</option>
                                         <option value="5-80">5-80</option>
+                                        <option value="0.125">0.125</option>
+                                        <option value="0.25">0.25</option>
+                                        <option value="0.5">0.5</option>
                                         <option value="其他">其他</option>
                                     </select>
                                 </div>
@@ -320,9 +352,17 @@
                                     </select>
                                 </div>
 
-                                <div class="col-md-8">
+                                <div class="col-md-4">
+                                    <label class="form-label fw-bold">烟局类型</label>
+                                    <select class="form-select" name="smoke_type" id="smokeTypeInput">
+                                        <option value="smoking" selected>有烟局</option>
+                                        <option value="non_smoking">无烟局</option>
+                                    </select>
+                                </div>
+
+                                <div class="col-md-4">
                                     <label class="form-label fw-bold">特殊备注</label>
-                                    <input type="text" class="form-control" name="tags" id="tagsInput" placeholder="填写特殊备注,如：只要女生 无烟">
+                                    <input type="text" class="form-control" name="tags" id="tagsInput" placeholder="填写特殊备注，以展示交接为主">
                                 </div>
                             </div>
                         </div>
@@ -406,6 +446,14 @@
                                         <option value="用户小程序自定">用户小程序自定</option>
                                     </select>
                                 </div>
+                                <div class="col-12">
+                                    <label class="form-label fw-bold">整桌备注</label>
+                                    <textarea class="form-control"
+                                              rows="3"
+                                              name="table_note"
+                                              id="tableNoteInput"
+                                              placeholder="填写并保存后会同步到待办及信息同步区"></textarea>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -483,6 +531,8 @@
         document.getElementById('modalTitle').innerText = '新增组局';
         document.getElementById('startTimeInput').value = getNowISOString();
         document.getElementById('roomFeeInput').value = 0;
+        document.getElementById('tableNoteInput').value = '';
+        document.getElementById('smokeTypeInput').value = 'smoking';
 
         toggleCustomStakes();
         clearPlayerWarningStyle();
@@ -512,13 +562,15 @@
 
         document.getElementById('startTimeInput').value = startTimeFull;
         document.getElementById('gameTypeInput').value = btn.dataset.gametype || '';
+        document.getElementById('smokeTypeInput').value = btn.dataset.smokeType || 'smoking';
         document.getElementById('tagsInput').value = btn.dataset.tags || '';
+        document.getElementById('tableNoteInput').value = btn.dataset.tableNote || '';
         document.getElementById('roomNameInput').value = btn.dataset.room || '';
         document.getElementById('paymentMethodInput').value = btn.dataset.payment || '';
         document.getElementById('roomFeeInput').value = btn.dataset.fee || 0;
 
         const stakeVal = btn.dataset.stakes || '';
-        const defaultOptions = ['1-16', '2-32', '5-40', '5-80'];
+        const defaultOptions = ['1-16', '1-32', '2-32', '2-64', '5-40', '5-80', '0.125', '0.25', '0.5'];
         if (defaultOptions.includes(stakeVal)) {
             document.getElementById('stakesSelect').value = stakeVal;
             document.getElementById('stakesCustomInput').value = '';

@@ -232,10 +232,10 @@
           </thead>
           <tbody>
             {% for row in shift_stats.operator_rows %}
-              {% set ns = namespace(total_orders=0) %}
+              {% set ns = namespace(total_private_orders=0, total_self_arrival_orders=0) %}
 
               <tr>
-                <td class="sticky-col sticky-name name-cell" rowspan="2">{{ row.name }}</td>
+                <td class="sticky-col sticky-name name-cell" rowspan="3">{{ row.name }}</td>
                 <td class="sticky-col sticky-metric shift-row-label"  style="background: #f3f7ff">班次</td>
                 {% for item in row.daily %}
                   <td class="shift-cell">{{ shift_label.get(item.shift_type, "休息") }}</td>
@@ -244,12 +244,21 @@
               </tr>
 
               <tr>
-                <td class="sticky-col sticky-metric orders-row-label"  style="background: #f3f7ff">销售订单</td>
+                <td class="sticky-col sticky-metric orders-row-label"  style="background: #f3f7ff">私域组局</td>
                 {% for item in row.daily %}
-                  {% set ns.total_orders = ns.total_orders + item.orders %}
-                  <td class="orders-cell">{{ item.orders }}</td>
+                  {% set ns.total_private_orders = ns.total_private_orders + item.private_orders %}
+                  <td class="orders-cell">{{ item.private_orders }}</td>
                 {% endfor %}
-                <td class="total-col">{{ ns.total_orders }}</td>
+                <td class="total-col">{{ ns.total_private_orders }}</td>
+              </tr>
+
+              <tr>
+                <td class="sticky-col sticky-metric orders-row-label"  style="background: #f3f7ff">自然到店</td>
+                {% for item in row.daily %}
+                  {% set ns.total_self_arrival_orders = ns.total_self_arrival_orders + item.self_arrival_orders %}
+                  <td class="orders-cell">{{ item.self_arrival_orders }}</td>
+                {% endfor %}
+                <td class="total-col">{{ ns.total_self_arrival_orders }}</td>
               </tr>
             {% endfor %}
           </tbody>

@@ -326,10 +326,32 @@
                     </td>
 
                     <td>
-                        <div class="d-inline-flex gap-2">
+                        <div class="d-inline-flex flex-wrap justify-content-center gap-2">
                             <button type="button" class="btn btn-sm btn-outline-info"
                                     onclick="openDetailModal({{ cust.id }})">
                                 查看详情
+                            </button>
+                            <button type="button"
+                                    class="btn btn-sm {% if cust.recommendation_block_mode == 'temporary' %}btn-warning text-dark{% else %}btn-outline-warning{% endif %}"
+                                    data-customer-id="{{ cust.id }}"
+                                    data-store="{{ current_store }}"
+                                    data-mode="temporary"
+                                    data-search-query="{{ search_query }}"
+                                    data-sort-by="{{ sort_by }}"
+                                    {% if not cust.current_store_link_id %}disabled{% endif %}
+                                    onclick="toggleRecommendationBlockFromButton(this)">
+                                {% if cust.recommendation_block_mode == 'temporary' %}取消近7天{% else %}近7天不推荐{% endif %}
+                            </button>
+                            <button type="button"
+                                    class="btn btn-sm {% if cust.recommendation_block_mode == 'permanent' %}btn-secondary{% else %}btn-outline-secondary{% endif %}"
+                                    data-customer-id="{{ cust.id }}"
+                                    data-store="{{ current_store }}"
+                                    data-mode="permanent"
+                                    data-search-query="{{ search_query }}"
+                                    data-sort-by="{{ sort_by }}"
+                                    {% if not cust.current_store_link_id %}disabled{% endif %}
+                                    onclick="toggleRecommendationBlockFromButton(this)">
+                                {% if cust.recommendation_block_mode == 'permanent' %}取消一直{% else %}一直不推荐{% endif %}
                             </button>
                             {% if current_user.role == 'admin' %}
                             <button type="button"
@@ -343,6 +365,9 @@
                             </button>
                             {% endif %}
                         </div>
+                        {% if cust.recommendation_block_label %}
+                        <div class="small text-muted mt-1">{{ cust.recommendation_block_label }}</div>
+                        {% endif %}
                     </td>
                 </tr>
                 {% else %}
@@ -1608,6 +1633,7 @@
                                         <tr>
                                             <th>同局牌友</th>
                                             <th>同场次数</th>
+                                            <th style="width: 80px;">操作</th>
                                         </tr>
                                     </thead>
                                     <tbody id="play_freq_tbody"></tbody>
@@ -1638,7 +1664,7 @@
                                         <input type="text" id="new_bl_wechat" class="form-control form-control-sm" placeholder="输入对方微信号">
                                     </td>
                                     <td>
-                                        <input type="text" id="new_bl_reason" class="form-control form-control-sm" placeholder="输入理由 (如: 牌品差)">
+                                        <input type="text" id="new_bl_reason" class="form-control form-control-sm" placeholder="输入理由，选填">
                                     </td>
                                     <td>
                                         <button type="button" class="btn btn-sm btn-primary w-100" onclick="addBlacklist()">
@@ -1994,12 +2020,22 @@
         const playTbody = document.getElementById('play_freq_tbody');
         playTbody.innerHTML = '';
         if (list.length === 0) {
-            playTbody.innerHTML = '<tr><td colspan="2" class="text-muted small">暂无记录</td></tr>';
+            playTbody.innerHTML = '<tr><td colspan="3" class="text-muted small">暂无记录</td></tr>';
             return;
         }
 
         list.forEach(p => {
-            playTbody.innerHTML += `<tr><td>${escapeHtml(p.partner_name)}</td><td class="fw-bold">${p.count}</td></tr>`;
+            const partnerWechat = p.partner_wechat || '';
+            const actionCell = partnerWechat
+                ? `<button type="button" class="btn btn-sm btn-outline-danger border-0" title="快速拉黑" data-target-wechat="${escapeHtml(partnerWechat)}" data-target-name="${escapeHtml(p.partner_name)}" onclick="quickAddBlacklistFromButton(this)"><i class="bi bi-person-fill-slash"></i></button>`
+                : '<span class="text-muted small">无微信号</span>';
+            playTbody.innerHTML += `
+                <tr>
+                    <td>${escapeHtml(p.partner_name)}</td>
+                    <td class="fw-bold">${p.count}</td>
+                    <td>${actionCell}</td>
+                </tr>
+            `;
         });
     }
 
@@ -2032,9 +2068,40 @@
         const targetWechat = document.getElementById('new_bl_wechat').value;
         const reason = document.getElementById('new_bl_reason').value;
 
-        if (!targetWechat || !reason) {
-            alert("请填写对方微信号和理由");
+        if (!targetWechat) {
+            alert("请填写对方微信号");
             return;
+        }
+
+        const success = await submitBlacklist(targetWechat, reason);
+        if (success) {
+            document.getElementById('new_bl_wechat').value = '';
+            document.getElementById('new_bl_reason').value = '';
+        }
+    }
+
+    async function quickAddBlacklistFromButton(button) {
+        await quickAddBlacklist(button.dataset.targetWechat || '', button.dataset.targetName || '');
+    }
+
+    async function quickAddBlacklist(targetWechat, targetName) {
+        if (!targetWechat) {
+            alert("该同场顾客没有微信号，无法快速拉黑");
+            return;
+        }
+
+        const reason = window.prompt(`请输入拉黑${targetName || '该用户'}的理由（可留空）`, '');
+        if (reason === null) return;
+
+        await submitBlacklist(targetWechat, reason);
+    }
+
+    async function submitBlacklist(targetWechat, reason) {
+        targetWechat = (targetWechat || '').trim();
+        reason = (reason || '').trim();
+        if (!targetWechat) {
+            alert("请填写对方微信号");
+            return false;
         }
 
         const formData = new FormData();
@@ -2050,10 +2117,10 @@
 
         if (result.success) {
             openDetailModal(currentCustomerId);
-            document.getElementById('new_bl_wechat').value = '';
-            document.getElementById('new_bl_reason').value = '';
+            return true;
         } else {
             alert(result.msg);
+            return false;
         }
     }
 
@@ -2236,6 +2303,30 @@
         return String(value ?? '')
             .replaceAll('\\', '\\\\')
             .replaceAll("'", "\\'");
+    }
+
+    function toggleRecommendationBlockFromButton(button) {
+        const form = document.createElement('form');
+        form.method = 'post';
+        form.action = '/customers/recommendation-block/toggle';
+        form.className = 'd-none';
+
+        [
+            ['customer_id', button.dataset.customerId || ''],
+            ['store', button.dataset.store || '{{ current_store }}'],
+            ['mode', button.dataset.mode || 'temporary'],
+            ['search_query', button.dataset.searchQuery || ''],
+            ['sort_by', button.dataset.sortBy || 'default'],
+        ].forEach(([name, value]) => {
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = name;
+            input.value = value;
+            form.appendChild(input);
+        });
+
+        document.body.appendChild(form);
+        form.submit();
     }
 
     function deleteCustomerFromList(button) {

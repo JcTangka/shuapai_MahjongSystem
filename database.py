@@ -507,6 +507,64 @@ class CustomerPlayTypeStat(SQLModel, table=True):
     last_played_at: datetime = Field(index=True)
     updated_at: datetime = Field(default_factory=datetime.now)
 
+
+class GameSmokeSetting(SQLModel, table=True):
+    """牌局烟局设置，独立于 GameRecord 大表保存。"""
+    __tablename__ = "gamesmokesetting"
+    __table_args__ = (
+        UniqueConstraint("game_id", name="uq_gamesmokesetting_game_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    game_id: int = Field(foreign_key="gamerecord.id", index=True)
+    smoke_type: str = Field(default="smoking", index=True)  # smoking / non_smoking
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_by: Optional[str] = Field(default=None, index=True)
+
+
+class CustomerRecommendationBlock(SQLModel, table=True):
+    """顾客智能推荐屏蔽状态，按门店组局散客池生效。"""
+    __tablename__ = "customerrecommendationblock"
+    __table_args__ = (
+        UniqueConstraint("customer_id", "store_name", name="uq_customer_recommendation_block_customer_store"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    customer_id: int = Field(foreign_key="customer.id", index=True)
+    store_name: str = Field(index=True)
+    mode: str = Field(default="temporary", index=True)  # temporary / permanent
+    hidden_until: Optional[date] = Field(default=None, index=True)
+    is_active: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_by: Optional[str] = Field(default=None, index=True)
+
+
+class CustomerRecommendationTimeBucketStat(SQLModel, table=True):
+    """智能推荐强关联时间轴统计，排除自主到店来源。"""
+    __tablename__ = "customerrecommendationtimebucketstat"
+    __table_args__ = (
+        UniqueConstraint(
+            "wechat_id",
+            "store_name",
+            "play_label",
+            "smoke_type",
+            "time_bucket",
+            name="uq_customer_recommendation_time_bucket",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    wechat_id: str = Field(index=True)
+    store_name: str = Field(index=True)
+    play_label: str = Field(index=True)
+    smoke_type: str = Field(default="smoking", index=True)
+    time_bucket: int = Field(index=True)  # 0..11，每 2 小时一个轴
+    play_count: int = Field(default=0, index=True)
+    last_played_at: datetime = Field(index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+
 # === 人情维护表 ===
 class MaintenanceRecord(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -1469,9 +1527,11 @@ def create_db_and_tables():
     migrate_game_record_table()
     migrate_game_payment_item_table()
     migrate_customer_play_type_stat_table()
+    migrate_recommendation_prerequisite_tables()
     migrate_formed_game_handover_link_table()
     migrate_public_traffic_lead_table()
     migrate_brand_blacklist_entry_table()
+    migrate_blacklist_bidirectional_records()
     migrate_user_table()
     migrate_employee_type_tables()
     migrate_shift_and_daily_salary_rules()
@@ -1548,6 +1608,41 @@ def migrate_customer_complaint_record_table():
                 CREATE INDEX IF NOT EXISTS ix_customercomplaintrecord_{col_name}
                 ON customercomplaintrecord ({col_name})
             """))
+
+
+def migrate_blacklist_bidirectional_records():
+    """
+    补齐顾客黑名单反向记录：
+    A 拉黑 B 后，B 的黑名单中也展示 A，理由为“被A用户拉黑”。
+    """
+    with engine.begin() as conn:
+        table_exists = conn.execute(
+            text("""
+                SELECT name
+                FROM sqlite_master
+                WHERE type='table' AND name='blacklist'
+            """)
+        ).fetchone()
+        if not table_exists:
+            return
+
+        conn.execute(text("""
+            INSERT INTO blacklist (initiator_id, target_id, reason, created_at)
+            SELECT DISTINCT
+                b.target_id,
+                b.initiator_id,
+                '被' || COALESCE(NULLIF(TRIM(c.nickname), ''), NULLIF(TRIM(c.wechat_id), ''), '该') || '用户拉黑',
+                DATE('now')
+            FROM blacklist b
+            JOIN customer c ON c.id = b.initiator_id
+            WHERE b.initiator_id != b.target_id
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM blacklist r
+                  WHERE r.initiator_id = b.target_id
+                    AND r.target_id = b.initiator_id
+              )
+        """))
 
 
 def migrate_shift_and_daily_salary_rules():
@@ -1850,6 +1945,88 @@ def migrate_customer_play_type_stat_table():
 
         session.commit()
         print(f"已回填顾客常玩玩法统计 {len(stats)} 条")
+
+
+def migrate_recommendation_prerequisite_tables():
+    """
+    智能推荐前置表：
+    1. gamesmokesetting：牌局烟局设置，不改 GameRecord 大表；
+    2. customerrecommendationblock：组局散客推荐屏蔽；
+    3. customerrecommendationtimebucketstat：玩法/烟局/2 小时时间轴统计。
+    """
+    with engine.begin() as conn:
+        for sql in [
+            "CREATE INDEX IF NOT EXISTS ix_gamesmokesetting_game_id ON gamesmokesetting (game_id)",
+            "CREATE INDEX IF NOT EXISTS ix_gamesmokesetting_smoke_type ON gamesmokesetting (smoke_type)",
+            "CREATE INDEX IF NOT EXISTS ix_customerrecommendationblock_customer_id ON customerrecommendationblock (customer_id)",
+            "CREATE INDEX IF NOT EXISTS ix_customerrecommendationblock_store_name ON customerrecommendationblock (store_name)",
+            "CREATE INDEX IF NOT EXISTS ix_customerrecommendationblock_mode ON customerrecommendationblock (mode)",
+            "CREATE INDEX IF NOT EXISTS ix_customerrecommendationblock_hidden_until ON customerrecommendationblock (hidden_until)",
+            "CREATE INDEX IF NOT EXISTS ix_customerrecommendationblock_is_active ON customerrecommendationblock (is_active)",
+            "CREATE INDEX IF NOT EXISTS ix_customerrecommendationtimebucketstat_wechat_id ON customerrecommendationtimebucketstat (wechat_id)",
+            "CREATE INDEX IF NOT EXISTS ix_customerrecommendationtimebucketstat_store_name ON customerrecommendationtimebucketstat (store_name)",
+            "CREATE INDEX IF NOT EXISTS ix_customerrecommendationtimebucketstat_play_label ON customerrecommendationtimebucketstat (play_label)",
+            "CREATE INDEX IF NOT EXISTS ix_customerrecommendationtimebucketstat_smoke_type ON customerrecommendationtimebucketstat (smoke_type)",
+            "CREATE INDEX IF NOT EXISTS ix_customerrecommendationtimebucketstat_time_bucket ON customerrecommendationtimebucketstat (time_bucket)",
+            "CREATE INDEX IF NOT EXISTS ix_customerrecommendationtimebucketstat_play_count ON customerrecommendationtimebucketstat (play_count)",
+            "CREATE INDEX IF NOT EXISTS ix_customerrecommendationtimebucketstat_last_played_at ON customerrecommendationtimebucketstat (last_played_at)",
+        ]:
+            conn.execute(text(sql))
+
+    with Session(engine) as session:
+        existing_count = session.exec(select(func.count(CustomerRecommendationTimeBucketStat.id))).first() or 0
+        if existing_count > 0:
+            return
+
+        smoke_rows = session.exec(select(GameSmokeSetting)).all()
+        smoke_by_game_id = {
+            row.game_id: row.smoke_type
+            for row in smoke_rows
+            if row.game_id is not None and row.smoke_type in {"smoking", "non_smoking"}
+        }
+
+        stats: Dict[Tuple[str, str, str, str, int], Dict[str, Any]] = {}
+        games = session.exec(
+            select(GameRecord).where(
+                GameRecord.status == "formed",
+                GameRecord.record_source != "self_arrival"
+            )
+        ).all()
+
+        for game in games:
+            play_label = _migration_game_play_label(game)
+            store_name = _normalize_migration_text(game.store_name)
+            if not play_label or not store_name:
+                continue
+
+            played_at = _migration_game_played_at(game)
+            time_bucket = max(0, min(11, int(played_at.hour // 2)))
+            smoke_type = smoke_by_game_id.get(game.id or 0, "smoking")
+            if smoke_type not in {"smoking", "non_smoking"}:
+                smoke_type = "smoking"
+
+            for wechat_id in _migration_game_player_wechats(game):
+                key = (wechat_id, store_name, play_label, smoke_type, time_bucket)
+                item = stats.setdefault(key, {"count": 0, "last_played_at": played_at})
+                item["count"] += 1
+                if played_at > item["last_played_at"]:
+                    item["last_played_at"] = played_at
+
+        now = datetime.now()
+        for (wechat_id, store_name, play_label, smoke_type, time_bucket), item in stats.items():
+            session.add(CustomerRecommendationTimeBucketStat(
+                wechat_id=wechat_id,
+                store_name=store_name,
+                play_label=play_label,
+                smoke_type=smoke_type,
+                time_bucket=time_bucket,
+                play_count=item["count"],
+                last_played_at=item["last_played_at"],
+                updated_at=now,
+            ))
+
+        session.commit()
+        print(f"已回填智能推荐时间轴统计 {len(stats)} 条")
 
 def migrate_brand_blacklist_entry_table():
     """
@@ -3244,8 +3421,10 @@ def get_shift_performance_stats(
     统计规则：
     1. 只要 who_did 是该店长，就算该店长业绩，不区分门店；
     2. 统计项：
-       - 销售订单：status='formed' 的桌数
-    3. 若某天是“休息(off)”，则该天产生的业绩统一并入“前一天的晚班”。
+       - 私域组局：status='formed' 且 record_source 非 self_arrival 的桌数
+       - 自然到店：record_source='self_arrival' 的桌数，并兼容旧 SelfArrivalRecord
+    3. 若某天是“休息(off/公休)”，则该天产生的业绩统一并入前一天；
+       班次行始终展示当天真实排班，不因次日休息而改写为晚1班。
     """
     month_start, month_end = get_month_date_range(year, month)
     _, days_in_month = calendar.monthrange(year, month)
@@ -3272,6 +3451,7 @@ def get_shift_performance_stats(
         (r.operator_name, r.work_date): normalize_shift_type(r.shift_type)
         for r in shift_rows
     }
+    rest_shift_types = {"off", "public_rest"}
 
     # 3) 查询本月所有已组齐牌局（不按门店过滤）
     games = session.exec(
@@ -3304,10 +3484,14 @@ def get_shift_performance_stats(
     # 4) 初始化“最终归属日期”的逐日统计
     # 注意：这里存的是“业绩最终应该落在哪一天那一列”
     operator_daily_orders = {}
+    operator_daily_private_orders = {}
+    operator_daily_self_arrival_orders = {}
 
     for name in operator_names:
         for d in day_list:
             operator_daily_orders[(name, d)] = 0
+            operator_daily_private_orders[(name, d)] = 0
+            operator_daily_self_arrival_orders[(name, d)] = 0
 
     # 5) 核心归属逻辑：
     #    如果当天排班是 off，则业绩归到前一天；并且前一天在表头班次显示为晚班
@@ -3324,7 +3508,7 @@ def get_shift_performance_stats(
         target_date = raw_date
 
         # 如果当天是休息，则业绩归到前一天晚班
-        if assigned_shift == "off":
+        if assigned_shift in rest_shift_types:
             target_date = raw_date - timedelta(days=1)
 
         # 只统计最终归属仍落在当前月份表格内的数据
@@ -3337,8 +3521,16 @@ def get_shift_performance_stats(
             operator_daily_orders[key] = 0
 
         operator_daily_orders[key] += 1
+        if (g.record_source or "normal").strip() == "self_arrival":
+            if key not in operator_daily_self_arrival_orders:
+                operator_daily_self_arrival_orders[key] = 0
+            operator_daily_self_arrival_orders[key] += 1
+        else:
+            if key not in operator_daily_private_orders:
+                operator_daily_private_orders[key] = 0
+            operator_daily_private_orders[key] += 1
 
-    # 5.2 自主到店登记：也计入销售订单
+    # 5.2 旧自主到店登记：计入自然到店
     for r in self_arrival_records:
         if not r.operator_name:
             continue
@@ -3349,7 +3541,7 @@ def get_shift_performance_stats(
         assigned_shift = shift_map.get((operator_name, raw_date), "off")
 
         target_date = raw_date
-        if assigned_shift == "off":
+        if assigned_shift in rest_shift_types:
             target_date = raw_date - timedelta(days=1)
 
         if target_date < month_start or target_date >= month_end:
@@ -3359,35 +3551,27 @@ def get_shift_performance_stats(
 
         if key not in operator_daily_orders:
             operator_daily_orders[key] = 0
+        if key not in operator_daily_self_arrival_orders:
+            operator_daily_self_arrival_orders[key] = 0
 
         operator_daily_orders[key] += 1
+        operator_daily_self_arrival_orders[key] += 1
 
     # 6) 上半部分：耍牌绩效考核表
-    #    班次显示逻辑：
-    #    - 若“次日是休息”，则当日班次显示为晚班（因为次日休息业绩会并回到今天晚班）
-    #    - 否则显示当天原始排班
+    #    班次显示逻辑：始终显示当天原始排班。
+    #    销售订单仍按上面的归属逻辑统计，避免早班/中班被展示层误改成晚1班。
     operator_rows = []
     for name in operator_names:
         daily = []
         for d in day_list:
             today_shift = shift_map.get((name, d), "off")
-            next_shift = shift_map.get((name, d + timedelta(days=1)), None)
-
-            display_shift = today_shift
-
-            # 如果次日休息，则今天这一列承担“前一天晚班+次日休息日业绩回并”的角色。
-            # 已排晚1/晚2班时保留具体班次；其他历史情况默认归入晚1班。
-            if next_shift == "off":
-                display_shift = (
-                    today_shift
-                    if today_shift in {"night1", "night2"}
-                    else "night1"
-                )
 
             daily.append({
                 "date": d,
-                "shift_type": display_shift,
-                "orders": operator_daily_orders.get((name, d), 0)
+                "shift_type": today_shift,
+                "orders": operator_daily_orders.get((name, d), 0),
+                "private_orders": operator_daily_private_orders.get((name, d), 0),
+                "self_arrival_orders": operator_daily_self_arrival_orders.get((name, d), 0),
             })
         operator_rows.append({
             "name": name,
