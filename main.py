@@ -2663,11 +2663,7 @@ def _calculate_salary_for_one_employee(
     else:
         personal_order_count = all_order_count_map.get(user_obj.display_name, 0)
 
-    personal_commission = (
-        0.0
-        if employee_type == "logistics"
-        else _calc_personal_order_commission(personal_order_count)
-    )
+    personal_commission = _calc_personal_order_commission(personal_order_count)
 
     if is_resignation_month:
         reached_personal_store_count = 0
@@ -4184,6 +4180,12 @@ RECOMMENDATION_BLOCK_MODES = {
     RECOMMENDATION_BLOCK_TEMPORARY,
     RECOMMENDATION_BLOCK_PERMANENT,
 }
+RECOMMENDATION_RECENT_DAYS = 7
+RECOMMENDATION_COMPLAINT_PENALTY = 5
+RECOMMENDATION_DORMANT_WINDOW_SIZE = 6
+RECOMMENDATION_DORMANT_PER_WINDOW = 1
+RECOMMENDATION_DEFAULT_LIMIT = 30
+RECOMMENDATION_MAX_LIMIT = 100
 
 FORMED_GAMES_PAGE_SIZE = 40
 LIST_PAGE_SIZE = 40
@@ -5217,6 +5219,438 @@ def sync_customer_recommendation_time_bucket_stats_for_changed_games(session: Se
 
     for key in sorted(affected_keys):
         _recompute_customer_recommendation_time_bucket_stat_key(session, *key)
+
+
+def _recommendation_time_bucket_label(time_bucket: int) -> str:
+    clean_bucket = max(0, min(11, int(time_bucket or 0)))
+    start_hour = clean_bucket * 2
+    end_hour = (start_hour + 2) % 24
+    return f"{start_hour:02d}:00-{end_hour:02d}:00"
+
+
+def _recommendation_player_wechats(game: GameRecord) -> List[str]:
+    result = []
+    seen = set()
+    for idx in range(1, 5):
+        wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+        if not wechat_id or wechat_id in seen or wechat_id == PLACEHOLDER_PLAYER_WECHAT:
+            continue
+        seen.add(wechat_id)
+        result.append(wechat_id)
+    return result
+
+
+def _recommendation_date_text(value) -> str:
+    if not value:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+    return str(value)
+
+
+def _recommendation_recent_unvisited(link: CustomerStoreLink, today: date) -> bool:
+    last_visit = getattr(link, "last_visit_at_store", None)
+    if not last_visit:
+        return True
+    return last_visit <= today - timedelta(days=RECOMMENDATION_RECENT_DAYS)
+
+
+def _recommendation_smoke_compatible(target_smoke_type: str, history_smoke_types: set) -> bool:
+    clean_target = _normalize_smoke_type(target_smoke_type)
+    clean_history = {
+        _normalize_smoke_type(item)
+        for item in history_smoke_types
+        if _normalize_smoke_type(item) in SMOKE_TYPE_OPTIONS
+    }
+    if not clean_history:
+        return False
+    if clean_target == SMOKE_TYPE_SMOKING:
+        return SMOKE_TYPE_SMOKING in clean_history
+    if clean_target == SMOKE_TYPE_NON_SMOKING:
+        return SMOKE_TYPE_NON_SMOKING in clean_history
+    return False
+
+
+def _mix_recommendation_recent_unvisited_candidates(items: List[dict], limit: int) -> List[dict]:
+    recent_items = [item for item in items if not item.get("is_recent_unvisited")]
+    dormant_items = [item for item in items if item.get("is_recent_unvisited")]
+    selected = []
+    recent_idx = 0
+    dormant_idx = 0
+    recent_per_window = RECOMMENDATION_DORMANT_WINDOW_SIZE - RECOMMENDATION_DORMANT_PER_WINDOW
+
+    while len(selected) < limit and (recent_idx < len(recent_items) or dormant_idx < len(dormant_items)):
+        for _ in range(recent_per_window):
+            if len(selected) >= limit or recent_idx >= len(recent_items):
+                break
+            selected.append(recent_items[recent_idx])
+            recent_idx += 1
+
+        for _ in range(RECOMMENDATION_DORMANT_PER_WINDOW):
+            if len(selected) >= limit or dormant_idx >= len(dormant_items):
+                break
+            selected.append(dormant_items[dormant_idx])
+            dormant_idx += 1
+
+        if recent_idx >= len(recent_items):
+            while len(selected) < limit and dormant_idx < len(dormant_items):
+                selected.append(dormant_items[dormant_idx])
+                dormant_idx += 1
+            break
+
+    return selected[:limit]
+
+
+def build_game_recommendations(
+        session: Session,
+        game_id: int,
+        limit: int = RECOMMENDATION_DEFAULT_LIMIT,
+        now: Optional[datetime] = None
+) -> dict:
+    game = session.get(GameRecord, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="牌局不存在")
+    if _normalize_text(game.status) != "unformed":
+        raise HTTPException(status_code=400, detail="仅未组齐牌局支持智能推荐")
+
+    store_name = _normalize_text(game.store_name)
+    play_label = _game_play_type_label(game)
+    smoke_type = get_game_smoke_type(session, game.id)
+    time_bucket = _game_recommendation_time_bucket(game)
+    current_dt = now or datetime.now()
+    today = current_dt.date()
+    clean_limit = min(max(1, int(limit or RECOMMENDATION_DEFAULT_LIMIT)), RECOMMENDATION_MAX_LIMIT)
+
+    excluded_counts = {
+        "current_game_player": 0,
+        "placeholder": 0,
+        "missing_wechat": 0,
+        "deleted_customer": 0,
+        "no_matching_play": 0,
+        "smoke_mismatch": 0,
+        "currently_playing": 0,
+        "recommendation_blocked": 0,
+        "brand_blacklisted": 0,
+        "player_blacklist_conflict": 0,
+    }
+
+    existing_player_wechat_list = _recommendation_player_wechats(game)
+    existing_player_customers = session.exec(
+        select(Customer).where(Customer.wechat_id.in_(existing_player_wechat_list))
+    ).all() if existing_player_wechat_list else []
+    existing_player_by_wechat = {
+        _normalize_text(c.wechat_id): c
+        for c in existing_player_customers
+        if c.id is not None and _normalize_text(c.wechat_id)
+    }
+    existing_player_ids = {
+        c.id for c in existing_player_customers
+        if c.id is not None
+    }
+    current_players = []
+    for idx in range(1, 5):
+        nickname = _normalize_text(getattr(game, f"player_{idx}", None))
+        wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+        if not wechat_id or wechat_id == PLACEHOLDER_PLAYER_WECHAT:
+            continue
+        customer = existing_player_by_wechat.get(wechat_id)
+        if not customer or customer.id is None:
+            continue
+        current_players.append({
+            "slot": idx,
+            "customer_id": customer.id,
+            "nickname": customer.nickname or nickname or "",
+            "wechat_id": wechat_id,
+        })
+
+    game_payload = {
+        "id": game.id,
+        "serial_number": game.serial_number,
+        "store_name": store_name,
+        "stakes": _normalize_text(game.stakes),
+        "game_type": _normalize_text(game.game_type),
+        "play_label": play_label,
+        "smoke_type": smoke_type,
+        "smoke_type_label": SMOKE_TYPE_LABEL_MAP.get(smoke_type, "有烟局"),
+        "time_bucket": time_bucket,
+        "time_bucket_label": _recommendation_time_bucket_label(time_bucket),
+        "reservation_time": _game_play_type_played_at(game).strftime("%Y-%m-%d %H:%M"),
+        "existing_player_wechats": existing_player_wechat_list,
+        "current_players": current_players,
+    }
+
+    if not store_name or not play_label:
+        return {
+            "ok": True,
+            "game": game_payload,
+            "recommendations": [],
+            "total": 0,
+            "limit": clean_limit,
+            "excluded_counts": excluded_counts,
+            "message": "牌局门店、分数或玩法不完整，无法推荐",
+        }
+
+    links = session.exec(
+        select(CustomerStoreLink).where(CustomerStoreLink.store_name == store_name)
+    ).all()
+    link_by_customer_id = {
+        link.customer_id: link
+        for link in links
+        if link.customer_id is not None
+    }
+    if not link_by_customer_id:
+        return {
+            "ok": True,
+            "game": game_payload,
+            "recommendations": [],
+            "total": 0,
+            "limit": clean_limit,
+            "excluded_counts": excluded_counts,
+            "message": "当前门店暂无组局散客",
+        }
+
+    customers = session.exec(
+        select(Customer).where(Customer.id.in_(list(link_by_customer_id.keys())))
+    ).all()
+    customer_by_id = {}
+    customer_by_wechat = {}
+    for customer in customers:
+        if bool(getattr(customer, "is_deleted", False)):
+            excluded_counts["deleted_customer"] += 1
+            continue
+        wechat_id = _normalize_text(customer.wechat_id)
+        if not wechat_id:
+            excluded_counts["missing_wechat"] += 1
+            continue
+        if wechat_id == PLACEHOLDER_PLAYER_WECHAT:
+            excluded_counts["placeholder"] += 1
+            continue
+        customer_by_id[customer.id] = customer
+        customer_by_wechat[wechat_id] = customer
+
+    if not customer_by_wechat:
+        return {
+            "ok": True,
+            "game": game_payload,
+            "recommendations": [],
+            "total": 0,
+            "limit": clean_limit,
+            "excluded_counts": excluded_counts,
+            "message": "当前门店暂无可推荐的组局散客",
+        }
+
+    candidate_wechat_ids = list(customer_by_wechat.keys())
+    candidate_customer_ids = list(customer_by_id.keys())
+    existing_player_wechats = set(game_payload["existing_player_wechats"])
+
+    currently_playing_wechats = get_unended_recommendation_player_wechats(
+        session=session,
+        store_name=store_name,
+        now=current_dt
+    )
+
+    active_blocked_ids = set()
+    block_rows = session.exec(
+        select(CustomerRecommendationBlock).where(
+            CustomerRecommendationBlock.customer_id.in_(candidate_customer_ids),
+            CustomerRecommendationBlock.store_name == store_name,
+            CustomerRecommendationBlock.is_active == True,
+        )
+    ).all() if candidate_customer_ids else []
+    for block in block_rows:
+        if block.mode == RECOMMENDATION_BLOCK_PERMANENT:
+            active_blocked_ids.add(block.customer_id)
+        elif block.mode == RECOMMENDATION_BLOCK_TEMPORARY and block.hidden_until and block.hidden_until >= today:
+            active_blocked_ids.add(block.customer_id)
+
+    brand_blacklisted_wechats = {
+        _normalize_text(row.wechat_id)
+        for row in session.exec(
+            select(BrandBlacklistEntry).where(
+                BrandBlacklistEntry.wechat_id.in_(candidate_wechat_ids),
+                BrandBlacklistEntry.is_active == True,
+            )
+        ).all()
+        if _normalize_text(row.wechat_id)
+    } if candidate_wechat_ids else set()
+
+    conflict_customer_ids = set()
+    if existing_player_ids and candidate_customer_ids:
+        relevant_ids = list(set(candidate_customer_ids) | existing_player_ids)
+        blacklist_rows = session.exec(
+            select(Blacklist).where(
+                Blacklist.initiator_id.in_(relevant_ids),
+                Blacklist.target_id.in_(relevant_ids),
+            )
+        ).all()
+        candidate_id_set = set(candidate_customer_ids)
+        for row in blacklist_rows:
+            initiator_is_candidate = row.initiator_id in candidate_id_set
+            target_is_candidate = row.target_id in candidate_id_set
+            initiator_is_existing = row.initiator_id in existing_player_ids
+            target_is_existing = row.target_id in existing_player_ids
+            if initiator_is_candidate and target_is_existing:
+                conflict_customer_ids.add(row.initiator_id)
+            if target_is_candidate and initiator_is_existing:
+                conflict_customer_ids.add(row.target_id)
+
+    complaint_count_by_customer_id = {}
+    if candidate_customer_ids or candidate_wechat_ids:
+        complaint_rows = session.exec(
+            select(CustomerComplaintRecord).where(
+                or_(
+                    CustomerComplaintRecord.complained_customer_id.in_(candidate_customer_ids),
+                    CustomerComplaintRecord.complained_wechat_id.in_(candidate_wechat_ids),
+                )
+            )
+        ).all()
+        for row in complaint_rows:
+            target_id = row.complained_customer_id
+            if target_id not in customer_by_id:
+                target_customer = customer_by_wechat.get(_normalize_text(row.complained_wechat_id))
+                target_id = target_customer.id if target_customer else None
+            if target_id in customer_by_id:
+                complaint_count_by_customer_id[target_id] = complaint_count_by_customer_id.get(target_id, 0) + 1
+
+    play_count_by_wechat = {}
+    time_bucket_count_by_wechat = {}
+    last_played_at_by_wechat = {}
+    smoke_history_by_wechat = {}
+    stat_rows = session.exec(
+        select(CustomerRecommendationTimeBucketStat).where(
+            CustomerRecommendationTimeBucketStat.wechat_id.in_(candidate_wechat_ids),
+            CustomerRecommendationTimeBucketStat.store_name == store_name,
+        )
+    ).all() if candidate_wechat_ids else []
+    for stat in stat_rows:
+        wechat_id = _normalize_text(stat.wechat_id)
+        smoke_history_by_wechat.setdefault(wechat_id, set()).add(_normalize_smoke_type(stat.smoke_type))
+        if _normalize_text(stat.play_label) != play_label:
+            continue
+        play_count_by_wechat[wechat_id] = play_count_by_wechat.get(wechat_id, 0) + int(stat.play_count or 0)
+        if int(stat.time_bucket or 0) == time_bucket:
+            time_bucket_count_by_wechat[wechat_id] = (
+                time_bucket_count_by_wechat.get(wechat_id, 0) + int(stat.play_count or 0)
+            )
+        last_played_at = last_played_at_by_wechat.get(wechat_id)
+        if not last_played_at or stat.last_played_at > last_played_at:
+            last_played_at_by_wechat[wechat_id] = stat.last_played_at
+
+    recommendations = []
+    for wechat_id, customer in customer_by_wechat.items():
+        if wechat_id in existing_player_wechats:
+            excluded_counts["current_game_player"] += 1
+            continue
+        if wechat_id in currently_playing_wechats:
+            excluded_counts["currently_playing"] += 1
+            continue
+        if customer.id in active_blocked_ids:
+            excluded_counts["recommendation_blocked"] += 1
+            continue
+        if wechat_id in brand_blacklisted_wechats:
+            excluded_counts["brand_blacklisted"] += 1
+            continue
+        if customer.id in conflict_customer_ids:
+            excluded_counts["player_blacklist_conflict"] += 1
+            continue
+
+        play_count = play_count_by_wechat.get(wechat_id, 0)
+        if play_count <= 0:
+            excluded_counts["no_matching_play"] += 1
+            continue
+
+        smoke_history = smoke_history_by_wechat.get(wechat_id, set())
+        if not _recommendation_smoke_compatible(smoke_type, smoke_history):
+            excluded_counts["smoke_mismatch"] += 1
+            continue
+
+        time_bucket_count = time_bucket_count_by_wechat.get(wechat_id, 0)
+        complaint_count = complaint_count_by_customer_id.get(customer.id, 0)
+        complaint_penalty = complaint_count * RECOMMENDATION_COMPLAINT_PENALTY
+        total_score = play_count + time_bucket_count - complaint_penalty
+        link = link_by_customer_id.get(customer.id)
+        last_visit = getattr(link, "last_visit_at_store", None) if link else None
+        last_played_at = last_played_at_by_wechat.get(wechat_id)
+        is_recent_unvisited = _recommendation_recent_unvisited(link, today) if link else True
+
+        reason_parts = [
+            f"同玩法 {play_count} 次",
+            f"当前时间段 {time_bucket_count} 次",
+        ]
+        if complaint_count:
+            reason_parts.append(f"投诉 {complaint_count} 次，扣 {complaint_penalty} 分")
+        else:
+            reason_parts.append("无投诉")
+        if last_visit:
+            days_since_visit = (today - last_visit).days
+            reason_parts.append(f"最近到店 {days_since_visit} 天前")
+        else:
+            reason_parts.append("暂无到店记录")
+
+        recommendations.append({
+            "customer_id": customer.id,
+            "nickname": customer.nickname or "",
+            "wechat_id": wechat_id,
+            "gender": customer.gender or "",
+            "score": total_score,
+            "play_count": play_count,
+            "time_bucket_count": time_bucket_count,
+            "complaint_count": complaint_count,
+            "complaint_penalty": complaint_penalty,
+            "last_visit_at_store": _recommendation_date_text(last_visit),
+            "last_played_at": _recommendation_date_text(last_played_at),
+            "is_recent_unvisited": is_recent_unvisited,
+            "smoke_history": [
+                {
+                    "type": item,
+                    "label": SMOKE_TYPE_LABEL_MAP.get(item, item),
+                }
+                for item in sorted(smoke_history)
+            ],
+            "reason": " / ".join(reason_parts),
+            "_sort_last_played_at": last_played_at or datetime.min,
+            "_sort_last_visit": last_visit or date.min,
+        })
+
+    recommendations.sort(
+        key=lambda item: (
+            item["score"],
+            -item["complaint_count"],
+            item["time_bucket_count"],
+            item["play_count"],
+            item["_sort_last_played_at"],
+            item["_sort_last_visit"],
+            item["customer_id"] or 0,
+        ),
+        reverse=True
+    )
+
+    mixed_recommendations = _mix_recommendation_recent_unvisited_candidates(
+        recommendations,
+        clean_limit
+    )
+    for rank, item in enumerate(mixed_recommendations, start=1):
+        item["rank"] = rank
+        item.pop("_sort_last_played_at", None)
+        item.pop("_sort_last_visit", None)
+
+    return {
+        "ok": True,
+        "game": game_payload,
+        "recommendations": mixed_recommendations,
+        "total": len(recommendations),
+        "limit": clean_limit,
+        "excluded_counts": excluded_counts,
+        "mix_policy": {
+            "window_size": RECOMMENDATION_DORMANT_WINDOW_SIZE,
+            "recent_unvisited_per_window": RECOMMENDATION_DORMANT_PER_WINDOW,
+            "recent_unvisited_days": RECOMMENDATION_RECENT_DAYS,
+        },
+        "message": "" if mixed_recommendations else "暂无可推荐顾客",
+    }
+
 
 def _format_duplicate_game_label(game: GameRecord) -> str:
     order_time_text = _normalize_text(game.order_start_time)
@@ -7050,7 +7484,7 @@ def _build_employee_duty_status(
         "store_options": [s.name for s in active_stores],
     }
 
-    if not user or user.role == "admin" or _is_logistics_employee(user):
+    if not user or user.role == "admin":
         return status
 
     status["requires_release"] = True
@@ -8076,8 +8510,6 @@ async def login_action(
         max_age=DUTY_DEFAULT_LOGIN_MAX_AGE_SECONDS
     )
     response.delete_cookie(DUTY_REVIEW_SESSION_COOKIE)
-    if _is_logistics_employee(user) and not is_resigned_read_only:
-        _start_logistics_login_duty(session, user)
     return response
 
 
@@ -8308,7 +8740,7 @@ async def update_employee_store_duty_stores(
 ):
     if not user:
         return RedirectResponse(url="/login", status_code=303)
-    if user.role == "admin" or _is_logistics_employee(user):
+    if user.role == "admin":
         return RedirectResponse(url=_build_root_redirect_url(current_store), status_code=303)
 
     active = _active_store_duty_session(session, user.id)
@@ -21298,6 +21730,20 @@ async def add_blacklist(
 
     session.commit()
     return {"success": True, "msg": "添加成功，已同步到对方黑名单"}
+
+
+@app.get("/api/games/{game_id}/recommendations")
+async def api_game_recommendations(
+        game_id: int,
+        limit: int = RECOMMENDATION_DEFAULT_LIMIT,
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录")
+
+    return JSONResponse(build_game_recommendations(session, game_id, limit))
+
 
 # ===  删除黑名单接口 (DELETE) ===
 @app.delete("/api/delete-blacklist/{record_id}")

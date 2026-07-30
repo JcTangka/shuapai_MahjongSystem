@@ -99,6 +99,16 @@
     background-color: #fff3cd !important;
     box-shadow: inset 0 1px 0 rgba(255, 193, 7, 0.35), inset 0 -1px 0 rgba(255, 193, 7, 0.35);
 }
+
+.recommendation-table-wrapper {
+    max-height: 60vh;
+    overflow: auto;
+}
+
+.recommendation-reason {
+    max-width: 360px;
+    white-space: normal;
+}
 </style>
 
 <div class="d-flex justify-content-between align-items-center mb-4">
@@ -235,7 +245,17 @@
                                 <i class="bi bi-check-lg"></i> 组齐
                             </a>
 
-                            <button class="btn btn-sm btn-warning text-dark"
+                            <button class="btn btn-sm btn-outline-primary"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#recommendationModal"
+                                    data-game-id="{{ game.id }}"
+                                    data-edit-button-id="edit-game-btn-{{ game.id }}"
+                                    onclick="openRecommendationModal(this)">
+                                <i class="bi bi-stars"></i> 智能推荐
+                            </button>
+
+                            <button id="edit-game-btn-{{ game.id }}"
+                                    class="btn btn-sm btn-warning text-dark js-edit-game-btn"
                                     data-bs-toggle="modal"
                                     data-bs-target="#addGameModal"
                                     onclick="openEditModal(this)"
@@ -283,6 +303,114 @@
                 {% endfor %}
             </tbody>
         </table>
+    </div>
+</div>
+
+<div class="modal fade" id="recommendationModal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title">
+                    <i class="bi bi-stars me-2"></i>智能推荐
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                    <div>
+                        <div class="fw-bold" id="recommendationGameTitle">-</div>
+                        <div class="small text-muted" id="recommendationGameMeta">-</div>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="refreshRecommendations()">
+                        <i class="bi bi-arrow-clockwise me-1"></i>刷新
+                    </button>
+                </div>
+
+                <div class="alert alert-info py-2 mb-3" id="recommendationSummary">
+                    点击后按当前牌局条件即时计算推荐。
+                </div>
+
+                <div id="recommendationLoading" class="text-center text-muted py-5 d-none">
+                    <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                    正在推荐...
+                </div>
+
+                <div id="recommendationError" class="alert alert-danger d-none"></div>
+
+                <div id="recommendationEmpty" class="text-center text-muted py-5 d-none">
+                    <i class="bi bi-inbox fs-1 d-block mb-3"></i>
+                    <div class="fw-bold mb-1">暂无可推荐顾客</div>
+                    <div class="small">可能原因：玩法分数匹配人数不足，或候选人正在娱乐、被屏蔽、被拉黑。</div>
+                </div>
+
+                <div id="recommendationResult" class="recommendation-table-wrapper d-none">
+                    <table class="table table-hover align-middle text-center mb-0">
+                        <thead class="table-light sticky-top">
+                            <tr>
+                                <th style="width: 64px;">排名</th>
+                                <th>顾客</th>
+                                <th>微信号</th>
+                                <th>综合分</th>
+                                <th>玩法</th>
+                                <th>时间轴</th>
+                                <th>投诉</th>
+                                <th>最近到店</th>
+                                <th>推荐原因</th>
+                                <th style="width: 280px;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="recommendationTbody"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="recommendationBlacklistModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title">
+                    <i class="bi bi-slash-circle me-2"></i>拉黑推荐顾客
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form id="recommendationBlacklistForm" onsubmit="submitRecommendationBlacklist(event)">
+                <div class="modal-body">
+                    <input type="hidden" id="recommendationBlacklistTargetWechat">
+
+                    <div class="alert alert-warning py-2 mb-3" id="recommendationBlacklistTargetLabel">
+                        -
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">发起拉黑的当前桌顾客</label>
+                        <select class="form-select" id="recommendationBlacklistInitiator" required></select>
+                    </div>
+
+                    <div class="mb-2">
+                        <label class="form-label">拉黑理由</label>
+                        <textarea class="form-control"
+                                  id="recommendationBlacklistReason"
+                                  rows="3"
+                                  placeholder="选填；不填则默认为“拉黑了该用户”"></textarea>
+                    </div>
+                    <div class="small text-muted">
+                        确认后会同步生成对方黑名单展示记录。
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-danger" id="recommendationBlacklistSubmitButton">
+                        <i class="bi bi-slash-circle me-1"></i>确认拉黑
+                    </button>
+                </div>
+            </form>
+        </div>
     </div>
 </div>
 
@@ -500,6 +628,341 @@
                 new bootstrap.Tooltip(el);
             }
         });
+    }
+
+    let activeRecommendationGameId = null;
+    let activeRecommendationEditButton = null;
+    let activeRecommendationController = null;
+    let activeRecommendationGame = null;
+    let activeRecommendationBlacklistTarget = null;
+
+    function escapeHtml(value) {
+        return String(value || '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#039;');
+    }
+
+    function setRecommendationState(state, message = '') {
+        const loading = document.getElementById('recommendationLoading');
+        const error = document.getElementById('recommendationError');
+        const empty = document.getElementById('recommendationEmpty');
+        const result = document.getElementById('recommendationResult');
+
+        loading.classList.toggle('d-none', state !== 'loading');
+        error.classList.toggle('d-none', state !== 'error');
+        empty.classList.toggle('d-none', state !== 'empty');
+        result.classList.toggle('d-none', state !== 'result');
+
+        if (state === 'error') {
+            error.innerText = message || '推荐加载失败，请稍后重试';
+        }
+    }
+
+    function openRecommendationModal(button) {
+        activeRecommendationGameId = button.dataset.gameId || '';
+        activeRecommendationEditButton = document.getElementById(button.dataset.editButtonId || '');
+        activeRecommendationGame = null;
+        activeRecommendationBlacklistTarget = null;
+
+        const row = button.closest('tr');
+        const serialText = row ? (row.querySelector('td')?.innerText || '').trim() : '';
+        document.getElementById('recommendationGameTitle').innerText = `${serialText || '#'} {{ current_store }}`;
+        document.getElementById('recommendationGameMeta').innerText = '正在读取牌局条件...';
+        document.getElementById('recommendationSummary').innerText = '点击后按当前牌局条件即时计算推荐。';
+        document.getElementById('recommendationTbody').innerHTML = '';
+        loadRecommendations();
+    }
+
+    function refreshRecommendations() {
+        if (!activeRecommendationGameId) return;
+        loadRecommendations();
+    }
+
+    async function loadRecommendations() {
+        if (!activeRecommendationGameId) return;
+
+        if (activeRecommendationController) {
+            activeRecommendationController.abort();
+        }
+        activeRecommendationController = new AbortController();
+        setRecommendationState('loading');
+
+        try {
+            const resp = await fetch(`/api/games/${encodeURIComponent(activeRecommendationGameId)}/recommendations?limit=30`, {
+                signal: activeRecommendationController.signal
+            });
+            const data = await resp.json();
+            if (!resp.ok || !data.ok) {
+                throw new Error(data.detail || data.message || '推荐加载失败');
+            }
+            renderRecommendationData(data);
+        } catch (err) {
+            if (err.name === 'AbortError') return;
+            setRecommendationState('error', err.message || '推荐加载失败，请稍后重试');
+        }
+    }
+
+    function renderRecommendationData(data) {
+        const game = data.game || {};
+        activeRecommendationGame = game;
+        document.getElementById('recommendationGameTitle').innerText =
+            `#${game.serial_number || '-'} ${game.store_name || '{{ current_store }}'}`;
+        document.getElementById('recommendationGameMeta').innerText =
+            `${game.reservation_time || '-'} / ${game.stakes || '-'} / ${game.game_type || '-'} / ${game.smoke_type_label || '-'}`;
+        document.getElementById('recommendationSummary').innerText =
+            `共 ${data.total || 0} 位候选，当前显示 ${(data.recommendations || []).length} 位；时间轴 ${game.time_bucket_label || '-'}`;
+
+        const list = data.recommendations || [];
+        if (!list.length) {
+            setRecommendationState('empty');
+            return;
+        }
+
+        const tbody = document.getElementById('recommendationTbody');
+        const hasBlacklistInitiators = Array.isArray(game.current_players) && game.current_players.length > 0;
+        tbody.innerHTML = list.map(item => {
+            const dormantBadge = item.is_recent_unvisited
+                ? '<span class="badge bg-warning text-dark ms-1">近7天未到店</span>'
+                : '';
+            const complaintText = item.complaint_count > 0
+                ? `<span class="text-danger">-${item.complaint_penalty}</span>`
+                : '<span class="text-success">0</span>';
+            const blacklistButton = hasBlacklistInitiators
+                ? `
+                            <button type="button" class="btn btn-sm btn-outline-danger"
+                                    data-customer-id="${item.customer_id}"
+                                    data-nickname="${escapeHtml(item.nickname)}"
+                                    data-wechat="${escapeHtml(item.wechat_id)}"
+                                    onclick="openRecommendationBlacklistModal(this)">
+                                <i class="bi bi-slash-circle me-1"></i>拉黑
+                            </button>`
+                : `
+                            <button type="button" class="btn btn-sm btn-outline-danger" disabled
+                                    title="当前桌暂无可作为发起人的顾客">
+                                <i class="bi bi-slash-circle me-1"></i>拉黑
+                            </button>`;
+
+            return `
+                <tr>
+                    <td class="fw-bold text-primary">#${item.rank}</td>
+                    <td class="text-start">
+                        <div class="fw-bold">${escapeHtml(item.nickname)}</div>
+                        <div class="small text-muted">${escapeHtml(item.gender || '-')}</div>
+                    </td>
+                    <td><code>${escapeHtml(item.wechat_id)}</code></td>
+                    <td class="fw-bold">${item.score}</td>
+                    <td>${item.play_count}</td>
+                    <td>${item.time_bucket_count}</td>
+                    <td>${complaintText}</td>
+                    <td>
+                        <div>${escapeHtml(item.last_visit_at_store || '-')}</div>
+                        ${dormantBadge}
+                    </td>
+                    <td class="text-start recommendation-reason">${escapeHtml(item.reason || '')}</td>
+                    <td>
+                        <div class="d-flex flex-wrap justify-content-center gap-1">
+                            <button type="button" class="btn btn-sm btn-outline-secondary"
+                                    data-wechat="${escapeHtml(item.wechat_id)}"
+                                    onclick="copyRecommendationWechat(this)">
+                                <i class="bi bi-clipboard me-1"></i>复制
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-success"
+                                    data-nickname="${escapeHtml(item.nickname)}"
+                                    data-wechat="${escapeHtml(item.wechat_id)}"
+                                    onclick="fillRecommendationIntoGame(this)">
+                                <i class="bi bi-person-plus me-1"></i>填入本桌
+                            </button>
+${blacklistButton}
+                            <button type="button" class="btn btn-sm btn-outline-warning"
+                                    data-customer-id="${item.customer_id}"
+                                    data-mode="temporary"
+                                    onclick="blockRecommendationCustomer(this)">
+                                近7天不推荐
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-dark"
+                                    data-customer-id="${item.customer_id}"
+                                    data-mode="permanent"
+                                    onclick="blockRecommendationCustomer(this)">
+                                一直不推荐
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+        setRecommendationState('result');
+    }
+
+    async function copyRecommendationWechat(button) {
+        const text = button.dataset.wechat || '';
+        if (!text) return;
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.style.position = 'fixed';
+                textarea.style.left = '-9999px';
+                document.body.appendChild(textarea);
+                textarea.focus();
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+            }
+            const oldHtml = button.innerHTML;
+            button.innerHTML = '<i class="bi bi-check-lg me-1"></i>已复制';
+            button.disabled = true;
+            setTimeout(() => {
+                button.innerHTML = oldHtml;
+                button.disabled = false;
+            }, 1200);
+        } catch (err) {
+            alert('复制失败，请手动复制微信号');
+        }
+    }
+
+    function findFirstEmptyPlayerSlot() {
+        for (let i = 1; i <= 4; i++) {
+            const nameInput = document.getElementById(`player_${i}`);
+            const wechatInput = document.getElementById(`player_${i}_wechat`);
+            if (!nameInput || !wechatInput) continue;
+            if (!(nameInput.value || '').trim() && !(wechatInput.value || '').trim()) {
+                return i;
+            }
+        }
+        return null;
+    }
+
+    function fillRecommendationIntoGame(button) {
+        if (!activeRecommendationEditButton) {
+            alert('未找到当前牌局编辑入口，请刷新页面后重试');
+            return;
+        }
+
+        const nickname = button.dataset.nickname || '';
+        const wechat = button.dataset.wechat || '';
+        const recommendationModalEl = document.getElementById('recommendationModal');
+        const recommendationModal = bootstrap.Modal.getInstance(recommendationModalEl);
+        if (recommendationModal) recommendationModal.hide();
+
+        setTimeout(() => {
+            openEditModal(activeRecommendationEditButton);
+            const emptySlot = findFirstEmptyPlayerSlot();
+            if (!emptySlot) {
+                alert('当前牌局已没有空位');
+                return;
+            }
+            selectCustomer(emptySlot, nickname, wechat);
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('addGameModal')).show();
+        }, 180);
+    }
+
+    function openRecommendationBlacklistModal(button) {
+        const players = (activeRecommendationGame && activeRecommendationGame.current_players) || [];
+        if (!players.length) {
+            alert('当前桌暂无可作为发起人的顾客，不能执行顾客互拉黑');
+            return;
+        }
+
+        activeRecommendationBlacklistTarget = {
+            customerId: button.dataset.customerId || '',
+            nickname: button.dataset.nickname || '',
+            wechat: button.dataset.wechat || ''
+        };
+        if (!activeRecommendationBlacklistTarget.wechat) {
+            alert('候选人微信号缺失，不能拉黑');
+            return;
+        }
+
+        const targetLabel = document.getElementById('recommendationBlacklistTargetLabel');
+        targetLabel.innerText = `将推荐顾客 ${activeRecommendationBlacklistTarget.nickname || '-'}（${activeRecommendationBlacklistTarget.wechat}）加入黑名单`;
+
+        const initiatorSelect = document.getElementById('recommendationBlacklistInitiator');
+        initiatorSelect.innerHTML = players.map(player => {
+            const label = `座位${player.slot} ${player.nickname || '-'}（${player.wechat_id || '-'}）`;
+            return `<option value="${player.customer_id}">${escapeHtml(label)}</option>`;
+        }).join('');
+
+        document.getElementById('recommendationBlacklistTargetWechat').value = activeRecommendationBlacklistTarget.wechat;
+        document.getElementById('recommendationBlacklistReason').value = '';
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('recommendationBlacklistModal')).show();
+    }
+
+    async function submitRecommendationBlacklist(event) {
+        event.preventDefault();
+        const initiatorId = document.getElementById('recommendationBlacklistInitiator').value || '';
+        const targetWechat = document.getElementById('recommendationBlacklistTargetWechat').value || '';
+        const reason = document.getElementById('recommendationBlacklistReason').value || '';
+        if (!initiatorId || !targetWechat) {
+            alert('请选择发起顾客并确认被拉黑顾客');
+            return;
+        }
+
+        const submitButton = document.getElementById('recommendationBlacklistSubmitButton');
+        const oldHtml = submitButton.innerHTML;
+        submitButton.disabled = true;
+        submitButton.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>处理中';
+
+        const formData = new FormData();
+        formData.append('initiator_id', initiatorId);
+        formData.append('target_wechat', targetWechat);
+        formData.append('reason', reason);
+
+        try {
+            const resp = await fetch('/api/add-blacklist', {
+                method: 'POST',
+                body: formData
+            });
+            const result = await resp.json();
+            if (!resp.ok) {
+                throw new Error(result.detail || result.msg || '拉黑失败');
+            }
+            if (!result.success) {
+                alert(result.msg || '拉黑失败');
+                await loadRecommendations();
+                return;
+            }
+
+            bootstrap.Modal.getInstance(document.getElementById('recommendationBlacklistModal'))?.hide();
+            await loadRecommendations();
+        } catch (err) {
+            alert(err.message || '拉黑失败，请稍后重试');
+        } finally {
+            submitButton.disabled = false;
+            submitButton.innerHTML = oldHtml;
+        }
+    }
+
+    async function blockRecommendationCustomer(button) {
+        const customerId = button.dataset.customerId || '';
+        const mode = button.dataset.mode || 'temporary';
+        if (!customerId) return;
+        button.disabled = true;
+
+        const formData = new FormData();
+        formData.append('customer_id', customerId);
+        formData.append('store', '{{ current_store }}');
+        formData.append('mode', mode);
+        formData.append('search_query', '');
+        formData.append('sort_by', 'default');
+
+        try {
+            const resp = await fetch('/customers/recommendation-block/toggle', {
+                method: 'POST',
+                body: formData
+            });
+            if (!resp.ok) {
+                throw new Error('设置失败');
+            }
+            await loadRecommendations();
+        } catch (err) {
+            alert(err.message || '设置失败，请稍后重试');
+            button.disabled = false;
+        }
     }
 
     function getNowISOString() {

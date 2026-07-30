@@ -508,6 +508,7 @@
             const dutyStoreReminderTimes = new Set(['11:30', '16:30', '18:30', '20:30', '22:30']);
             const dutyStoreReminderUserId = {{ current_user.id | tojson }};
             const dutyStoreReminderSessionId = {{ duty_status.get('active_session_id') | tojson }};
+            const dutyActiveStoreNames = {{ duty_status.get('active_store_names', []) | tojson }};
             const dutyUpdateStoresModalEl = document.getElementById('employeeDutyUpdateStoresModal');
             const dutyUpdateStoresPromptEl = document.getElementById('employeeDutyUpdateStoresPrompt');
             const dutyStoreReminderShownSlots = new Set();
@@ -544,7 +545,8 @@
                 }
 
                 if (dutyUpdateStoresPromptEl) {
-                    dutyUpdateStoresPromptEl.textContent = '请确认当前门店是否与交接班后一致';
+                    const activeStoreText = dutyActiveStoreNames.length ? dutyActiveStoreNames.join('、') : '未选择';
+                    dutyUpdateStoresPromptEl.textContent = `当前所带门店：${activeStoreText}。请确认是否与交接班后一致，如有变化请立即调整。`;
                     dutyUpdateStoresPromptEl.classList.remove('d-none');
                 }
 
