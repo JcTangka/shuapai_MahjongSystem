@@ -690,6 +690,12 @@
                    href="/employees?store={{ current_store }}&tab=my_assessment">
                     <i class="bi bi-clipboard-data"></i>我的考核
                 </a>
+                {% if current_user_is_logistics %}
+                <a class="employee-tab-link {% if active_tab == 'salary_settlement' %}active{% endif %}"
+                   href="/employees?store={{ current_store }}&tab=salary_settlement">
+                    <i class="bi bi-receipt"></i>工资结算
+                </a>
+                {% endif %}
             {% endif %}
 
         </div>
@@ -2393,7 +2399,11 @@
         </h5>
         <div class="text-muted small">
             当前结算月份：{{ salary_settlement_data.year }}年{{ salary_settlement_data.month }}月。
-            生成工资会重算未发放、未锁定员工的基础工资、单量提成和奖金项。
+            {% if can_manage_salary_settlement %}
+                生成工资会重算未发放、未锁定员工的基础工资、单量提成和奖金项。
+            {% else %}
+                只读查看工资核算结果。
+            {% endif %}
         </div>
     </div>
 
@@ -2478,6 +2488,7 @@
 
 <div class="card employee-module-card mb-4">
     <div class="card-body">
+        {% if can_manage_salary_settlement %}
         <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
             <div>
                 <div class="fw-bold">
@@ -2500,12 +2511,13 @@
                 </button>
             </form>
         </div>
+        {% endif %}
 
-        <div class="employee-help-note mt-3">
+        <div class="employee-help-note {% if can_manage_salary_settlement %}mt-3{% endif %}">
             <div class="fw-bold text-dark mb-1">结算口径</div>
             <div>
-                应发工资 = 基础工资 + 单量提成 + 奖金项 + 工资调整流水 - 各类扣款。
-                应发工资还会加上“员工社保”；实发工资 = 应发工资 - 员工社保 - 代缴社保。员工社保和代缴社保都可由管理员在结算列表中手动填写调整。
+                应发工资 = 基础工资 + 单量提成 + 奖金 + 手工调整 + 员工社保。
+                实发工资 = 应发工资 - 代缴社保。所有工资流水都会先归入基础工资、单量提成、奖金、手工调整四类之一，不重复计算。
                 其中，请假扣款、迟到扣款、旷工扣款、工作失误扣款、顶班补贴、临时奖金等都来自工资流水表。
             </div>
         </div>
@@ -2534,7 +2546,9 @@
                     <th style="width: 150px;">代缴社保</th>
                     <th>实发工资</th>
                     <th>状态</th>
+                    {% if can_manage_salary_settlement %}
                     <th style="width: 220px;">操作</th>
+                    {% endif %}
                 </tr>
             </thead>
 
@@ -2576,10 +2590,10 @@
                     {% set employee_social_security_amount = item.employee_social_security_amount or 0 %}
                     {% set social_security_amount = item.social_security_amount or 0 %}
                     {% set payable_salary = (item.final_salary or 0) + employee_social_security_amount %}
-                    {% set actual_salary = payable_salary - employee_social_security_amount - social_security_amount %}
+                    {% set actual_salary = payable_salary - social_security_amount %}
 
                     <td>
-                        {% if item.status != 'draft' %}
+                        {% if salary_settlement_read_only or item.status != 'draft' %}
                             <span class="fw-bold text-success">¥{{ '%.2f'|format(employee_social_security_amount) }}</span>
                         {% else %}
                             <form action="/employees/salary-settlement/social-security/{{ item.id }}"
@@ -2604,7 +2618,7 @@
                     </td>
 
                     <td>
-                        {% if item.status != 'draft' %}
+                        {% if salary_settlement_read_only or item.status != 'draft' %}
                             <span class="fw-bold text-danger">¥{{ '%.2f'|format(social_security_amount) }}</span>
                         {% else %}
                             <form action="/employees/salary-settlement/social-security/{{ item.id }}"
@@ -2654,6 +2668,7 @@
                         {% endif %}
                     </td>
 
+                    {% if can_manage_salary_settlement %}
                     <td>
                         <div class="d-flex flex-column gap-1">
                             {% if item.status == 'draft' and item.employee_confirmed %}
@@ -2701,19 +2716,23 @@
                             {% endif %}
                         </div>
                     </td>
+                    {% endif %}
 
                     {% else %}
-                    <td colspan="9" class="text-muted py-3">
+                    <td colspan="8" class="text-muted py-3">
                         尚未生成该员工本月工资结算
                     </td>
                     <td>
                         <span class="badge bg-light text-dark border">未生成</span>
                     </td>
+                    {% if can_manage_salary_settlement %}
+                    <td></td>
+                    {% endif %}
                     {% endif %}
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="11" class="text-muted py-5">
+                    <td colspan="{{ 11 if can_manage_salary_settlement else 10 }}" class="text-muted py-5">
                         <i class="bi bi-inbox fs-1 d-block mb-3"></i>
                         暂无员工可结算
                     </td>
@@ -2740,6 +2759,10 @@
     {% endif %}
 {% endfor %}
 ]
+</script>
+<script>
+    const salarySettlementReadOnly = {{ salary_settlement_read_only|tojson }};
+    const salarySettlementColumnCount = salarySettlementReadOnly ? 10 : 11;
 </script>
 
 {% else %}
@@ -3984,7 +4007,7 @@
             {% set employee_social_security_amount = settlement.employee_social_security_amount or 0 %}
             {% set social_security_amount = settlement.social_security_amount or 0 %}
             {% set payable_salary = (settlement.final_salary or 0) + employee_social_security_amount %}
-            {% set actual_salary = payable_salary - employee_social_security_amount - social_security_amount %}
+            {% set actual_salary = payable_salary - social_security_amount %}
             <div class="row g-3">
                 <div class="col-md-6 col-xl-3">
                     <div class="border rounded-3 p-3 bg-light h-100">
@@ -4661,7 +4684,8 @@
                                        name="leave_end_date"
                                        min="{{ tomorrow_date }}"
                                        value="{{ item.leave_end_date or item.leave_date }}"
-                                       class="form-control form-control-sm mb-1">
+                                       class="form-control form-control-sm mb-1"
+                                       required>
                                 <select name="leave_type" class="form-select form-select-sm mb-1" required>
                                     {% for value, label in leave_type_options %}
                                     {% if value != 'public_rest' or current_user_can_apply_public_rest %}
@@ -4744,7 +4768,7 @@
                 <div class="modal-body">
                     <input type="hidden" name="store" value="{{ current_store or '' }}">
                     <div class="alert alert-info small">
-                        换班允许当天申请，双方都必须有具体班次；若当天已有已生效请假或顶班记录，则不能提交或同意换班。后勤类型员工、机动类型员工和已锁定的机动顶班班次都不能参与换班。
+                        换班允许当天申请，上班班次可以与休息班次互换；请假、公休或顶班占用当天时，不能提交或同意换班。后勤类型员工、机动类型员工和已锁定的机动顶班班次都不能参与换班。
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-bold">换班员工</label>
@@ -4841,11 +4865,14 @@
                     </div>
 
                     <div class="mb-3">
-                        <label class="form-label fw-bold">结束日期</label>
+                        <label class="form-label fw-bold">
+                            结束日期 <span class="text-danger">*</span>
+                        </label>
                         <input type="date"
                                name="leave_end_date"
                                class="form-control"
-                               min="{{ tomorrow_date }}">
+                               min="{{ tomorrow_date }}"
+                               required>
                         <div class="form-text">
                             普通请假会按开始至结束日期中的上班日拆成单日申请；公休会按整个时间段处理。
                         </div>
@@ -6091,7 +6118,8 @@ function renderMyLeaveActionCell(leave) {
                            name="leave_end_date"
                            min="{{ tomorrow_date }}"
                            value="${escapeHtml(leave.leave_end_date || leave.leave_date)}"
-                           class="form-control form-control-sm mb-1">
+                           class="form-control form-control-sm mb-1"
+                           required>
                     <select name="leave_type" class="form-select form-select-sm mb-1" required>
                         <option value="leave"${leave.leave_type === "leave" ? " selected" : ""}>请假</option>
                         ${leave.leave_type === "public_rest" || canApplyPublicRest
@@ -6764,6 +6792,10 @@ function renderSalarySettlementActionCell(item) {
      * 2. 已确认：可发放并锁定，可退回草稿；
      * 3. 已发放并锁定：不可操作。
      */
+    if (salarySettlementReadOnly) {
+        return "";
+    }
+
     if (item.status === "paid" || item.status === "locked") {
         return `<button class="btn btn-sm btn-outline-secondary w-100" disabled>已发放并锁定</button>`;
     }
@@ -6833,8 +6865,8 @@ function salarySettlementFlowToneClass(flow) {
     const type = String(flow && flow.flow_type ? flow.flow_type : "").trim();
 
     if (category === "base_salary") return "salary-settlement-flow-base";
-    if (category === "personal_commission" || category === "team_commission") return "salary-settlement-flow-commission";
-    if (category === "personal_store_bonus" || category === "bonus") return "salary-settlement-flow-bonus";
+    if (category === "personal_commission") return "salary-settlement-flow-commission";
+    if (category === "personal_store_bonus" || category === "team_commission" || category === "bonus") return "salary-settlement-flow-bonus";
     if (category === "deduction") return "salary-settlement-flow-deduction";
     if (category === "attendance") return "salary-settlement-flow-attendance";
     if (category === "replacement_work") return "salary-settlement-flow-replacement";
@@ -6887,7 +6919,7 @@ function renderSalarySettlementDetailRow(item, expanded = false) {
         <tr id="salary-settlement-detail-row-user-${item.user_id}"
             class="salary-settlement-detail-row${expanded ? "" : " d-none"}"
             data-user-id="${item.user_id}">
-            <td colspan="11">
+            <td colspan="${salarySettlementColumnCount}">
                 <div class="salary-settlement-drawer">
                     <div class="salary-settlement-drawer-summary">
                         <div>
@@ -6922,8 +6954,8 @@ function renderSalarySettlementRow(item) {
     const employeeSocialSecurity = Number(item.employee_social_security_amount || 0);
     const socialSecurity = Number(item.social_security_amount || 0);
     const payableSalary = Number(item.payable_salary || (Number(item.final_salary || 0) + employeeSocialSecurity));
-    const actualSalary = Number(item.actual_salary ?? (payableSalary - employeeSocialSecurity - socialSecurity));
-    const employeeSocialSecurityHtml = (item.status !== "draft")
+    const actualSalary = Number(item.actual_salary ?? (payableSalary - socialSecurity));
+    const employeeSocialSecurityHtml = (salarySettlementReadOnly || item.status !== "draft")
         ? `<span class="fw-bold text-success">¥${employeeSocialSecurity.toFixed(2)}</span>`
         : `
             <form action="/employees/salary-settlement/social-security/${item.id}"
@@ -6941,7 +6973,7 @@ function renderSalarySettlementRow(item) {
                 <button type="submit" class="btn btn-sm btn-outline-primary">保存</button>
             </form>
         `;
-    const socialSecurityHtml = (item.status !== "draft")
+    const socialSecurityHtml = (salarySettlementReadOnly || item.status !== "draft")
         ? `<span class="fw-bold text-danger">¥${socialSecurity.toFixed(2)}</span>`
         : `
             <form action="/employees/salary-settlement/social-security/${item.id}"
@@ -6994,7 +7026,7 @@ function renderSalarySettlementRow(item) {
                     : `<div class="small text-muted mt-1">待员工确认</div>`}
             </td>
 
-            <td>${renderSalarySettlementActionCell(item)}</td>
+            ${salarySettlementReadOnly ? "" : `<td>${renderSalarySettlementActionCell(item)}</td>`}
         </tr>
     `;
 }
@@ -7145,7 +7177,7 @@ renderSalarySettlementDetailRow = function (item, expanded = false) {
         <tr id="salary-settlement-detail-row-user-${item.user_id}"
             class="salary-settlement-detail-row${expanded ? "" : " d-none"}"
             data-user-id="${item.user_id}">
-            <td colspan="11">
+            <td colspan="${salarySettlementColumnCount}">
                 <div class="salary-settlement-drawer">
                     <div class="salary-settlement-drawer-summary">
                         <div>
@@ -7541,8 +7573,16 @@ function shouldSubmitLeaveApplyForm(form) {
     const leaveType = leaveTypeInput ? leaveTypeInput.value : "leave";
     const startInput = form.querySelector("[name='leave_date']");
     const endInput = form.querySelector("[name='leave_end_date']");
+    if (!startInput || !startInput.value || !endInput || !endInput.value) {
+        if (form.reportValidity) {
+            form.reportValidity();
+        } else {
+            alert("请选择请假的开始日期和结束日期");
+        }
+        return false;
+    }
     const startDate = startInput && startInput.value ? new Date(`${startInput.value}T00:00:00`) : null;
-    const endDate = endInput && endInput.value ? new Date(`${endInput.value}T00:00:00`) : startDate;
+    const endDate = endInput && endInput.value ? new Date(`${endInput.value}T00:00:00`) : null;
     const selectedDayCount = startDate && endDate && endDate >= startDate
         ? Math.floor((endDate - startDate) / 86400000) + 1
         : 1;

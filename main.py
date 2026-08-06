@@ -224,6 +224,32 @@ def _find_overlapping_leave_request(
     return None
 
 
+def _leave_request_overlaps_work_date_condition(work_date: date):
+    return and_(
+        EmployeeLeaveRequest.leave_date <= work_date,
+        or_(
+            and_(
+                EmployeeLeaveRequest.leave_end_date == None,
+                EmployeeLeaveRequest.leave_date == work_date
+            ),
+            EmployeeLeaveRequest.leave_end_date >= work_date
+        )
+    )
+
+
+def _leave_request_overlaps_range_condition(start_date: date, end_date: date):
+    return and_(
+        EmployeeLeaveRequest.leave_date <= end_date,
+        or_(
+            and_(
+                EmployeeLeaveRequest.leave_end_date == None,
+                EmployeeLeaveRequest.leave_date >= start_date
+            ),
+            EmployeeLeaveRequest.leave_end_date >= start_date
+        )
+    )
+
+
 def _leave_affected_months(leave_req: EmployeeLeaveRequest) -> List[Tuple[int, int]]:
     months = []
     seen = set()
@@ -350,7 +376,8 @@ def _calc_leave_deduct_amount(
         session: Session,
         user_id: int,
         employee_name: str,
-        shift_type: str
+        shift_type: str,
+        leave_date: Optional[date] = None
 ) -> float:
     """
     计算请假扣款金额。
@@ -362,7 +389,11 @@ def _calc_leave_deduct_amount(
     4. 审批通过的请假不影响全勤奖。
     """
     user = session.get(User, user_id)
-    if (user.employee_type if user else "regular") == "logistics":
+    if leave_date:
+        employee_type = _employee_salary_type_for_month(session, user, leave_date.year, leave_date.month)
+    else:
+        employee_type = _employee_salary_type(user) if user else "regular"
+    if employee_type == "logistics":
         return LOGISTICS_DAILY_SALARY
 
     if _is_rest_shift(shift_type):
@@ -426,23 +457,21 @@ def _calc_employee_leave_deduct(
         leave_date: date,
         shift_type: str
 ) -> float:
-    if (employee.employee_type or "regular") == "logistics":
+    employee_type = _employee_salary_type_for_month(session, employee, leave_date.year, leave_date.month)
+    if employee_type == "logistics":
         return LOGISTICS_DAILY_SALARY
     if _is_rest_shift(shift_type):
         return 0.0
-    if (employee.employee_type or "regular") == "flexible":
+    if employee_type == "flexible":
         return _calc_flexible_employee_leave_deduct(
             session=session,
             employee_name=employee.display_name,
             leave_date=leave_date,
             shift_type=shift_type
         )
-    return _calc_leave_deduct_amount(
-        session=session,
-        user_id=employee.id,
-        employee_name=employee.display_name,
-        shift_type=shift_type
-    )
+    if shift_type == "bigmid":
+        return BIGMID_DAILY_SALARY
+    return NORMAL_DAILY_SALARY
 
 
 def _rebuild_flexible_employee_shift_flows(
@@ -939,7 +968,25 @@ def _is_daily_shift(shift_type: str) -> bool:
 
 
 def _is_swappable_shift(shift_type: str) -> bool:
-    return _is_daily_shift(shift_type) or normalize_shift_type(shift_type or "off") == "bigmid"
+    return normalize_shift_type(shift_type or "off") in {
+        "early", "mid", "night1", "night2", "bigmid", "off"
+    }
+
+
+def _shift_swap_salary_value(shift_type: str) -> float:
+    normalized_shift = normalize_shift_type(shift_type or "off")
+    if normalized_shift == "bigmid":
+        return BIGMID_DAILY_SALARY
+    if _is_daily_shift(normalized_shift):
+        return NORMAL_DAILY_SALARY
+    return 0.0
+
+
+def _calc_shift_swap_salary_delta(original_shift_type: str, swapped_shift_type: str) -> float:
+    return round(
+        _shift_swap_salary_value(swapped_shift_type) - _shift_swap_salary_value(original_shift_type),
+        2
+    )
 
 
 def _is_locked_flexible_replacement_shift(
@@ -957,26 +1004,26 @@ def _is_locked_flexible_replacement_shift(
     ).first() is not None
 
 
-def _has_effective_leave_or_replacement_record(
+def _has_active_leave_or_effective_replacement_record(
         session: Session,
         *,
         user_id: int,
         work_date: date
 ) -> bool:
     """
-    判断员工当天是否已有生效请假或顶班记录。
+    判断员工当天是否已有待处理/生效请假，或已生效顶班记录。
 
     用于当天换班保护：
-    - 请假本人：已生效请假会改变当天应出勤关系，不能再参与换班；
+    - 请假本人：待处理或已生效的请假/公休会占用当天，不能再参与换班；
     - 顶班人：已同意休班顶班或已安排机动顶班后，不能再参与换班。
     """
     return session.exec(
         select(EmployeeLeaveRequest).where(
-            EmployeeLeaveRequest.leave_date == work_date,
+            _leave_request_overlaps_work_date_condition(work_date),
             or_(
                 and_(
                     EmployeeLeaveRequest.user_id == user_id,
-                    EmployeeLeaveRequest.status.in_(list(LEAVE_PENALTY_EFFECTIVE_STATUSES))
+                    EmployeeLeaveRequest.status.in_(list(LEAVE_COUNT_ACTIVE_STATUSES))
                 ),
                 and_(
                     EmployeeLeaveRequest.replacement_user_id == user_id,
@@ -993,14 +1040,14 @@ def _has_effective_leave_or_replacement_record(
     ).first() is not None
 
 
-def _shift_swap_has_effective_leave_or_replacement_conflict(
+def _shift_swap_has_active_leave_or_effective_replacement_conflict(
         session: Session,
         *,
         user_ids: List[int],
         swap_date: date
 ) -> bool:
     return any(
-        _has_effective_leave_or_replacement_record(
+        _has_active_leave_or_effective_replacement_record(
             session=session,
             user_id=user_id,
             work_date=swap_date
@@ -1397,11 +1444,39 @@ def _employee_salary_type(user_obj: User) -> str:
     return "management" if user_obj.role == "admin" else (user_obj.employee_type or "regular")
 
 
-def _employee_participates_personal_store_bonus(user_obj: User) -> bool:
+def _employee_salary_type_for_month(
+        session: Session,
+        user_obj: Optional[User],
+        year: int,
+        month: int
+) -> str:
+    if not user_obj:
+        return "regular"
+    if user_obj.role == "admin":
+        return "management"
+
+    month_end = date(year, month, calendar.monthrange(year, month)[1])
+    record = session.exec(
+        select(EmployeeTypeChangeRecord).where(
+            EmployeeTypeChangeRecord.user_id == user_obj.id,
+            EmployeeTypeChangeRecord.effective_from <= month_end
+        ).order_by(
+            EmployeeTypeChangeRecord.effective_from.desc(),
+            EmployeeTypeChangeRecord.id.desc()
+        )
+    ).first()
+    return record.employee_type if record else (user_obj.employee_type or "regular")
+
+
+def _employee_participates_personal_store_bonus(
+        user_obj: User,
+        employee_type: Optional[str] = None
+) -> bool:
+    effective_type = employee_type or (user_obj.employee_type if user_obj else "regular")
     return bool(
         user_obj
         and user_obj.role != "admin"
-        and (user_obj.employee_type or "regular") in REGULAR_LIKE_EMPLOYEE_TYPES
+        and (effective_type or "regular") in REGULAR_LIKE_EMPLOYEE_TYPES
     )
 
 
@@ -1687,6 +1762,23 @@ def _salary_flow_category_label(flow_category: str) -> str:
     return mapping.get(flow_category or "manual_adjustment", flow_category or "其他")
 
 
+def _salary_settlement_bucket_for_flow_category(flow_category: str) -> str:
+    """
+    Map every salary flow category into exactly one settlement display bucket.
+
+    The settlement table exposes four flow-derived buckets only:
+    base_salary, personal_commission, bonus, and manual_adjustment.
+    """
+    category = flow_category or "manual_adjustment"
+    if category == "base_salary":
+        return "base_salary"
+    if category == "personal_commission":
+        return "personal_commission"
+    if category in {"bonus", "personal_store_bonus", "team_commission"}:
+        return "bonus"
+    return "manual_adjustment"
+
+
 def _salary_flow_type_label(flow_type: str) -> str:
     """
     工资流水类型中文展示。
@@ -1822,7 +1914,12 @@ def _build_salary_settlement_notice_flows(
 ) -> list[dict]:
     notices: list[dict] = []
     employee = session.get(User, item.user_id)
-    employee_type = _employee_salary_type(employee) if employee else "regular"
+    employee_type = _employee_salary_type_for_month(
+        session,
+        employee,
+        item.salary_year,
+        item.salary_month
+    )
     is_full_attendance_eligible = employee_type not in {"flexible", "foreman", "hourly"}
     month_start, month_end = _get_month_start_end(item.salary_year, item.salary_month)
 
@@ -1863,12 +1960,13 @@ def _build_salary_settlement_notice_flows(
                 amount_display="未发放 ¥200.00",
             ))
 
-    if employee and _employee_participates_personal_store_bonus(employee):
+    if employee and _employee_participates_personal_store_bonus(employee, employee_type):
         reached_count, actual_bonus, is_halved = _calc_personal_store_bonus(
             session=session,
             employee=employee,
             year=item.salary_year,
-            month=item.salary_month
+            month=item.salary_month,
+            employee_type=employee_type
         )
         original_bonus = round(reached_count * 100.0, 2)
         reduced_amount = round(max(original_bonus - actual_bonus, 0.0), 2)
@@ -2211,7 +2309,6 @@ def _build_employee_order_count_map(
 def _calc_resigned_employee_shift_salary(
         session: Session,
         *,
-        user_id: int,
         employee_name: str,
         year: int,
         month: int,
@@ -2231,23 +2328,9 @@ def _calc_resigned_employee_shift_salary(
         )
     ).all()
 
-    active_leave_dates = {
-        item.leave_date
-        for item in session.exec(
-            select(EmployeeLeaveRequest).where(
-                EmployeeLeaveRequest.user_id == user_id,
-                EmployeeLeaveRequest.leave_date >= month_start,
-                EmployeeLeaveRequest.leave_date <= end_date,
-                EmployeeLeaveRequest.status.in_(list(LEAVE_PENALTY_EFFECTIVE_STATUSES))
-            )
-        ).all()
-    }
-
     normal_count = 0
     bigmid_count = 0
     for shift in shifts:
-        if shift.work_date in active_leave_dates:
-            continue
         shift_type = normalize_shift_type(shift.shift_type or "off")
         if shift_type == "bigmid":
             bigmid_count += 1
@@ -2263,7 +2346,8 @@ def _employee_has_full_attendance_bonus(
         user_id: int,
         employee_name: str,
         year: int,
-        month: int
+        month: int,
+        employee_type: Optional[str] = None
 ) -> bool:
     """
     判断员工本月是否有全勤奖。
@@ -2276,11 +2360,11 @@ def _employee_has_full_attendance_bonus(
     """
     month_start, month_end = _get_month_start_end(year, month)
 
-    employee = session.get(User, user_id)
-    if employee:
-        employee_type = _employee_salary_type(employee)
-        if employee_type in {"flexible", "foreman", "hourly"}:
-            return False
+    if employee_type is None:
+        employee = session.get(User, user_id)
+        employee_type = _employee_salary_type_for_month(session, employee, year, month)
+    if employee_type in {"flexible", "foreman", "hourly"}:
+        return False
 
     hit = session.exec(
         select(EmployeeAttendanceRecord).where(
@@ -2371,6 +2455,30 @@ def _delete_unlocked_auto_settlement_flows(
         session.delete(f)
 
 
+def _delete_unlocked_flexible_schedule_flows(
+        session: Session,
+        user_id: int,
+        year: int,
+        month: int
+) -> None:
+    old_flows = session.exec(
+        select(SalaryFlowRecord).where(
+            SalaryFlowRecord.user_id == user_id,
+            SalaryFlowRecord.salary_year == year,
+            SalaryFlowRecord.salary_month == month,
+            SalaryFlowRecord.source_type == "flexible_schedule",
+            SalaryFlowRecord.is_auto == True
+        )
+    ).all()
+
+    for flow in old_flows:
+        if getattr(flow, "is_locked", False):
+            raise ValueError("该员工存在已锁定的机动班次工资流水，不能按非机动岗位重算")
+
+    for flow in old_flows:
+        session.delete(flow)
+
+
 def _create_salary_settlement_flow(
         session: Session,
         *,
@@ -2433,17 +2541,16 @@ def _sum_salary_flows_for_settlement(
         session: Session,
         user_id: int,
         year: int,
-        month: int,
-        exclude_leave_deduct: bool = False
+        month: int
 ) -> dict:
     """
     汇总员工某月全部工资流水，用于写入 MonthlySalarySettlement。
 
     注意：
-    1. final_salary 直接等于全部工资流水 amount 总和；
-    2. bonus_total 包含个人门店达标奖和其他奖金；
+    1. 每条 SalaryFlowRecord 只能归属到基础工资、单量提成、奖金、手工调整四个展示桶之一；
+    2. final_salary 等于四个展示桶净额合计，不含员工社保；
     3. deduction_total 仍记录所有负数流水绝对值合计；
-    4. manual_adjustment_total 用于工资结算列表展示，包含所有扣款和其他手工调整净额。
+    4. manual_adjustment_total 用于工资结算列表展示，包含未在基础工资、单量提成、奖金列展示的流水净额。
     """
     flows = session.exec(
         select(SalaryFlowRecord).where(
@@ -2465,33 +2572,32 @@ def _sum_salary_flows_for_settlement(
     }
 
     for f in flows:
-        if exclude_leave_deduct and f.flow_type == "leave_deduct" and f.source_type == "leave_request":
-            leave_req = session.get(EmployeeLeaveRequest, f.source_id) if f.source_id else None
-            if leave_req and leave_req.user_id == user_id:
-                continue
-
         amount = round(float(f.amount or 0), 2)
         category = f.flow_category or ""
+        bucket = _salary_settlement_bucket_for_flow_category(category)
 
-        result["final_salary"] += amount
-
-        if category == "base_salary":
+        if bucket == "base_salary":
             result["base_salary_total"] += amount
-        elif category == "personal_commission":
+        elif bucket == "personal_commission":
             result["personal_commission_total"] += amount
-        elif category == "personal_store_bonus":
-            result["personal_store_bonus_total"] += amount
+        elif bucket == "bonus":
             result["bonus_total"] += amount
-        elif category == "team_commission":
-            continue
-        elif category == "bonus":
-            result["bonus_total"] += amount
+            if category == "personal_store_bonus":
+                result["personal_store_bonus_total"] += amount
+            elif category == "team_commission":
+                result["team_commission_total"] += amount
+        else:
+            result["manual_adjustment_total"] += amount
 
         if amount < 0:
             result["deduction_total"] += abs(amount)
 
-        if amount < 0 or not f.is_auto:
-            result["manual_adjustment_total"] += amount
+    result["final_salary"] = (
+        result["base_salary_total"] +
+        result["personal_commission_total"] +
+        result["bonus_total"] +
+        result["manual_adjustment_total"]
+    )
 
     for k in result:
         result[k] = round(result[k], 2)
@@ -2532,9 +2638,14 @@ def _salary_settlement_payload(
     employee_social_security_amount = round(float(getattr(item, "employee_social_security_amount", 0) or 0), 2)
     social_security_amount = round(float(getattr(item, "social_security_amount", 0) or 0), 2)
     payable_salary = round(final_salary + employee_social_security_amount, 2)
-    actual_salary = round(payable_salary - employee_social_security_amount - social_security_amount, 2)
+    actual_salary = round(payable_salary - social_security_amount, 2)
     employee = session.get(User, item.user_id)
-    employee_type = _employee_salary_type(employee) if employee else "regular"
+    employee_type = _employee_salary_type_for_month(
+        session,
+        employee,
+        item.salary_year,
+        item.salary_month
+    )
 
     return {
         "id": item.id,
@@ -2647,10 +2758,10 @@ def _calculate_salary_for_one_employee(
         employee_name=user_obj.display_name
     )
 
-    employee_type = _employee_salary_type(user_obj)
     resignation_date = getattr(user_obj, "resignation_date", None)
     is_resignation_month = _is_resignation_month(user_obj, year, month)
     month_start, month_end = _get_month_start_end(year, month)
+    employee_type = _employee_salary_type_for_month(session, user_obj, year, month)
 
     if is_resignation_month and resignation_date:
         commission_end_date = min(resignation_date, month_end)
@@ -2674,7 +2785,8 @@ def _calculate_salary_for_one_employee(
             session=session,
             employee=user_obj,
             year=year,
-            month=month
+            month=month,
+            employee_type=employee_type
         )
 
     is_flexible_employee = employee_type == "flexible"
@@ -2687,6 +2799,14 @@ def _calculate_salary_for_one_employee(
             operator=operator
         )
         session.flush()
+    else:
+        _delete_unlocked_flexible_schedule_flows(
+            session=session,
+            user_id=user_obj.id,
+            year=year,
+            month=month
+        )
+        session.flush()
 
     team_id = None
     team_name_snapshot = None
@@ -2697,7 +2817,8 @@ def _calculate_salary_for_one_employee(
         user_id=user_obj.id,
         employee_name=user_obj.display_name,
         year=year,
-        month=month
+        month=month,
+        employee_type=employee_type
     )
     full_attendance_bonus = 0.0 if is_resignation_month else (200.0 if has_full_attendance else 0.0)
 
@@ -2705,7 +2826,6 @@ def _calculate_salary_for_one_employee(
     if is_resignation_month and resignation_date:
         base_salary, normal_shift_count, bigmid_shift_count = _calc_resigned_employee_shift_salary(
             session=session,
-            user_id=user_obj.id,
             employee_name=user_obj.display_name,
             year=year,
             month=month,
@@ -2715,7 +2835,7 @@ def _calculate_salary_for_one_employee(
             f"{year}年{month}月离职员工基础工资按 {month_start} 至 {min(resignation_date, month_end)} "
             f"排班非休息班次计算：日常班 {normal_shift_count} 天 × {NORMAL_DAILY_SALARY:.0f} 元，"
             f"大中班 {bigmid_shift_count} 天 × {BIGMID_DAILY_SALARY:.0f} 元。"
-            "已生效请假班次不计基础工资，请假扣款不重复计入结算。"
+            "已生效请假扣款通过工资流水归入手工调整。"
         )
     elif employee_type == "flexible":
         base_salary = FLEXIBLE_BASE_SALARY
@@ -2806,8 +2926,7 @@ def _calculate_salary_for_one_employee(
         session=session,
         user_id=user_obj.id,
         year=year,
-        month=month,
-        exclude_leave_deduct=is_resignation_month
+        month=month
     )
 
     settlement.employee_name_snapshot = user_obj.display_name
@@ -3130,7 +3249,10 @@ def _build_employee_whiteboard_data(
     eligible_employee_store_names = {
         employee_name
         for employee_name, employee in user_by_display_name.items()
-        if _employee_participates_personal_store_bonus(employee)
+        if _employee_participates_personal_store_bonus(
+            employee,
+            _employee_salary_type_for_month(session, employee, year, month)
+        )
     }
     available_employee_store_names = sorted({
         employee_name
@@ -3333,10 +3455,11 @@ def _build_personal_store_target_rows(
         session: Session,
         employee: User,
         year: int,
-        month: int
+        month: int,
+        employee_type: Optional[str] = None
 ) -> List[dict]:
     """Build per-store personal target rows for one bonus-eligible employee."""
-    if not _employee_participates_personal_store_bonus(employee):
+    if not _employee_participates_personal_store_bonus(employee, employee_type):
         return []
 
     month_start, month_end = _get_month_start_end(year, month)
@@ -3394,10 +3517,11 @@ def _calc_personal_store_bonus(
         session: Session,
         employee: User,
         year: int,
-        month: int
+        month: int,
+        employee_type: Optional[str] = None
 ) -> Tuple[int, float, bool]:
     reached_count = len([
-        row for row in _build_personal_store_target_rows(session, employee, year, month)
+        row for row in _build_personal_store_target_rows(session, employee, year, month, employee_type=employee_type)
         if row["is_reached"]
     ])
     bonus_amount = round(reached_count * 100.0, 2)
@@ -3528,7 +3652,14 @@ def _build_my_assessment_data(
         commission_nodes.append(commission_nodes[-1] + 50)
     axis_max = max(order_count, commission_nodes[-1], 1)
 
-    personal_store_rows = _build_personal_store_target_rows(session, target_user, year, month)
+    target_employee_type = _employee_salary_type_for_month(session, target_user, year, month)
+    personal_store_rows = _build_personal_store_target_rows(
+        session,
+        target_user,
+        year,
+        month,
+        employee_type=target_employee_type
+    )
     reached_store_count = len([row for row in personal_store_rows if row["is_reached"]])
     personal_store_bonus_total = round(reached_store_count * 100.0, 2)
     personal_store_bonus_halved = _has_personal_store_bonus_halve_penalty(session, target_user.id, year, month)
@@ -3766,7 +3897,9 @@ def _calculate_team_assessment(
         member for member in active_members
         if (
             (member_user := session.get(User, member.user_id))
-            and _employee_participates_team_bonus(_employee_salary_type(member_user))
+            and _employee_participates_team_bonus(
+                _employee_salary_type_for_month(session, member_user, year, month)
+            )
         )
     ]
     team_member_count = len(eligible_members)
@@ -9068,6 +9201,10 @@ async def employees_page(
     if store not in store_list and store_list:
         store = store_list[0]
 
+    current_user_is_logistics = _is_logistics_employee(user)
+    can_manage_salary_settlement = user.role == "admin"
+    can_view_salary_settlement = can_manage_salary_settlement or current_user_is_logistics
+
     # ===== 2. 页签权限控制 =====
     admin_tabs = [
         "employee_list",
@@ -9097,7 +9234,7 @@ async def employees_page(
         allowed_tabs = admin_tabs
         default_tab = "employee_list"
     else:
-        allowed_tabs = employee_tabs
+        allowed_tabs = employee_tabs + (["salary_settlement"] if current_user_is_logistics else [])
         default_tab = "my_salary"
 
     if tab not in allowed_tabs:
@@ -9374,8 +9511,8 @@ async def employees_page(
             month=selected_salary_month
         )
 
-    # 管理员进入“工资结算”页签时，加载指定月份工资结算数据。
-    if tab == "salary_settlement" and user.role == "admin":
+    # 管理员可管理工资结算；后勤员工可只读查看同一工资核算视图。
+    if tab == "salary_settlement" and can_view_salary_settlement:
         today = date.today()
 
         selected_settlement_year = settlement_year or today.year
@@ -9620,7 +9757,7 @@ async def employees_page(
         "request": request,
         "page_name": "employees",
         "current_user": user,
-        "current_user_is_logistics": _is_logistics_employee(user),
+        "current_user_is_logistics": current_user_is_logistics,
         "current_user_can_apply_public_rest": _can_apply_public_rest(user),
         "current_store": store,
         "store_list": store_list,
@@ -9691,6 +9828,8 @@ async def employees_page(
 
         # 工资结算模块数据
         "salary_settlement_data": salary_settlement_data,
+        "can_manage_salary_settlement": can_manage_salary_settlement,
+        "salary_settlement_read_only": not can_manage_salary_settlement,
 
         # 激励白板数据
         "whiteboard_data": whiteboard_data,
@@ -10336,7 +10475,7 @@ async def employee_shift_swap_apply(
     applicant_shift = _get_shift_type_for_employee_on_date(session, user.display_name, swap_d)
     target_shift = _get_shift_type_for_employee_on_date(session, target.display_name, swap_d)
     if not _is_swappable_shift(applicant_shift) or not _is_swappable_shift(target_shift):
-        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天都必须有具体班次，休息日不能换班"), status_code=303)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天必须是可换班班次"), status_code=303)
     if (
         _is_locked_flexible_replacement_shift(session, employee_name=user.display_name, work_date=swap_d)
         or _is_locked_flexible_replacement_shift(session, employee_name=target.display_name, work_date=swap_d)
@@ -10344,12 +10483,12 @@ async def employee_shift_swap_apply(
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="已锁定的机动顶班班次不能参与换班"), status_code=303)
     if _shift_swap_has_conflict(session, user_ids=[user.id, target.id], swap_date=swap_d):
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天已有待处理或已生效的换班记录"), status_code=303)
-    if _shift_swap_has_effective_leave_or_replacement_conflict(
+    if _shift_swap_has_active_leave_or_effective_replacement_conflict(
         session,
         user_ids=[user.id, target.id],
         swap_date=swap_d
     ):
-        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天已有已生效请假或顶班记录，不能换班"), status_code=303)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天已有待处理或已生效请假、公休或顶班记录，不能换班"), status_code=303)
 
     now = datetime.now()
     item = EmployeeShiftSwapRequest(
@@ -10440,12 +10579,12 @@ async def employee_shift_swap_respond(
         exclude_swap_id=item.id
     ):
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天已有其他待处理或已生效的换班记录"), status_code=303)
-    if _shift_swap_has_effective_leave_or_replacement_conflict(
+    if _shift_swap_has_active_leave_or_effective_replacement_conflict(
         session,
         user_ids=[applicant.id, user.id],
         swap_date=item.swap_date
     ):
-        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天已有已生效请假或顶班记录，不能同意本次换班"), status_code=303)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="双方当天已有待处理或已生效请假、公休或顶班记录，不能同意本次换班"), status_code=303)
 
     upsert_shift(session, applicant.display_name, item.swap_date, item.target_original_shift_type)
     upsert_shift(session, user.display_name, item.swap_date, item.applicant_original_shift_type)
@@ -10455,12 +10594,14 @@ async def employee_shift_swap_respond(
     session.add(item)
     session.flush()
 
-    applicant_amount = (
-        25.0 if _is_daily_shift(item.applicant_original_shift_type) and item.target_original_shift_type == "bigmid"
-        else -25.0 if item.applicant_original_shift_type == "bigmid" and _is_daily_shift(item.target_original_shift_type)
-        else 0.0
+    applicant_amount = _calc_shift_swap_salary_delta(
+        item.applicant_original_shift_type,
+        item.target_original_shift_type
     )
-    target_amount = -applicant_amount
+    target_amount = _calc_shift_swap_salary_delta(
+        item.target_original_shift_type,
+        item.applicant_original_shift_type
+    )
     applicant_flow = _create_shift_swap_salary_flow(
         session=session, employee=applicant, swap_req=item, amount=applicant_amount,
         title="换班工资调整",
@@ -10562,12 +10703,14 @@ async def employee_shift_swap_cancel_respond(
     session.add(item)
     session.flush()
 
-    applicant_amount = (
-        -25.0 if _is_daily_shift(item.applicant_original_shift_type) and item.target_original_shift_type == "bigmid"
-        else 25.0 if item.applicant_original_shift_type == "bigmid" and _is_daily_shift(item.target_original_shift_type)
-        else 0.0
+    applicant_amount = _calc_shift_swap_salary_delta(
+        item.target_original_shift_type,
+        item.applicant_original_shift_type
     )
-    target_amount = -applicant_amount
+    target_amount = _calc_shift_swap_salary_delta(
+        item.applicant_original_shift_type,
+        item.target_original_shift_type
+    )
     applicant_flow = _create_shift_swap_salary_flow(
         session=session, employee=applicant, swap_req=item, amount=applicant_amount,
         title="撤回换班工资调整",
@@ -10648,6 +10791,21 @@ async def employee_leave_apply(
             return _employee_ajax_error("请先登录", 401)
         return RedirectResponse(url="/login", status_code=303)
 
+    if not _normalize_text(leave_date):
+        if _is_ajax_request(request):
+            return _employee_ajax_error("开始日期不能为空")
+        return RedirectResponse(
+            url=_build_employees_url(store, "my_leave", error="开始日期不能为空"),
+            status_code=303
+        )
+    if not _normalize_text(leave_end_date):
+        if _is_ajax_request(request):
+            return _employee_ajax_error("结束日期不能为空")
+        return RedirectResponse(
+            url=_build_employees_url(store, "my_leave", error="结束日期不能为空"),
+            status_code=303
+        )
+
     try:
         leave_d = datetime.strptime(leave_date, "%Y-%m-%d").date()
     except Exception:
@@ -10658,17 +10816,15 @@ async def employee_leave_apply(
             status_code=303
         )
 
-    leave_end_d = leave_d
-    if _normalize_text(leave_end_date):
-        try:
-            leave_end_d = datetime.strptime(leave_end_date, "%Y-%m-%d").date()
-        except Exception:
-            if _is_ajax_request(request):
-                return _employee_ajax_error("结束日期格式不正确")
-            return RedirectResponse(
-                url=_build_employees_url(store, "my_leave", error="结束日期格式不正确"),
-                status_code=303
-            )
+    try:
+        leave_end_d = datetime.strptime(leave_end_date, "%Y-%m-%d").date()
+    except Exception:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("结束日期格式不正确")
+        return RedirectResponse(
+            url=_build_employees_url(store, "my_leave", error="结束日期格式不正确"),
+            status_code=303
+        )
 
     today = date.today()
 
@@ -10799,10 +10955,16 @@ async def employee_leave_apply(
         else:
             item["month_leave_count_snapshot"] = 1
 
+        leave_employee_type = _employee_salary_type_for_month(
+            session,
+            user,
+            work_date.year,
+            work_date.month
+        )
         item["trigger_personal_store_bonus_halve"] = (
             leave_type == "leave"
             and item["month_leave_count_snapshot"] >= 4
-            and _employee_participates_personal_store_bonus(user)
+            and _employee_participates_personal_store_bonus(user, leave_employee_type)
         )
 
     trigger_personal_store_bonus_halve = any(
@@ -10955,6 +11117,15 @@ async def employee_leave_update_pending(
             return _employee_ajax_error("只有待管理员审批的请假申请可以编辑")
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="只有待管理员审批的请假申请可以编辑"), status_code=303)
 
+    if not _normalize_text(leave_date):
+        if _is_ajax_request(request):
+            return _employee_ajax_error("开始日期不能为空")
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="开始日期不能为空"), status_code=303)
+    if not _normalize_text(leave_end_date):
+        if _is_ajax_request(request):
+            return _employee_ajax_error("结束日期不能为空")
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="结束日期不能为空"), status_code=303)
+
     try:
         leave_d = datetime.strptime(leave_date, "%Y-%m-%d").date()
     except Exception:
@@ -10962,14 +11133,12 @@ async def employee_leave_update_pending(
             return _employee_ajax_error("请假日期格式不正确")
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="请假日期格式不正确"), status_code=303)
 
-    leave_end_d = leave_d
-    if _normalize_text(leave_end_date):
-        try:
-            leave_end_d = datetime.strptime(leave_end_date, "%Y-%m-%d").date()
-        except Exception:
-            if _is_ajax_request(request):
-                return _employee_ajax_error("结束日期格式不正确")
-            return RedirectResponse(url=_build_employees_url(store, "my_leave", error="结束日期格式不正确"), status_code=303)
+    try:
+        leave_end_d = datetime.strptime(leave_end_date, "%Y-%m-%d").date()
+    except Exception:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("结束日期格式不正确")
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="结束日期格式不正确"), status_code=303)
 
     if leave_d <= date.today():
         if _is_ajax_request(request):
@@ -11060,11 +11229,17 @@ async def employee_leave_update_pending(
         )
     )
     leave_req.month_leave_count_snapshot = current_month_leave_count + (1 if leave_type == "leave" else 0)
+    leave_employee_type = _employee_salary_type_for_month(
+        session,
+        user,
+        leave_d.year,
+        leave_d.month
+    )
     leave_req.trigger_personal_store_bonus_halve = (
         leave_type == "leave"
         and
         leave_req.month_leave_count_snapshot >= 4
-        and _employee_participates_personal_store_bonus(user)
+        and _employee_participates_personal_store_bonus(user, leave_employee_type)
     )
     leave_req.updated_at = datetime.now()
     session.add(leave_req)
@@ -11698,7 +11873,8 @@ async def employee_leave_replacement_accept(
         session=session,
         user_id=leave_req.user_id,
         employee_name=leave_req.employee_name_snapshot,
-        shift_type=leave_req.shift_type
+        shift_type=leave_req.shift_type,
+        leave_date=leave_req.leave_date
     )
 
     if replacement_pay_amount > 0 and not leave_req.replacement_salary_flow_id:
@@ -11830,7 +12006,8 @@ async def employee_leave_replacement_reject(
             session=session,
             user_id=leave_req.user_id,
             employee_name=leave_req.employee_name_snapshot,
-            shift_type=leave_req.shift_type
+            shift_type=leave_req.shift_type,
+            leave_date=leave_req.leave_date
         )
         _create_employee_notification(
             session=session,
@@ -11987,7 +12164,8 @@ async def employee_leave_force_after_replacement_reject(
         session=session,
         user_id=leave_req.user_id,
         employee_name=leave_req.employee_name_snapshot,
-        shift_type=leave_req.shift_type
+        shift_type=leave_req.shift_type,
+        leave_date=leave_req.leave_date
     )
 
     leave_req.status = "force_leave_deducted"
@@ -22342,11 +22520,7 @@ def _get_flexible_locked_shift_keys(
     rows = session.exec(
         select(EmployeeLeaveRequest).where(
             EmployeeLeaveRequest.status == "approved_with_flexible",
-            EmployeeLeaveRequest.leave_date <= month_end,
-            or_(
-                EmployeeLeaveRequest.leave_end_date == None,
-                EmployeeLeaveRequest.leave_end_date >= month_start
-            )
+            _leave_request_overlaps_range_condition(month_start, month_end)
         )
     ).all()
     locked_keys: set[Tuple[str, date]] = set()
@@ -22459,11 +22633,7 @@ async def schedule_page(
     leave_event_rows = session.exec(
         select(EmployeeLeaveRequest).where(
             EmployeeLeaveRequest.status.in_(list(effective_leave_statuses)),
-            EmployeeLeaveRequest.leave_date <= day_list[-1],
-            or_(
-                EmployeeLeaveRequest.leave_end_date == None,
-                EmployeeLeaveRequest.leave_end_date >= day_list[0]
-            )
+            _leave_request_overlaps_range_condition(day_list[0], day_list[-1])
         ).order_by(EmployeeLeaveRequest.leave_date, EmployeeLeaveRequest.id)
     ).all()
     for item in leave_event_rows:
