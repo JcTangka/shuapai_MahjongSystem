@@ -264,6 +264,7 @@ class EmployeeDutySession(SQLModel, table=True):
     started_at: Optional[datetime] = Field(default=None, index=True)
     reviewed_at: Optional[datetime] = Field(default=None, index=True)
     ended_at: Optional[datetime] = Field(default=None, index=True)
+    lunch_breaks_json: Optional[str] = None
 
     created_at: datetime = Field(default_factory=datetime.now, index=True)
     updated_at: datetime = Field(default_factory=datetime.now, index=True)
@@ -988,6 +989,7 @@ class EmployeeLeaveRequest(SQLModel, table=True):
     replacement_employee_name_snapshot: Optional[str] = Field(default=None, index=True)
     replacement_response: Optional[str] = Field(default=None, index=True)  # accepted / rejected
     replacement_response_at: Optional[datetime] = Field(default=None, index=True)
+    flexible_replacement_snapshot_json: Optional[str] = None  # 机动顶班按日期保存：{date: {user_id, employee_name, shift_type, ...}}
 
     # 是否满足至少提前一天申请
     is_before_one_day: bool = Field(default=False, index=True)
@@ -1543,6 +1545,7 @@ def create_db_and_tables():
     migrate_employee_module_tables()
     # V3 员工管理模块：
     # 补充员工考勤表后续新增字段，避免旧库已有表时 create_all 不自动加列。
+    migrate_employee_duty_session_table()
     migrate_employee_leave_request_table()
     migrate_employee_attendance_record_table()
     migrate_monthly_salary_settlement_table()
@@ -3040,6 +3043,37 @@ def migrate_employee_leave_request_table():
             conn.execute(text("""
                 ALTER TABLE employeeleaverequest
                 ADD COLUMN shift_snapshot_json TEXT
+            """))
+
+        if "flexible_replacement_snapshot_json" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE employeeleaverequest
+                ADD COLUMN flexible_replacement_snapshot_json TEXT
+            """))
+
+
+def migrate_employee_duty_session_table():
+    """
+    员工上班/带店记录表迁移：
+    补充午休明细 JSON，用于扣除午休在岗时长并展示午休异常。
+    """
+    with engine.begin() as conn:
+        table_exists = conn.execute(text("""
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table' AND name='employeedutysession'
+        """)).fetchone()
+
+        if not table_exists:
+            return
+
+        columns = conn.execute(text("PRAGMA table_info(employeedutysession)")).fetchall()
+        col_names = {col[1] for col in columns}
+
+        if "lunch_breaks_json" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE employeedutysession
+                ADD COLUMN lunch_breaks_json TEXT
             """))
 
 def migrate_employee_attendance_record_table():

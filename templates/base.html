@@ -280,11 +280,36 @@
             {% set duty_status = request.state.duty_status|default({}) %}
             <div class="ms-auto d-flex align-items-center">
                 {% if current_user.role != 'admin' and duty_status.get('has_active_store_duty') %}
+                {% if duty_status.get('is_on_lunch') %}
+                <span class="badge bg-warning text-dark me-2">
+                    <i class="bi bi-cup-hot me-1"></i>午休中
+                    {% if duty_status.get('active_lunch_started_at') %}
+                    {{ duty_status.get('active_lunch_started_at').strftime('%H:%M') }}
+                    {% endif %}
+                </span>
+                {% for label in duty_status.get('lunch_warning_labels', []) %}
+                <span class="badge bg-danger me-2">{{ label }}</span>
+                {% endfor %}
+                <form action="/employee-duty/lunch/end" method="post" class="me-2 mb-0"
+                      onsubmit="return confirm('确定结束午休并继续带店吗？');">
+                    <input type="hidden" name="current_store" value="{{ current_store or '' }}">
+                    <button type="submit" class="btn btn-sm btn-light text-primary fw-bold">
+                        <i class="bi bi-play-circle me-1"></i>继续带店
+                    </button>
+                </form>
+                {% else %}
                 <button type="button" class="btn btn-sm btn-outline-light me-2"
                         data-bs-toggle="modal"
                         data-bs-target="#employeeDutyUpdateStoresModal">
                     <i class="bi bi-pencil-square me-1"></i>调整门店
                 </button>
+                <form action="/employee-duty/lunch/start" method="post" class="me-2 mb-0"
+                      onsubmit="return confirm('确定停止带店进入午休吗？午休时间不计入在岗时间。');">
+                    <input type="hidden" name="current_store" value="{{ current_store or '' }}">
+                    <button type="submit" class="btn btn-sm btn-warning fw-bold">
+                        <i class="bi bi-cup-hot me-1"></i>停止带店午休
+                    </button>
+                </form>
                 <form action="/employee-duty/end" method="post" class="me-2 mb-0"
                       onsubmit="return confirm('确定结束带店并记录下班时间吗？');">
                     <input type="hidden" name="current_store" value="{{ current_store or '' }}">
@@ -292,6 +317,7 @@
                         <i class="bi bi-stop-circle me-1"></i>结束带店
                     </button>
                 </form>
+                {% endif %}
                 {% endif %}
                 <span class="text-white small me-3">
                     <i class="bi bi-person-circle me-1"></i>
@@ -354,7 +380,7 @@
 <div class="modal-backdrop fade show"></div>
 {% endif %}
 
-{% if current_user.role != 'admin' and duty_status.get('has_active_store_duty') %}
+{% if current_user.role != 'admin' and duty_status.get('has_active_store_duty') and not duty_status.get('is_on_lunch') %}
 <div class="modal fade" id="employeeDutyUpdateStoresModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content border-0 shadow-lg">

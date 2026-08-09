@@ -116,6 +116,30 @@
     font-weight: 700;
     white-space: nowrap;
   }
+
+  .compare-month-panel {
+    border-top: 1px solid #edf2f7;
+    padding-top: 12px;
+  }
+
+  .compare-month-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 8px 14px;
+    max-height: 132px;
+    overflow-y: auto;
+    padding: 2px 4px;
+  }
+
+  .compare-month-check {
+    margin-bottom: 0;
+  }
+
+  .revenue-total-compare {
+    border-top: 1px solid #edf2f7;
+    padding-top: 18px;
+    margin-top: 22px;
+  }
 </style>
 
 <div class="container-fluid px-0">
@@ -123,7 +147,7 @@
   <!-- 顶部筛选区 -->
   <div class="filter-bar mb-4">
     <form method="get" action="/brand-store-data" class="row g-3 align-items-end">
-      <div class="col-md-3">
+      <div class="col-lg-2 col-md-3">
         <label class="form-label fw-bold text-secondary">统计维度</label>
         <select class="form-select" name="dimension" id="dimensionSelect">
           <option value="brand" {% if dimension == "brand" %}selected{% endif %}>品牌</option>
@@ -131,7 +155,7 @@
         </select>
       </div>
 
-      <div class="col-md-3" id="storeSelectWrap">
+      <div class="col-lg-2 col-md-3" id="storeSelectWrap">
         <label class="form-label fw-bold text-secondary">门店</label>
         <select class="form-select" name="store" id="storeSelect">
           {% for s in store_list %}
@@ -140,28 +164,61 @@
         </select>
       </div>
 
-      <div class="col-md-2">
+      <div class="col-lg-2 col-md-3">
         <label class="form-label fw-bold text-secondary">开始日期</label>
         <input type="date" class="form-control" name="start_date" value="{{ start_date }}">
       </div>
 
-      <div class="col-md-2">
+      <div class="col-lg-2 col-md-3">
         <label class="form-label fw-bold text-secondary">结束日期</label>
         <input type="date" class="form-control" name="end_date" value="{{ end_date }}">
       </div>
 
-      <div class="col-md-2 d-grid">
+      <div class="col-lg-2 col-md-4">
+        <label class="form-label fw-bold text-secondary">统计对比</label>
+        <select class="form-select" name="compare_mode" id="compareModeSelect">
+          {% for value, label in compare_mode_options %}
+          <option value="{{ value }}" {% if compare_mode == value %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="col-lg-2 col-md-4 d-grid">
         <button class="btn btn-primary" type="submit">
           <i class="bi bi-funnel me-1"></i>应用筛选
         </button>
+      </div>
+
+      <div class="col-12 compare-month-panel" id="compareMonthsWrap">
+        <label class="form-label fw-bold text-secondary">对比月份</label>
+        <div class="compare-month-grid">
+          {% for item in compare_month_options %}
+          <div class="form-check compare-month-check">
+            <input class="form-check-input compare-month-input"
+                   type="checkbox"
+                   name="compare_months"
+                   id="compareMonth{{ loop.index }}"
+                   value="{{ item.value }}"
+                   {% if item.selected %}checked{% endif %}>
+            <label class="form-check-label" for="compareMonth{{ loop.index }}">{{ item.label }}</label>
+          </div>
+          {% endfor %}
+        </div>
       </div>
     </form>
 
     <div class="mt-3 d-flex flex-wrap gap-2 align-items-center">
       <span class="kpi-badge">当前主体：{{ stats.entity_name }}</span>
       <span class="kpi-badge">统计区间：{{ start_date }} 至 {{ end_date }}</span>
+      <span class="kpi-badge">对比方式：{{ stats.compare.mode_label }}</span>
+      {% if compare_mode != "none" %}
+      <span class="kpi-badge">
+        对比月份：
+        {% for item in selected_compare_months %}{{ item.label }}{% if not loop.last %}、{% endif %}{% endfor %}
+      </span>
+      {% endif %}
       <a class="btn btn-sm btn-outline-secondary"
-         href="/brand-store-data?dimension={{ dimension }}{% if dimension == 'store' %}&store={{ current_store }}{% endif %}&start_date={{ start_date[:8] }}01&end_date={{ end_date }}">
+         href="/brand-store-data?dimension={{ dimension }}{% if dimension == 'store' %}&store={{ current_store }}{% endif %}&start_date={{ start_date[:8] }}01&end_date={{ end_date }}&compare_mode={{ compare_mode }}{% if compare_mode == 'custom' %}{% for item in selected_compare_months %}&compare_months={{ item.value }}{% endfor %}{% endif %}">
         本月
       </a>
       <a class="btn btn-sm btn-outline-secondary"
@@ -226,6 +283,13 @@
               <span class="text-muted small">({{ "%.2f"|format(stats.revenue.other_rate) }}%)</span>
             </div>
           </div>
+          {% if compare_mode != "none" %}
+          <div class="revenue-total-compare">
+            <div class="fw-bold mb-1">总营收金额对比</div>
+            <div class="section-subtitle mb-3">按所选对比月份汇总实收金额</div>
+            <canvas id="revenueTotalCompareChart" height="240"></canvas>
+          </div>
+          {% endif %}
         </div>
       </div>
       <div class="col-lg-8">
@@ -510,15 +574,24 @@
 <script>
   const trendLabels = {{ trend_labels_json | safe }};
   const revenueTrend = {{ revenue_trend_json | safe }};
+  const revenueCompareLabels = {{ revenue_compare_labels_json | safe }};
+  const revenueCompareDatasets = {{ revenue_compare_datasets_json | safe }};
+  const revenueTotalCompareLabels = {{ revenue_total_compare_labels_json | safe }};
+  const revenueTotalCompareData = {{ revenue_total_compare_data_json | safe }};
+  const revenueTotalCompareDateRanges = {{ revenue_total_compare_date_ranges_json | safe }};
   const privateOrderTrend = {{ private_order_trend_json | safe }};
   const selfArrivalOrderTrend = {{ self_arrival_order_trend_json | safe }};
   const customerFunnel = {{ customer_funnel_json | safe }};
   const selfArrivalCustomerFunnel = {{ self_arrival_customer_funnel_json | safe }};
+  const compareMode = "{{ compare_mode }}";
 
   // 维度切换时，品牌隐藏门店下拉
   const dimensionSelect = document.getElementById("dimensionSelect");
   const storeSelectWrap = document.getElementById("storeSelectWrap");
   const storeSelect = document.getElementById("storeSelect");
+  const compareModeSelect = document.getElementById("compareModeSelect");
+  const compareMonthsWrap = document.getElementById("compareMonthsWrap");
+  const compareMonthInputs = Array.from(document.querySelectorAll(".compare-month-input"));
 
   function toggleStoreSelect() {
     if (dimensionSelect.value === "brand") {
@@ -532,19 +605,80 @@
   toggleStoreSelect();
   dimensionSelect.addEventListener("change", toggleStoreSelect);
 
+  function toggleCompareMonths() {
+    const isCustom = compareModeSelect.value === "custom";
+    compareMonthsWrap.style.display = isCustom ? "" : "none";
+    compareMonthInputs.forEach((input) => {
+      input.disabled = !isCustom;
+    });
+  }
+  toggleCompareMonths();
+  compareModeSelect.addEventListener("change", toggleCompareMonths);
+
+  const revenueLineColors = [
+    { border: "rgba(37, 99, 235, 1)", background: "rgba(37, 99, 235, 0.12)" },
+    { border: "rgba(22, 163, 74, 1)", background: "rgba(22, 163, 74, 0.12)" },
+    { border: "rgba(234, 88, 12, 1)", background: "rgba(234, 88, 12, 0.12)" },
+    { border: "rgba(147, 51, 234, 1)", background: "rgba(147, 51, 234, 0.12)" },
+    { border: "rgba(220, 38, 38, 1)", background: "rgba(220, 38, 38, 0.12)" },
+    { border: "rgba(8, 145, 178, 1)", background: "rgba(8, 145, 178, 0.12)" },
+    { border: "rgba(79, 70, 229, 1)", background: "rgba(79, 70, 229, 0.12)" },
+    { border: "rgba(101, 163, 13, 1)", background: "rgba(101, 163, 13, 0.12)" },
+    { border: "rgba(217, 119, 6, 1)", background: "rgba(217, 119, 6, 0.12)" },
+    { border: "rgba(190, 24, 93, 1)", background: "rgba(190, 24, 93, 0.12)" },
+    { border: "rgba(14, 116, 144, 1)", background: "rgba(14, 116, 144, 0.12)" },
+    { border: "rgba(82, 82, 91, 1)", background: "rgba(82, 82, 91, 0.12)" }
+  ];
+
+  const useRevenueCompare = compareMode !== "none";
+  const revenueChartLabels = useRevenueCompare ? revenueCompareLabels : trendLabels;
+  const revenueChartDatasets = useRevenueCompare
+    ? revenueCompareDatasets.map((dataset, index) => {
+        const color = revenueLineColors[index % revenueLineColors.length];
+        return {
+          label: dataset.label,
+          data: dataset.data,
+          dateRange: dataset.date_range,
+          borderColor: color.border,
+          backgroundColor: color.background,
+          pointBackgroundColor: color.border,
+          borderWidth: 2,
+          tension: 0.25,
+          spanGaps: false
+        };
+      })
+    : [{
+        label: "营收金额",
+        data: revenueTrend,
+        borderColor: revenueLineColors[0].border,
+        backgroundColor: revenueLineColors[0].background,
+        pointBackgroundColor: revenueLineColors[0].border,
+        borderWidth: 2,
+        tension: 0.25
+      }];
+
   // 营收趋势
   new Chart(document.getElementById("revenueTrendChart"), {
     type: "line",
     data: {
-      labels: trendLabels,
-      datasets: [{
-        label: "营收金额",
-        data: revenueTrend,
-        tension: 0.25
-      }]
+      labels: revenueChartLabels,
+      datasets: revenueChartDatasets
     },
     options: {
       responsive: true,
+      interaction: {
+        mode: "index",
+        intersect: false
+      },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            afterLabel: function(context) {
+              return context.dataset.dateRange ? "区间：" + context.dataset.dateRange : "";
+            }
+          }
+        }
+      },
       scales: {
         y: {
           beginAtZero: true
@@ -552,6 +686,46 @@
       }
     }
   });
+
+  const revenueTotalCompareCanvas = document.getElementById("revenueTotalCompareChart");
+  if (useRevenueCompare && revenueTotalCompareCanvas) {
+    new Chart(revenueTotalCompareCanvas, {
+      type: "bar",
+      data: {
+        labels: revenueTotalCompareLabels,
+        datasets: [{
+          label: "总营收金额",
+          data: revenueTotalCompareData,
+          backgroundColor: revenueTotalCompareLabels.map((_, index) => revenueLineColors[index % revenueLineColors.length].background),
+          borderColor: revenueTotalCompareLabels.map((_, index) => revenueLineColors[index % revenueLineColors.length].border),
+          borderWidth: 1
+        }]
+      },
+      options: {
+        responsive: true,
+        indexAxis: "y",
+        plugins: {
+          legend: {
+            display: false
+          },
+          tooltip: {
+            callbacks: {
+              afterLabel: function(context) {
+                return revenueTotalCompareDateRanges[context.dataIndex]
+                  ? "区间：" + revenueTotalCompareDateRanges[context.dataIndex]
+                  : "";
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            beginAtZero: true
+          }
+        }
+      }
+    });
+  }
 
   // 私域组局顾客结构
   new Chart(document.getElementById("customerFunnelChart"), {

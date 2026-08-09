@@ -362,10 +362,34 @@
         min-width: 150px;
     }
 
+    .whiteboard-bar-label.current-duty-store {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        width: fit-content;
+        min-width: 0;
+        color: #1d4ed8;
+        background: #dbeafe;
+        border: 1px solid #93c5fd;
+        border-radius: 999px;
+        padding: 3px 10px;
+    }
+
     .whiteboard-bar-meta {
         color: #64748b;
         font-size: 0.82rem;
         margin-top: 2px;
+    }
+
+    .whiteboard-target-form {
+        max-width: 220px;
+    }
+
+    .whiteboard-target-form .input-group-text {
+        color: #475569;
+        background: #f8fafc;
+        font-size: 0.78rem;
+        font-weight: 700;
     }
 
     .whiteboard-bar-track {
@@ -453,6 +477,36 @@
         border-radius: 999px;
         padding: 2px 6px;
         z-index: 4;
+    }
+
+    .whiteboard-period-line {
+        position: absolute;
+        top: -6px;
+        bottom: -6px;
+        width: 2px;
+        background: rgba(239, 68, 68, 0.58);
+        z-index: 3;
+    }
+
+    .whiteboard-period-label {
+        position: absolute;
+        top: -28px;
+        transform: translateX(-50%);
+        white-space: nowrap;
+        font-size: 0.7rem;
+        font-weight: 800;
+        color: #b91c1c;
+        background: #fff7ed;
+        border: 1px solid #fed7aa;
+        border-radius: 999px;
+        padding: 2px 6px;
+        z-index: 4;
+    }
+
+    .whiteboard-current-store-badge {
+        color: #1d4ed8;
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
     }
 
     .whiteboard-status-reached {
@@ -710,7 +764,7 @@
 <div class="card employee-module-card">
     <div class="card-header bg-white py-3">
         <div class="fw-bold"><i class="bi bi-clock-history me-1 text-primary"></i>员工上班情况</div>
-        <div class="employee-page-subtitle mt-1">展示开始带店、复查补信息、下班时间和负责门店。</div>
+        <div class="employee-page-subtitle mt-1">展示开始带店、复查补信息、午休、下班时间和负责门店；在岗时间已扣除午休。</div>
     </div>
     <div class="card-body">
         <form method="get" action="/employees" class="row g-3 align-items-end mb-4">
@@ -765,6 +819,7 @@
                 <select class="form-select" name="duty_status">
                     <option value="all" {% if duty_filters.status == 'all' %}selected{% endif %}>全部状态</option>
                     <option value="active" {% if duty_filters.status == 'active' %}selected{% endif %}>上班中</option>
+                    <option value="lunch" {% if duty_filters.status == 'lunch' %}selected{% endif %}>午休中</option>
                     <option value="ended" {% if duty_filters.status == 'ended' %}selected{% endif %}>已下班</option>
                     <option value="review" {% if duty_filters.status == 'review' %}selected{% endif %}>复查补信息</option>
                 </select>
@@ -790,7 +845,8 @@
                         <th>放行方式</th>
                         <th>负责门店</th>
                         <th>开始/复查时间</th>
-                        <th>持续时长</th>
+                        <th>午休情况</th>
+                        <th>在岗时长</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -800,6 +856,8 @@
                         <td>
                             {% if row.status_label == '上班中' %}
                                 <span class="badge bg-success">{{ row.status_label }}</span>
+                            {% elif row.status_label == '午休中' %}
+                                <span class="badge bg-warning text-dark">{{ row.status_label }}</span>
                             {% elif row.status_label == '已放行' %}
                                 <span class="badge bg-info text-dark">{{ row.status_label }}</span>
                             {% else %}
@@ -809,11 +867,26 @@
                         <td>{{ row.action_label }}</td>
                         <td>{{ row.store_names }}</td>
                         <td>{{ row.action_time.strftime('%Y-%m-%d %H:%M') if row.action_time else '-' }}</td>
+                        <td class="text-start">
+                            {% if row.lunch_summary and row.lunch_summary.rows %}
+                                {% for lunch_row in row.lunch_summary.rows %}
+                                <div class="small">
+                                    {{ lunch_row.start_text }} 至 {{ lunch_row.end_text }}
+                                    {% for label in lunch_row.warning_labels %}
+                                    <span class="badge bg-danger ms-1">{{ label }}</span>
+                                    {% endfor %}
+                                </div>
+                                {% endfor %}
+                                <div class="small text-muted mt-1">午休合计：{{ row.lunch_summary.total_text }}</div>
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
                         <td>{{ row.duration_text }}</td>
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="6" class="text-center text-muted py-4">暂无在职员工</td>
+                        <td colspan="7" class="text-center text-muted py-4">暂无在职员工</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -850,7 +923,7 @@
                 </tbody>
             </table>
             <div class="small text-muted px-3 py-2 bg-light border-top">
-                统计口径：仅统计已下班的开始带店/登录上班记录；上班天数按每名员工的自然日去重，同一天多段上班时长累计。
+                统计口径：仅统计已下班的开始带店/登录上班记录；上班天数按每名员工的自然日去重，同一天多段上班时长累计；开始带店记录会扣除午休时间。
             </div>
         </div>
         <div class="table-responsive">
@@ -863,7 +936,8 @@
                         <th>负责门店</th>
                         <th>上班/复查时间</th>
                         <th>下班时间</th>
-                        <th>持续时长</th>
+                        <th>午休情况</th>
+                        <th>在岗时长</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -874,6 +948,8 @@
                         <td>
                             {% if row.status_label == '上班中' %}
                                 <span class="badge bg-success">{{ row.status_label }}</span>
+                            {% elif row.status_label == '午休中' %}
+                                <span class="badge bg-warning text-dark">{{ row.status_label }}</span>
                             {% elif row.status_label == '已下班' %}
                                 <span class="badge bg-secondary">{{ row.status_label }}</span>
                             {% else %}
@@ -889,11 +965,26 @@
                                 {{ row.end_time.strftime('%Y-%m-%d %H:%M') if row.end_time else '-' }}
                             {% endif %}
                         </td>
+                        <td class="text-start">
+                            {% if row.lunch_summary and row.lunch_summary.rows %}
+                                {% for lunch_row in row.lunch_summary.rows %}
+                                <div class="small">
+                                    {{ lunch_row.start_text }} 至 {{ lunch_row.end_text }}
+                                    {% for label in lunch_row.warning_labels %}
+                                    <span class="badge bg-danger ms-1">{{ label }}</span>
+                                    {% endfor %}
+                                </div>
+                                {% endfor %}
+                                <div class="small text-muted mt-1">午休合计：{{ row.lunch_summary.total_text }}</div>
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
                         <td>{{ row.duration_text }}</td>
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="7" class="text-center text-muted py-5">暂无员工上班记录</td>
+                        <td colspan="8" class="text-center text-muted py-5">暂无员工上班记录</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -1293,12 +1384,27 @@
                                   data-employee-ajax-form="1"
                                   onsubmit="return confirm('确定批准公休并安排所选机动员工顶班吗？');">
                                 <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                {% set flexible_date_options = leave_flexible_replacement_dates_map.get(item.id, []) %}
+                                {% for date_option in flexible_date_options %}
+                                <div class="text-start small fw-semibold mb-1">
+                                    {{ date_option.date }}｜{{ date_option.shift_label }}
+                                </div>
+                                <select name="replacement_user_id_{{ date_option.date_iso }}" class="form-select form-select-sm mb-1" required>
+                                    <option value="">选择机动员工</option>
+                                    {% for employee in date_option.candidates %}
+                                    <option value="{{ employee.id }}">{{ employee.display_name }}</option>
+                                    {% else %}
+                                    <option value="" disabled>当天暂无可用机动员工</option>
+                                    {% endfor %}
+                                </select>
+                                {% else %}
                                 <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
                                     <option value="">选择机动员工</option>
                                     {% for employee in flexible_replacement_employees %}
                                     <option value="{{ employee.id }}">{{ employee.display_name }}</option>
                                     {% endfor %}
                                 </select>
+                                {% endfor %}
                                 <input type="text"
                                        name="approval_note"
                                        class="form-control form-control-sm mb-1"
@@ -1333,12 +1439,27 @@
                                   data-employee-ajax-form="1"
                                   onsubmit="return confirm('确定安排所选机动员工顶班吗？');">
                                 <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                {% set flexible_date_options = leave_flexible_replacement_dates_map.get(item.id, []) %}
+                                {% for date_option in flexible_date_options %}
+                                <div class="text-start small fw-semibold mb-1">
+                                    {{ date_option.date }}｜{{ date_option.shift_label }}
+                                </div>
+                                <select name="replacement_user_id_{{ date_option.date_iso }}" class="form-select form-select-sm mb-1" required>
+                                    <option value="">选择机动员工</option>
+                                    {% for employee in date_option.candidates %}
+                                    <option value="{{ employee.id }}">{{ employee.display_name }}</option>
+                                    {% else %}
+                                    <option value="" disabled>当天暂无可用机动员工</option>
+                                    {% endfor %}
+                                </select>
+                                {% else %}
                                 <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
                                     <option value="">选择机动员工</option>
                                     {% for employee in flexible_replacement_employees %}
                                     <option value="{{ employee.id }}">{{ employee.display_name }}</option>
                                     {% endfor %}
                                 </select>
+                                {% endfor %}
                                 <input type="text"
                                        name="approval_note"
                                        class="form-control form-control-sm mb-1"
@@ -3020,7 +3141,6 @@
         </h5>
         <div class="whiteboard-section-subtitle">
             统计周期：{{ whiteboard_data.month_start }} 至 {{ whiteboard_data.month_end }}。
-            门店目标 = 启用包间数 × 当月天数 × 2；员工单量按 who_did 统计。
         </div>
     </div>
 
@@ -3071,7 +3191,7 @@
             <div class="card-body">
                 <div class="whiteboard-summary-label">本月总目标</div>
                 <div class="whiteboard-summary-value">{{ whiteboard_data.total_target_orders }}</div>
-                <div class="small text-muted mt-1">启用包间数 × 天数 × 2</div>
+                <div class="small text-muted mt-1">按各门店本月目标合计</div>
             </div>
         </div>
     </div>
@@ -3114,7 +3234,7 @@
             <i class="bi bi-shop-window text-primary me-1"></i>门店本月订单量对比
         </div>
         <div class="small text-muted mt-1">
-            红色标记为该门店本月目标订单量位置。目标 = 启用包间数 × {{ whiteboard_data.days_in_month }} 天 × 2。
+            红色标记为该门店本月目标订单量位置；领班、管理员可修改当月目标。
         </div>
     </div>
 
@@ -3125,8 +3245,39 @@
                 <div class="col-md-3">
                     <div class="whiteboard-bar-label">{{ row.store_name }}</div>
                     <div class="whiteboard-bar-meta">
-                        启用包间 {{ row.active_room_count }} 间｜目标 {{ row.target_order_count }} 单
+                        启用包间 {{ row.active_room_count }} 间｜默认 {{ row.default_target_order_count }} 单
                     </div>
+                    {% if whiteboard_data.can_manage_store_targets and row.store_id and row.store_id > 0 %}
+                    <form action="/employees/whiteboard/store-target/update"
+                          method="post"
+                          class="whiteboard-target-form mt-2">
+                        <input type="hidden" name="store" value="{{ current_store }}">
+                        <input type="hidden" name="whiteboard_year" value="{{ whiteboard_data.year }}">
+                        <input type="hidden" name="whiteboard_month" value="{{ whiteboard_data.month }}">
+                        <input type="hidden" name="whiteboard_employee" value="{{ whiteboard_data.employee_store_selected_employee }}">
+                        <input type="hidden" name="store_id" value="{{ row.store_id }}">
+                        <div class="input-group input-group-sm">
+                            <span class="input-group-text">目标</span>
+                            <input type="number"
+                                   name="target_order_count"
+                                   class="form-control"
+                                   min="0"
+                                   max="99999"
+                                   step="1"
+                                   value="{{ row.target_order_count }}"
+                                   aria-label="{{ row.store_name }}当月目标单量">
+                            <button type="submit"
+                                    class="btn btn-outline-primary"
+                                    title="保存目标">
+                                <i class="bi bi-check2"></i>
+                            </button>
+                        </div>
+                    </form>
+                    {% else %}
+                    <div class="whiteboard-bar-meta">
+                        目标 {{ row.target_order_count }} 单
+                    </div>
+                    {% endif %}
                 </div>
 
                 <div class="col-md-7">
@@ -3236,16 +3387,29 @@
             <div id="whiteboard-employee-store-drawer-{{ loop.index }}"
                  class="whiteboard-store-drawer d-none"
                  data-whiteboard-employee-drawer="{{ loop.index }}">
-                <div class="whiteboard-store-drawer-title">
-                    {{ row.employee_name }} 本月门店目标订单量明细
+                <div class="whiteboard-store-drawer-title d-flex align-items-center gap-2 flex-wrap">
+                    <span>{{ row.employee_name }} 本月门店目标订单量明细</span>
+                    {% if row.active_duty_store_names %}
+                    <span class="badge rounded-pill whiteboard-current-store-badge">
+                        当前带店：{{ row.active_duty_store_names|join('、') }}
+                    </span>
+                    {% endif %}
                 </div>
                 {% for store_row in row.store_rows %}
                 <div class="whiteboard-store-row">
                     <div class="row g-3 align-items-center">
                         <div class="col-md-3">
-                            <div class="whiteboard-bar-label">{{ store_row.store_name }}</div>
+                            <div class="whiteboard-bar-label {% if store_row.is_current_duty_store %}current-duty-store{% endif %}">
+                                {{ store_row.store_name }}
+                                {% if store_row.is_current_duty_store %}
+                                    <i class="bi bi-pin-map-fill"></i>
+                                {% endif %}
+                            </div>
                             <div class="whiteboard-bar-meta">
                                 目标 {{ '%.2f'|format(store_row.target_order_count) }} 单
+                            </div>
+                            <div class="whiteboard-bar-meta">
+                                周期目标 {{ '%.2f'|format(store_row.period_target_count) }} 单/期
                             </div>
                         </div>
 
@@ -3254,12 +3418,14 @@
                                 <div class="whiteboard-bar-fill {% if store_row.is_reached %}success{% endif %}"
                                      style="width: {{ store_row.actual_percent }}%;"></div>
 
-                                <div class="whiteboard-target-line"
-                                     style="left: {{ store_row.target_percent }}%;"></div>
-                                <div class="whiteboard-target-label"
-                                     style="left: {{ store_row.target_percent }}%;">
-                                    目标 {{ '%.2f'|format(store_row.target_order_count) }}
+                                {% for node in store_row.period_target_nodes %}
+                                <div class="whiteboard-period-line"
+                                     style="left: {{ node.percent }}%;"></div>
+                                <div class="whiteboard-period-label"
+                                     style="left: {{ node.percent }}%;">
+                                    {{ node.period_index }}期 {{ '%.2f'|format(node.value) }}
                                 </div>
+                                {% endfor %}
 
                                 <div class="whiteboard-bar-value">
                                     {{ store_row.actual_order_count }} 单
@@ -5881,6 +6047,45 @@ const leaveRestReplacementOptionsMap = {
     {% endfor %}
 };
 
+const leaveFlexibleReplacementDateOptionsMap = {
+    {% for item in leave_approval_requests %}
+    "{{ item.id }}": [
+        {% for date_option in leave_flexible_replacement_dates_map.get(item.id, []) %}
+        {
+            date: "{{ date_option.date_iso }}",
+            label: "{{ date_option.date }}｜{{ date_option.shift_label|e }}",
+            options: `
+                {% for employee in date_option.candidates %}
+                <option value="{{ employee.id }}">{{ employee.display_name|e }}</option>
+                {% else %}
+                <option value="" disabled>当天暂无可用机动员工</option>
+                {% endfor %}
+            `
+        },
+        {% endfor %}
+    ],
+    {% endfor %}
+};
+
+function renderFlexibleReplacementFields(leave, fallbackOptions) {
+    const rows = leaveFlexibleReplacementDateOptionsMap[String(leave.id)] || [];
+    if (!rows.length) {
+        return `
+            <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
+                <option value="">选择机动员工</option>
+                ${fallbackOptions}
+            </select>
+        `;
+    }
+    return rows.map(row => `
+        <div class="text-start small fw-semibold mb-1">${escapeHtml(row.label || row.date)}</div>
+        <select name="replacement_user_id_${escapeHtml(row.date)}" class="form-select form-select-sm mb-1" required>
+            <option value="">选择机动员工</option>
+            ${row.options || `<option value="" disabled>当天暂无可用机动员工</option>`}
+        </select>
+    `).join("");
+}
+
 function renderLeaveApprovalActionCell(leave) {
     if (["pending", "approved", "approved_with_flexible", "replacement_rejected_wait_employee", "force_leave_deducted"].includes(leave.status)) {
         return `
@@ -5915,10 +6120,7 @@ function renderLeaveApprovalActionCell(leave) {
                       data-employee-ajax-form="1"
                       onsubmit="return confirm('确定批准公休并安排所选机动员工顶班吗？');">
                     <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
-                    <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
-                        <option value="">选择机动员工</option>
-                        ${flexibleOptions}
-                    </select>
+                    ${renderFlexibleReplacementFields(leave, flexibleOptions)}
                     <input type="text"
                            name="approval_note"
                            class="form-control form-control-sm mb-1"
@@ -5970,10 +6172,7 @@ function renderLeaveApprovalActionCell(leave) {
                   data-employee-ajax-form="1"
                   onsubmit="return confirm('确定安排所选机动员工顶班吗？');">
                 <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
-                <select name="replacement_user_id" class="form-select form-select-sm mb-1" required>
-                    <option value="">选择机动员工</option>
-                    ${flexibleOptions}
-                </select>
+                ${renderFlexibleReplacementFields(leave, flexibleOptions)}
                 <input type="text"
                        name="approval_note"
                        class="form-control form-control-sm mb-1"
@@ -6038,6 +6237,14 @@ function renderReplacementInfo(leave) {
     if (!leave.replacement_employee_name) {
         return `<span class="text-muted">-</span>`;
     }
+    const flexibleDetails = Array.isArray(leave.flexible_replacement_details)
+        ? leave.flexible_replacement_details
+        : [];
+    const flexibleDetailsHtml = flexibleDetails.length > 1
+        ? `<div class="small text-muted mt-1 text-start">${
+            flexibleDetails.map(item => `${escapeHtml(item.date || "")}：${escapeHtml(item.employee_name || "")}`).join("<br>")
+        }</div>`
+        : "";
     let badge = `<span class="badge bg-warning text-dark">待确认</span>`;
     if (leave.status === "approved_with_flexible") {
         badge = `
@@ -6052,6 +6259,7 @@ function renderReplacementInfo(leave) {
     return `
         <div class="fw-semibold">${escapeHtml(leave.replacement_employee_name)}</div>
         ${badge}
+        ${flexibleDetailsHtml}
     `;
 }
 
@@ -6082,10 +6290,19 @@ function renderMyLeaveRow(leave) {
 
 function renderMyLeaveApprovalInfo(leave) {
     if (leave.approved_by_name) {
+        const flexibleDetails = Array.isArray(leave.flexible_replacement_details)
+            ? leave.flexible_replacement_details
+            : [];
+        const flexibleDetailsHtml = flexibleDetails.length > 1
+            ? `<div class="small text-muted">顶班明细：${
+                flexibleDetails.map(item => `${escapeHtml(item.date || "")} ${escapeHtml(item.employee_name || "")}`).join("；")
+            }</div>`
+            : "";
         return `
             <div class="small">审批人：${escapeHtml(leave.approved_by_name)}</div>
             ${leave.approved_at ? `<div class="small text-muted">时间：${escapeHtml(leave.approved_at)}</div>` : ""}
             ${leave.approval_note ? `<div class="small text-muted">备注：${escapeHtml(leave.approval_note)}</div>` : ""}
+            ${flexibleDetailsHtml}
         `;
     }
     if (leave.replacement_employee_name) {

@@ -41,6 +41,7 @@ from database import (GameRecord, GamePaymentItem, Store, Room, User,
                       EmployeeWorkMistakeRecord,
                       MonthlySalarySettlement,
                       EmployeeNotification,
+                      StoreMonthlyTargetSnapshot,
 
                       EmployeeTeam,
                       EmployeeTeamMember,
@@ -149,10 +150,13 @@ def _leave_request_end_date(leave_req: EmployeeLeaveRequest) -> date:
     return getattr(leave_req, "leave_end_date", None) or leave_req.leave_date
 
 
+def _iter_date_range(start_date: date, end_date: date) -> List[date]:
+    total_days = max((end_date - start_date).days, 0)
+    return [start_date + timedelta(days=offset) for offset in range(total_days + 1)]
+
+
 def _iter_leave_request_dates(leave_req: EmployeeLeaveRequest) -> List[date]:
-    end_date = _leave_request_end_date(leave_req)
-    total_days = max((end_date - leave_req.leave_date).days, 0)
-    return [leave_req.leave_date + timedelta(days=offset) for offset in range(total_days + 1)]
+    return _iter_date_range(leave_req.leave_date, _leave_request_end_date(leave_req))
 
 
 def _leave_period_label(start_date: date, end_date: date) -> str:
@@ -177,6 +181,101 @@ def _deserialize_shift_snapshot(raw_value: Optional[str]) -> Dict[str, str]:
     if not isinstance(data, dict):
         return {}
     return {str(key): normalize_shift_type(str(value or "off")) for key, value in data.items()}
+
+
+def _serialize_flexible_replacement_snapshot(snapshot: Dict[date, dict]) -> str:
+    clean: Dict[str, dict] = {}
+    for work_date, entry in snapshot.items():
+        key = work_date.isoformat() if isinstance(work_date, date) else str(work_date)
+        user_id = entry.get("user_id")
+        shift_id = entry.get("shift_id")
+        salary_flow_id = entry.get("salary_flow_id")
+        clean[key] = {
+            "user_id": int(user_id) if user_id else None,
+            "employee_name": str(entry.get("employee_name") or "").strip(),
+            "shift_type": normalize_shift_type(str(entry.get("shift_type") or "off")),
+            "shift_id": int(shift_id) if shift_id else None,
+            "salary_flow_id": int(salary_flow_id) if salary_flow_id else None,
+        }
+    return json.dumps(clean, ensure_ascii=False, sort_keys=True)
+
+
+def _deserialize_flexible_replacement_snapshot(raw_value: Optional[str]) -> Dict[str, dict]:
+    if not raw_value:
+        return {}
+    try:
+        data = json.loads(raw_value)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    clean: Dict[str, dict] = {}
+    for key, entry in data.items():
+        try:
+            work_date = datetime.strptime(str(key), "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        employee_name = str(entry.get("employee_name") or "").strip()
+        user_id = entry.get("user_id")
+        shift_id = entry.get("shift_id")
+        salary_flow_id = entry.get("salary_flow_id")
+        clean[work_date.isoformat()] = {
+            "user_id": int(user_id) if user_id else None,
+            "employee_name": employee_name,
+            "shift_type": normalize_shift_type(str(entry.get("shift_type") or "off")),
+            "shift_id": int(shift_id) if shift_id else None,
+            "salary_flow_id": int(salary_flow_id) if salary_flow_id else None,
+        }
+    return clean
+
+
+def _flexible_replacement_summary(snapshot: Dict[str, dict]) -> str:
+    names: List[str] = []
+    for key in sorted(snapshot.keys()):
+        name = str(snapshot.get(key, {}).get("employee_name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return "、".join(names)
+
+
+def _flexible_replacement_entry_for_date(leave_req: EmployeeLeaveRequest, work_date: date) -> Optional[dict]:
+    snapshot = _deserialize_flexible_replacement_snapshot(
+        getattr(leave_req, "flexible_replacement_snapshot_json", None)
+    )
+    entry = snapshot.get(work_date.isoformat())
+    if entry:
+        return entry
+    if (
+        leave_req.status == "approved_with_flexible"
+        and leave_req.replacement_employee_name_snapshot
+    ):
+        shift_snapshot = _deserialize_shift_snapshot(getattr(leave_req, "shift_snapshot_json", None))
+        return {
+            "user_id": leave_req.replacement_user_id,
+            "employee_name": leave_req.replacement_employee_name_snapshot,
+            "shift_type": shift_snapshot.get(work_date.isoformat(), leave_req.shift_type),
+            "shift_id": None,
+            "salary_flow_id": leave_req.replacement_salary_flow_id if work_date == leave_req.leave_date else None,
+        }
+    return None
+
+
+def _replacement_user_from_entry(session: Session, entry: Optional[dict]) -> Optional[User]:
+    if not entry:
+        return None
+    user_id = entry.get("user_id")
+    user = session.get(User, user_id) if user_id else None
+    if user:
+        return user
+    employee_name = str(entry.get("employee_name") or "").strip()
+    if not employee_name:
+        return None
+    return session.exec(
+        select(User).where(User.display_name == employee_name)
+    ).first()
 
 
 def _collect_public_rest_shift_snapshot(
@@ -222,6 +321,40 @@ def _find_overlapping_leave_request(
         if item.leave_date <= end_date and item_end >= start_date:
             return item
     return None
+
+
+def _find_other_employee_leave_request_on_dates(
+        session: Session,
+        *,
+        dates: List[date],
+        user_id: int,
+        exclude_leave_id: Optional[int] = None
+) -> Optional[Tuple[date, EmployeeLeaveRequest]]:
+    for work_date in sorted(set(dates)):
+        rows = session.exec(
+            select(EmployeeLeaveRequest).where(
+                _leave_request_overlaps_work_date_condition(work_date),
+                EmployeeLeaveRequest.status.in_(list(LEAVE_COUNT_ACTIVE_STATUSES))
+            ).order_by(
+                EmployeeLeaveRequest.leave_date,
+                EmployeeLeaveRequest.id
+            )
+        ).all()
+        for item in rows:
+            if exclude_leave_id and item.id == exclude_leave_id:
+                continue
+            if item.user_id == user_id:
+                continue
+            return work_date, item
+    return None
+
+
+def _leave_daily_conflict_message(work_date: date, conflict: EmployeeLeaveRequest) -> str:
+    return (
+        f"{work_date} 已有 {conflict.employee_name_snapshot} 的"
+        f"{_leave_type_label(conflict.leave_type or 'leave')}申请处于待处理或已生效状态，"
+        "同一天不能安排两名及以上员工请假"
+    )
 
 
 def _leave_request_overlaps_work_date_condition(work_date: date):
@@ -590,6 +723,59 @@ def _find_leave_replacement_employees(
     return candidates
 
 
+def _find_flexible_replacement_employees_for_date(
+        session: Session,
+        *,
+        applicant_user_id: int,
+        work_date: date
+) -> List[User]:
+    employees = session.exec(
+        select(User).where(
+            User.is_active == True
+        ).order_by(
+            User.display_name,
+            User.id
+        )
+    ).all()
+
+    candidates: List[User] = []
+    for employee in employees:
+        if employee.id == applicant_user_id:
+            continue
+        if (employee.employee_type or "regular") != "flexible":
+            continue
+        if _get_shift_type_for_employee_on_date(
+            session=session,
+            employee_name=employee.display_name,
+            work_date=work_date
+        ) != "off":
+            continue
+        candidates.append(employee)
+    return candidates
+
+
+def _build_leave_flexible_replacement_date_options(
+        session: Session,
+        leave_req: EmployeeLeaveRequest
+) -> List[dict]:
+    shift_snapshot = _deserialize_shift_snapshot(getattr(leave_req, "shift_snapshot_json", None))
+    rows = []
+    for work_date in _iter_leave_request_dates(leave_req):
+        original_shift = shift_snapshot.get(work_date.isoformat(), leave_req.shift_type)
+        rows.append({
+            "date": work_date,
+            "date_iso": work_date.isoformat(),
+            "shift_type": original_shift,
+            "shift_label": _shift_type_label(original_shift),
+            "candidates": _find_flexible_replacement_employees_for_date(
+                session=session,
+                applicant_user_id=leave_req.user_id,
+                work_date=work_date
+            ),
+        })
+    return rows
+
+
 def _create_employee_notification(
         session: Session,
         *,
@@ -849,6 +1035,7 @@ def _leave_status_label(status: str) -> str:
 LEAVE_COUNT_ACTIVE_STATUSES = {
     "pending_admin_review",
     "pending",
+    "replacement_accepted",
     "replacement_rejected_wait_employee",
     "approved",
     "approved_with_flexible",
@@ -858,6 +1045,7 @@ LEAVE_COUNT_ACTIVE_STATUSES = {
 LEAVE_PENALTY_EFFECTIVE_STATUSES = {
     "approved",
     "approved_with_flexible",
+    "replacement_accepted",
     "force_leave_deducted",
 }
 
@@ -995,13 +1183,17 @@ def _is_locked_flexible_replacement_shift(
         employee_name: str,
         work_date: date
 ) -> bool:
-    return session.exec(
+    rows = session.exec(
         select(EmployeeLeaveRequest).where(
             EmployeeLeaveRequest.status == "approved_with_flexible",
-            EmployeeLeaveRequest.replacement_employee_name_snapshot == employee_name,
-            EmployeeLeaveRequest.leave_date == work_date
+            _leave_request_overlaps_work_date_condition(work_date)
         )
-    ).first() is not None
+    ).all()
+    for item in rows:
+        entry = _flexible_replacement_entry_for_date(item, work_date)
+        if entry and entry.get("employee_name") == employee_name:
+            return True
+    return False
 
 
 def _has_active_leave_or_effective_replacement_record(
@@ -1017,7 +1209,7 @@ def _has_active_leave_or_effective_replacement_record(
     - 请假本人：待处理或已生效的请假/公休会占用当天，不能再参与换班；
     - 顶班人：已同意休班顶班或已安排机动顶班后，不能再参与换班。
     """
-    return session.exec(
+    if session.exec(
         select(EmployeeLeaveRequest).where(
             _leave_request_overlaps_work_date_condition(work_date),
             or_(
@@ -1027,17 +1219,30 @@ def _has_active_leave_or_effective_replacement_record(
                 ),
                 and_(
                     EmployeeLeaveRequest.replacement_user_id == user_id,
-                    or_(
-                        and_(
-                            EmployeeLeaveRequest.status == "approved",
-                            EmployeeLeaveRequest.replacement_response == "accepted"
-                        ),
-                        EmployeeLeaveRequest.status == "approved_with_flexible"
-                    )
+                    EmployeeLeaveRequest.status == "approved",
+                    EmployeeLeaveRequest.replacement_response == "accepted"
                 )
             )
         )
-    ).first() is not None
+    ).first() is not None:
+        return True
+
+    employee = session.get(User, user_id)
+    employee_name = employee.display_name if employee else ""
+    flexible_rows = session.exec(
+        select(EmployeeLeaveRequest).where(
+            EmployeeLeaveRequest.status == "approved_with_flexible",
+            _leave_request_overlaps_work_date_condition(work_date)
+        )
+    ).all()
+    for item in flexible_rows:
+        entry = _flexible_replacement_entry_for_date(item, work_date)
+        if not entry:
+            continue
+        if entry.get("user_id") == user_id or (employee_name and entry.get("employee_name") == employee_name):
+            return True
+
+    return False
 
 
 def _shift_swap_has_active_leave_or_effective_replacement_conflict(
@@ -1193,29 +1398,43 @@ def _cancel_leave_by_admin(
     if leave_req.replacement_salary_flow_id:
         related_flows.append(session.get(SalaryFlowRecord, leave_req.replacement_salary_flow_id))
 
+    flexible_entries_by_date: Dict[date, dict] = {}
     if leave_req.status == "approved_with_flexible":
-        replacement = session.get(User, leave_req.replacement_user_id) if leave_req.replacement_user_id else None
-        if not replacement:
-            return "机动顶班员工账号不存在，不能恢复排班"
-        if _is_public_rest_leave(leave_req):
-            shift_snapshot = _deserialize_shift_snapshot(getattr(leave_req, "shift_snapshot_json", None))
-            for work_date in _iter_leave_request_dates(leave_req):
-                expected_shift = shift_snapshot.get(work_date.isoformat(), leave_req.shift_type)
-                current_shift = _get_shift_type_for_employee_on_date(
-                    session=session,
-                    employee_name=replacement.display_name,
-                    work_date=work_date
-                )
-                if current_shift != expected_shift:
-                    return f"机动员工 {work_date} 的排班已被后续修改，不能直接撤回"
-        else:
+        for work_date in _iter_leave_request_dates(leave_req):
+            entry = _flexible_replacement_entry_for_date(leave_req, work_date)
+            replacement = _replacement_user_from_entry(session, entry)
+            if not replacement:
+                return f"{work_date} 的机动顶班员工账号不存在，不能恢复排班"
+            expected_shift = normalize_shift_type(str(entry.get("shift_type") or leave_req.shift_type))
             current_shift = _get_shift_type_for_employee_on_date(
                 session=session,
                 employee_name=replacement.display_name,
-                work_date=leave_req.leave_date
+                work_date=work_date
             )
-            if current_shift != leave_req.shift_type:
-                return "机动员工当天排班已被后续修改，不能直接撤回"
+            if current_shift != expected_shift:
+                return f"机动员工 {replacement.display_name} 在 {work_date} 的排班已被后续修改，不能直接撤回"
+            flexible_entries_by_date[work_date] = entry
+
+            if entry.get("salary_flow_id"):
+                related_flows.append(session.get(SalaryFlowRecord, entry.get("salary_flow_id")))
+
+            shift_id = entry.get("shift_id")
+            if not shift_id:
+                shift = session.exec(
+                    select(ShiftSchedule).where(
+                        ShiftSchedule.operator_name == replacement.display_name,
+                        ShiftSchedule.work_date == work_date
+                    )
+                ).first()
+                shift_id = shift.id if shift else None
+            if shift_id:
+                related_flows.extend(session.exec(
+                    select(SalaryFlowRecord).where(
+                        SalaryFlowRecord.user_id == replacement.id,
+                        SalaryFlowRecord.source_type == "flexible_schedule",
+                        SalaryFlowRecord.source_id == shift_id
+                    )
+                ).all())
 
     if _is_public_rest_leave(leave_req):
         for work_date in _iter_leave_request_dates(leave_req):
@@ -1226,28 +1445,6 @@ def _cancel_leave_by_admin(
             )
             if applicant_current_shift != SHIFT_TYPE_PUBLIC_REST:
                 return f"请假员工 {work_date} 的排班已被后续修改，不能直接撤回公休"
-
-        if leave_req.status == "approved_with_flexible" and leave_req.replacement_user_id:
-            replacement = session.get(User, leave_req.replacement_user_id)
-            replacement_shift_rows = session.exec(
-                select(ShiftSchedule).where(
-                    ShiftSchedule.operator_name == replacement.display_name,
-                    ShiftSchedule.work_date >= leave_req.leave_date,
-                    ShiftSchedule.work_date <= _leave_request_end_date(leave_req)
-                )
-            ).all()
-            shift_ids = [item.id for item in replacement_shift_rows if item.id]
-            if shift_ids:
-                flexible_flows = session.exec(
-                    select(SalaryFlowRecord).where(
-                        SalaryFlowRecord.user_id == replacement.id,
-                        SalaryFlowRecord.source_type == "flexible_schedule",
-                        SalaryFlowRecord.source_id.in_(shift_ids)
-                    )
-                ).all()
-                locked_flows = [flow for flow in flexible_flows if flow.is_locked]
-                if locked_flows:
-                    return "相关机动顶班工资流水已锁定，不能直接撤回，请走工资修正"
 
     error = _delete_unlocked_salary_flows(session, related_flows)
     if error:
@@ -1262,12 +1459,21 @@ def _cancel_leave_by_admin(
         session.delete(attendance)
 
     if leave_req.status == "approved_with_flexible":
-        replacement = session.get(User, leave_req.replacement_user_id)
-        if _is_public_rest_leave(leave_req):
-            for work_date in _iter_leave_request_dates(leave_req):
-                upsert_shift(session, replacement.display_name, work_date, "off")
-            session.flush()
-            for year, month in _leave_affected_months(leave_req):
+        replacement_months: Dict[int, set[Tuple[int, int]]] = {}
+        replacement_by_id: Dict[int, User] = {}
+        for work_date, entry in flexible_entries_by_date.items():
+            replacement = _replacement_user_from_entry(session, entry)
+            if not replacement:
+                continue
+            upsert_shift(session, replacement.display_name, work_date, "off")
+            replacement_by_id[replacement.id] = replacement
+            replacement_months.setdefault(replacement.id, set()).add((work_date.year, work_date.month))
+        session.flush()
+        for replacement_id, months in replacement_months.items():
+            replacement = replacement_by_id.get(replacement_id)
+            if not replacement:
+                continue
+            for year, month in sorted(months):
                 _rebuild_flexible_employee_shift_flows(
                     session=session,
                     employee=replacement,
@@ -1275,16 +1481,6 @@ def _cancel_leave_by_admin(
                     month=month,
                     operator=operator
                 )
-        else:
-            upsert_shift(session, replacement.display_name, leave_req.leave_date, "off")
-            session.flush()
-            _rebuild_flexible_employee_shift_flows(
-                session=session,
-                employee=replacement,
-                year=leave_req.leave_date.year,
-                month=leave_req.leave_date.month,
-                operator=operator
-            )
 
     if _is_public_rest_leave(leave_req):
         shift_snapshot = _deserialize_shift_snapshot(getattr(leave_req, "shift_snapshot_json", None))
@@ -1426,6 +1622,31 @@ def _build_my_assessment_url(
     }
     if assessment_user_id:
         params["assessment_user_id"] = str(assessment_user_id)
+    if success:
+        params["success"] = success
+    if error:
+        params["error"] = error
+    return "/employees?" + urlencode(params)
+
+
+def _build_employee_whiteboard_url(
+        store: str,
+        *,
+        year: Optional[int] = None,
+        month: Optional[int] = None,
+        selected_employee_name: str = "all",
+        success: str = "",
+        error: str = ""
+) -> str:
+    params = {
+        "store": store or "",
+        "tab": "whiteboard",
+        "whiteboard_employee": selected_employee_name or "all",
+    }
+    if year:
+        params["whiteboard_year"] = str(year)
+    if month:
+        params["whiteboard_month"] = str(month)
     if success:
         params["success"] = success
     if error:
@@ -1661,6 +1882,20 @@ def _leave_request_payload(item: EmployeeLeaveRequest) -> dict:
     1. 员工提交请假后，前端可以新增一行；
     2. 管理员审批通过/拒绝后，前端只更新当前请假记录这一行。
     """
+    flexible_replacement_details = []
+    if item.status == "approved_with_flexible":
+        for work_date in _iter_leave_request_dates(item):
+            entry = _flexible_replacement_entry_for_date(item, work_date)
+            if not entry:
+                continue
+            flexible_replacement_details.append({
+                "date": work_date.isoformat(),
+                "employee_name": entry.get("employee_name") or "",
+                "shift_type": entry.get("shift_type") or item.shift_type,
+                "shift_label": _shift_type_label(entry.get("shift_type") or item.shift_type),
+                "salary_flow_id": entry.get("salary_flow_id"),
+            })
+
     return {
         "id": item.id,
         "user_id": item.user_id,
@@ -1688,6 +1923,7 @@ def _leave_request_payload(item: EmployeeLeaveRequest) -> dict:
         "replacement_employee_name": item.replacement_employee_name_snapshot or "",
         "replacement_response": item.replacement_response or "",
         "replacement_response_at": item.replacement_response_at.strftime("%Y-%m-%d %H:%M:%S") if item.replacement_response_at else "",
+        "flexible_replacement_details": flexible_replacement_details,
         "attendance_record_id": item.attendance_record_id,
         "salary_flow_id": item.salary_flow_id,
         "replacement_salary_flow_id": item.replacement_salary_flow_id,
@@ -3136,6 +3372,113 @@ def _get_store_active_room_count(session: Session, store_obj: Store) -> int:
     return len(room_names)
 
 
+def _can_manage_whiteboard_store_targets(user: Optional[User]) -> bool:
+    return bool(
+        user
+        and getattr(user, "is_active", True)
+        and (
+            user.role == "admin"
+            or (user.role == "operator" and (user.employee_type or "regular") == "foreman")
+        )
+    )
+
+
+def _get_store_actual_order_count_for_month(
+        session: Session,
+        store_name: str,
+        month_start: date,
+        month_end: date
+) -> int:
+    return len(session.exec(
+        select(GameRecord).where(
+            GameRecord.status == "formed",
+            GameRecord.store_name == store_name,
+            GameRecord.record_date >= month_start,
+            GameRecord.record_date <= month_end
+        )
+    ).all())
+
+
+def _get_or_create_store_monthly_target_snapshot(
+        session: Session,
+        store_obj: Store,
+        year: int,
+        month: int,
+        actual_order_count: Optional[int] = None
+) -> StoreMonthlyTargetSnapshot:
+    """
+    获取或创建门店月目标快照。
+
+    首次创建时使用系统建议目标；已经存在的快照保留人工修改后的目标，
+    只同步门店名、实际订单量、达标状态和更新时间。
+    """
+    month_start, month_end = _get_month_start_end(year, month)
+    days_in_month = calendar.monthrange(year, month)[1]
+    active_room_count = _get_store_active_room_count(session, store_obj)
+    default_target_order_count = active_room_count * days_in_month * 2
+    actual_count = (
+        actual_order_count
+        if actual_order_count is not None
+        else _get_store_actual_order_count_for_month(session, store_obj.name, month_start, month_end)
+    )
+
+    snapshot = session.exec(
+        select(StoreMonthlyTargetSnapshot).where(
+            StoreMonthlyTargetSnapshot.store_id == store_obj.id,
+            StoreMonthlyTargetSnapshot.year == year,
+            StoreMonthlyTargetSnapshot.month == month
+        )
+    ).first()
+
+    now = datetime.now()
+    if not snapshot:
+        snapshot = StoreMonthlyTargetSnapshot(
+            store_id=store_obj.id,
+            store_name_snapshot=store_obj.name,
+            year=year,
+            month=month,
+            active_room_count=active_room_count,
+            days_in_month=days_in_month,
+            target_order_count=default_target_order_count,
+            actual_order_count=actual_count,
+            is_reached=actual_count >= default_target_order_count if default_target_order_count > 0 else False,
+            created_at=now,
+            updated_at=now
+        )
+    else:
+        snapshot.store_name_snapshot = store_obj.name
+        snapshot.active_room_count = active_room_count
+        snapshot.days_in_month = days_in_month
+        snapshot.actual_order_count = actual_count
+        snapshot.is_reached = actual_count >= snapshot.target_order_count if snapshot.target_order_count > 0 else False
+        snapshot.updated_at = now
+
+    session.add(snapshot)
+    session.commit()
+    session.refresh(snapshot)
+    return snapshot
+
+
+def _build_period_target_nodes(
+        target_order_count: float,
+        axis_max: float,
+        period_count: int = 5
+) -> List[dict]:
+    if target_order_count <= 0 or axis_max <= 0 or period_count <= 0:
+        return []
+
+    period_target_count = target_order_count / period_count
+    nodes = []
+    for idx in range(1, period_count + 1):
+        value = round(period_target_count * idx, 2)
+        nodes.append({
+            "period_index": idx,
+            "value": value,
+            "percent": round(value / axis_max * 100, 2),
+        })
+    return nodes
+
+
 def _build_employee_whiteboard_data(
         session: Session,
         year: int,
@@ -3154,7 +3497,8 @@ def _build_employee_whiteboard_data(
        包含 normal / self_arrival / overflow，因为这里看的是“订单总量/桌数激励”。
 
     2. 门店目标订单量：
-       启用包间数 × 当月天数 × 2。
+       优先读取 StoreMonthlyTargetSnapshot；首次没有快照时按
+       启用包间数 × 当月天数 × 2 创建默认快照。
 
     3. 员工订单量：
        按 GameRecord.who_did 统计。
@@ -3203,22 +3547,39 @@ def _build_employee_whiteboard_data(
     store_rows = []
     for store_obj in active_store_objs:
         active_room_count = _get_store_active_room_count(session, store_obj)
-        target_order_count = active_room_count * days_in_month * 2
+        default_target_order_count = active_room_count * days_in_month * 2
         actual_order_count = store_order_count_map.get(store_obj.name, 0)
+
+        if getattr(store_obj, "id", None) and store_obj.id > 0:
+            snapshot = _get_or_create_store_monthly_target_snapshot(
+                session=session,
+                store_obj=store_obj,
+                year=year,
+                month=month,
+                actual_order_count=actual_order_count
+            )
+            target_order_count = snapshot.target_order_count
+        else:
+            snapshot = None
+            target_order_count = default_target_order_count
 
         achievement_rate = 0.0
         if target_order_count > 0:
             achievement_rate = round(actual_order_count / target_order_count * 100, 2)
 
         store_rows.append({
+            "store_id": store_obj.id,
             "store_name": store_obj.name,
             "active_room_count": active_room_count,
             "days_in_month": days_in_month,
+            "default_target_order_count": default_target_order_count,
             "target_order_count": target_order_count,
             "actual_order_count": actual_order_count,
             "remaining_order_count": max(target_order_count - actual_order_count, 0),
             "is_reached": actual_order_count >= target_order_count if target_order_count > 0 else False,
             "achievement_rate": achievement_rate,
+            "has_target_snapshot": bool(snapshot),
+            "is_custom_target": target_order_count != default_target_order_count,
         })
 
     # 门店按实际订单量倒序展示，方便看差距
@@ -3246,6 +3607,22 @@ def _build_employee_whiteboard_data(
         for item in session.exec(select(User).order_by(User.display_name)).all()
         if _normalize_text(item.display_name)
     }
+
+    active_duty_store_names_by_employee = {}
+    active_store_duty_sessions = session.exec(
+        select(EmployeeDutySession).where(
+            EmployeeDutySession.action_type == DUTY_ACTION_STORE,
+            EmployeeDutySession.ended_at.is_(None)
+        ).order_by(EmployeeDutySession.started_at.desc(), EmployeeDutySession.id.desc())
+    ).all()
+    for duty in active_store_duty_sessions:
+        employee_name = _normalize_text(duty.employee_name)
+        if not employee_name:
+            continue
+        active_duty_store_names_by_employee.setdefault(employee_name, set()).update(
+            _decode_duty_store_names(duty.store_names_json)
+        )
+
     eligible_employee_store_names = {
         employee_name
         for employee_name, employee in user_by_display_name.items()
@@ -3276,6 +3653,8 @@ def _build_employee_whiteboard_data(
             continue
 
         target_order_count = round((store_target_map.get(store_name, 0) or 0) / 6, 2)
+        period_target_count = round(target_order_count / 5, 2) if target_order_count > 0 else 0.0
+        active_duty_store_names = active_duty_store_names_by_employee.get(employee_name, set())
         achievement_rate = 0.0
         if target_order_count > 0:
             achievement_rate = round(order_count / target_order_count * 100, 2)
@@ -3284,10 +3663,12 @@ def _build_employee_whiteboard_data(
             "employee_name": employee_name,
             "store_name": store_name,
             "target_order_count": target_order_count,
+            "period_target_count": period_target_count,
             "actual_order_count": order_count,
             "remaining_order_count": round(max(target_order_count - order_count, 0), 2),
             "is_reached": order_count >= target_order_count if target_order_count > 0 else False,
             "achievement_rate": achievement_rate,
+            "is_current_duty_store": store_name in active_duty_store_names,
         })
 
     employee_store_rows = [
@@ -3332,6 +3713,10 @@ def _build_employee_whiteboard_data(
             round(row["target_order_count"] / max_employee_store_bar_value * 100, 2)
             if max_employee_store_bar_value else 0
         )
+        row["period_target_nodes"] = _build_period_target_nodes(
+            row["target_order_count"],
+            max_employee_store_bar_value
+        )
 
     employee_store_rows_by_employee = {}
     for row in all_employee_store_rows:
@@ -3354,6 +3739,7 @@ def _build_employee_whiteboard_data(
             "is_visible_employee": employee_name in visible_employee_names,
             "store_rows": employee_store_rows_by_employee.get(employee_name, []),
             "store_row_count": len(employee_store_rows_by_employee.get(employee_name, [])),
+            "active_duty_store_names": sorted(active_duty_store_names_by_employee.get(employee_name, set())),
         })
 
     employee_rows.sort(key=lambda x: x["order_count"], reverse=True)
@@ -3448,6 +3834,7 @@ def _build_employee_whiteboard_data(
 
         "attendance_rows": attendance_display_rows,
         "attendance_count": len(attendance_display_rows),
+        "can_manage_store_targets": _can_manage_whiteboard_store_targets(current_user),
     }
 
 
@@ -3469,7 +3856,16 @@ def _build_personal_store_target_rows(
     for store_obj in get_store_list(session):
         if not getattr(store_obj, "is_active", True):
             continue
-        store_target_map[store_obj.name] = _get_store_active_room_count(session, store_obj) * days_in_month * 2
+        if getattr(store_obj, "id", None) and store_obj.id > 0:
+            snapshot = _get_or_create_store_monthly_target_snapshot(
+                session=session,
+                store_obj=store_obj,
+                year=year,
+                month=month
+            )
+            store_target_map[store_obj.name] = snapshot.target_order_count
+        else:
+            store_target_map[store_obj.name] = _get_store_active_room_count(session, store_obj) * days_in_month * 2
 
     games = session.exec(
         select(GameRecord).where(
@@ -3486,21 +3882,27 @@ def _build_personal_store_target_rows(
         if store_name and store_name in store_target_map:
             store_order_count_map[store_name] = store_order_count_map.get(store_name, 0) + 1
 
+    active_duty = _active_store_duty_session(session, employee.id) if employee and employee.id else None
+    active_duty_store_names = set(_decode_duty_store_names(active_duty.store_names_json)) if active_duty else set()
+
     rows = []
     max_bar_value = 1
     for store_name, order_count in store_order_count_map.items():
         if order_count <= 0:
             continue
         target_order_count = round((store_target_map.get(store_name, 0) or 0) / 6, 2)
+        period_target_count = round(target_order_count / 5, 2) if target_order_count > 0 else 0.0
         is_reached = order_count >= target_order_count if target_order_count > 0 else False
         row = {
             "employee_name": employee.display_name,
             "store_name": store_name,
             "actual_order_count": order_count,
             "target_order_count": target_order_count,
+            "period_target_count": period_target_count,
             "remaining_order_count": round(max(target_order_count - order_count, 0), 2),
             "is_reached": is_reached,
             "achievement_rate": round(order_count / target_order_count * 100, 2) if target_order_count > 0 else 0.0,
+            "is_current_duty_store": store_name in active_duty_store_names,
         }
         rows.append(row)
         max_bar_value = max(max_bar_value, order_count, target_order_count)
@@ -3509,6 +3911,7 @@ def _build_personal_store_target_rows(
     for row in rows:
         row["actual_percent"] = round(row["actual_order_count"] / max_bar_value * 100, 2) if max_bar_value else 0
         row["target_percent"] = round(row["target_order_count"] / max_bar_value * 100, 2) if max_bar_value else 0
+        row["period_target_nodes"] = _build_period_target_nodes(row["target_order_count"], max_bar_value)
 
     return rows
 
@@ -3868,15 +4271,13 @@ def _calculate_team_assessment(
     2. 团队奖金池：1000 × 团队成员数；
     3. 目标业绩池：团队奖金池 × 60%；
     4. 非结果性考核池：团队奖金池 × 40%；
-    5. 门店目标：启用包间数 × 当月天数 × 2；
+    5. 门店目标：优先读取门店月目标快照，首次没有快照时按启用包间数 × 当月天数 × 2 创建；
     6. 负责门店达标一个，释放目标业绩池的 1 / 负责门店数；
     7. 非结果性考核分 = 100 - 扣分项合计；
     8. 若非结果性考核分为 100 分，额外加入团队零失误奖 1000 元；
     9. 团队总奖金平均分给团队成员。
     """
     month_start, month_end = _get_month_start_end(year, month)
-    days_in_month = calendar.monthrange(year, month)[1]
-
     assessment = _get_or_create_team_assessment(session, team, year, month)
 
     active_members = session.exec(
@@ -3916,9 +4317,6 @@ def _calculate_team_assessment(
         if not store_obj:
             continue
 
-        active_room_count = _get_store_active_room_count(session, store_obj)
-        target_order_count = active_room_count * days_in_month * 2
-
         actual_order_count = len(session.exec(
             select(GameRecord).where(
                 GameRecord.status == "formed",
@@ -3927,6 +4325,19 @@ def _calculate_team_assessment(
                 GameRecord.record_date <= month_end
             )
         ).all())
+
+        if getattr(store_obj, "id", None) and store_obj.id > 0:
+            target_snapshot = _get_or_create_store_monthly_target_snapshot(
+                session=session,
+                store_obj=store_obj,
+                year=year,
+                month=month,
+                actual_order_count=actual_order_count
+            )
+            target_order_count = target_snapshot.target_order_count
+        else:
+            days_in_month = calendar.monthrange(year, month)[1]
+            target_order_count = _get_store_active_room_count(session, store_obj) * days_in_month * 2
 
         if target_order_count > 0 and actual_order_count >= target_order_count:
             target_reached_store_count += 1
@@ -6289,12 +6700,226 @@ dimension:
 5. 复购顾客数：当前时间区间内完成过 >=2 次成功组局的顾客数
 6. 顾客复购率：复购顾客数 / 当前区间内至少成功组局 1 次的顾客数
 """
+
+REVENUE_COMPARE_MODE_OPTIONS = [
+    ("none", "不对比"),
+    ("last_month", "与上月对比"),
+    ("last_3_months", "近三月对比"),
+    ("custom", "指定月份对比"),
+]
+REVENUE_COMPARE_MODE_LABELS = dict(REVENUE_COMPARE_MODE_OPTIONS)
+REVENUE_COMPARE_MAX_MONTHS = 13
+REVENUE_COMPARE_MONTH_OPTION_LIMIT = 13
+
+
+def _month_start(target_date: date) -> date:
+    return date(target_date.year, target_date.month, 1)
+
+
+def _add_months(month_start: date, offset: int) -> date:
+    month_index = month_start.year * 12 + (month_start.month - 1) + offset
+    return date(month_index // 12, month_index % 12 + 1, 1)
+
+
+def _month_value(month_start: date) -> str:
+    return f"{month_start.year:04d}-{month_start.month:02d}"
+
+
+def _month_label(month_start: date) -> str:
+    return f"{month_start.year}年{month_start.month}月"
+
+
+def _parse_month_value(raw_value: Optional[str]) -> Optional[date]:
+    value = _normalize_text(raw_value)
+    if not value:
+        return None
+    try:
+        parsed = datetime.strptime(value, "%Y-%m").date()
+    except Exception:
+        return None
+    return date(parsed.year, parsed.month, 1)
+
+
+def _normalize_revenue_compare_mode(compare_mode: Optional[str]) -> str:
+    mode = _normalize_text(compare_mode)
+    if mode not in REVENUE_COMPARE_MODE_LABELS:
+        return "none"
+    return mode
+
+
+def _dedupe_months(months: List[date]) -> List[date]:
+    result = []
+    seen = set()
+    for month_start in months:
+        key = _month_value(month_start)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(month_start)
+    return result
+
+
+def _revenue_compare_allowed_months(base_month: date) -> List[date]:
+    return [
+        _add_months(base_month, -offset)
+        for offset in range(REVENUE_COMPARE_MONTH_OPTION_LIMIT)
+    ]
+
+
+def _resolve_revenue_compare_months(
+        compare_mode: str,
+        compare_months: Optional[List[str]],
+        start_date: date
+) -> List[date]:
+    base_month = _month_start(start_date)
+    if compare_mode == "last_month":
+        months = [base_month, _add_months(base_month, -1)]
+    elif compare_mode == "last_3_months":
+        months = [base_month, _add_months(base_month, -1), _add_months(base_month, -2)]
+    elif compare_mode == "custom":
+        allowed_month_values = {
+            _month_value(month_start)
+            for month_start in _revenue_compare_allowed_months(base_month)
+        }
+        months = [
+            parsed
+            for parsed in (_parse_month_value(item) for item in (compare_months or []))
+            if parsed is not None and _month_value(parsed) in allowed_month_values
+        ]
+        if not months:
+            months = [base_month]
+    else:
+        months = [base_month]
+
+    return _dedupe_months(months)[:REVENUE_COMPARE_MAX_MONTHS]
+
+
+def _resolve_revenue_compare_day_span(start_date: date, end_date: date) -> Tuple[int, int]:
+    start_day = start_date.day
+    if start_date.year == end_date.year and start_date.month == end_date.month:
+        end_day = end_date.day
+    else:
+        end_day = calendar.monthrange(start_date.year, start_date.month)[1]
+    if end_day < start_day:
+        return 1, end_day
+    return start_day, end_day
+
+
+def _build_revenue_month_compare_chart(
+        games: List[GameRecord],
+        payment_breakdowns: Dict[int, Dict[str, float]],
+        months: List[date],
+        start_day: int,
+        end_day: int
+) -> dict:
+    days = list(range(start_day, end_day + 1))
+    month_values = {_month_value(month_start) for month_start in months}
+    revenue_by_month_day = {
+        month_value: {day: 0.0 for day in days}
+        for month_value in month_values
+    }
+
+    for game in games:
+        if _normalize_text(game.record_source) == FORMED_SOURCE_OVERFLOW:
+            continue
+        game_date = _game_effective_order_dt(game).date()
+        month_key = f"{game_date.year:04d}-{game_date.month:02d}"
+        if month_key not in month_values or game_date.day not in revenue_by_month_day[month_key]:
+            continue
+        revenue_by_month_day[month_key][game_date.day] += _received_amount_for_game(game, payment_breakdowns)
+
+    datasets = []
+    for month_start in months:
+        month_key = _month_value(month_start)
+        last_day = calendar.monthrange(month_start.year, month_start.month)[1]
+        if start_day > last_day:
+            date_range_label = "无对应日期"
+        else:
+            range_end_day = min(end_day, last_day)
+            date_range_label = (
+                f"{month_start.year:04d}-{month_start.month:02d}-{start_day:02d} 至 "
+                f"{month_start.year:04d}-{month_start.month:02d}-{range_end_day:02d}"
+            )
+        datasets.append({
+            "label": _month_label(month_start),
+            "month": month_key,
+            "date_range": date_range_label,
+            "data": [
+                round(revenue_by_month_day[month_key].get(day, 0.0), 2) if day <= last_day else None
+                for day in days
+            ],
+        })
+
+    return {
+        "labels": [f"{day}日" for day in days],
+        "datasets": datasets,
+    }
+
+
+def _build_revenue_total_compare_chart(
+        games: List[GameRecord],
+        payment_breakdowns: Dict[int, Dict[str, float]],
+        months: List[date]
+) -> dict:
+    month_values = {_month_value(month_start) for month_start in months}
+    revenue_by_month = {month_value: 0.0 for month_value in month_values}
+
+    for game in games:
+        if _normalize_text(game.record_source) == FORMED_SOURCE_OVERFLOW:
+            continue
+        game_date = _game_effective_order_dt(game).date()
+        month_key = f"{game_date.year:04d}-{game_date.month:02d}"
+        if month_key not in month_values:
+            continue
+        revenue_by_month[month_key] += _received_amount_for_game(game, payment_breakdowns)
+
+    return {
+        "labels": [_month_label(month_start) for month_start in months],
+        "data": [round(revenue_by_month[_month_value(month_start)], 2) for month_start in months],
+        "date_ranges": [
+            (
+                f"{month_start.year:04d}-{month_start.month:02d}-01 至 "
+                f"{month_start.year:04d}-{month_start.month:02d}-"
+                f"{calendar.monthrange(month_start.year, month_start.month)[1]:02d}"
+            )
+            for month_start in months
+        ],
+    }
+
+
+def _build_revenue_compare_month_options(
+        base_month: date,
+        selected_months: List[date]
+) -> List[dict]:
+    selected_values = {_month_value(month_start) for month_start in selected_months}
+    return [
+        {
+            "value": _month_value(month_start),
+            "label": _month_label(month_start),
+            "selected": _month_value(month_start) in selected_values,
+        }
+        for month_start in _revenue_compare_allowed_months(base_month)
+    ]
+
+
+def _revenue_compare_month_items(months: List[date]) -> List[dict]:
+    return [
+        {
+            "value": _month_value(month_start),
+            "label": _month_label(month_start),
+        }
+        for month_start in months
+    ]
+
+
 def get_brand_store_dashboard_stats(
     session: Session,
     dimension: str,
     store_name: Optional[str],
     start_date: date,
-    end_date: date
+    end_date: date,
+    compare_mode: str = "none",
+    compare_months: Optional[List[str]] = None
 ):
     """
     dimension:
@@ -6363,7 +6988,33 @@ def get_brand_store_dashboard_stats(
         g for g in period_games
         if _normalize_text(g.record_source) == FORMED_SOURCE_OVERFLOW
     ]
-    payment_breakdowns = _load_payment_item_breakdowns(session, period_games)
+
+    normalized_compare_mode = _normalize_revenue_compare_mode(compare_mode)
+    selected_compare_months = _resolve_revenue_compare_months(
+        normalized_compare_mode,
+        compare_months,
+        start_date
+    )
+    compare_start_day, compare_end_day = _resolve_revenue_compare_day_span(start_date, end_date)
+    compare_month_values = {_month_value(month_start) for month_start in selected_compare_months}
+    compare_games = []
+    compare_month_total_games = []
+    for game in formed_games:
+        if _normalize_text(game.record_source) == FORMED_SOURCE_OVERFLOW:
+            continue
+        game_date = _game_effective_order_dt(game).date()
+        month_key = f"{game_date.year:04d}-{game_date.month:02d}"
+        if month_key not in compare_month_values:
+            continue
+        compare_month_total_games.append(game)
+        if compare_start_day <= game_date.day <= compare_end_day:
+            compare_games.append(game)
+
+    payment_games_by_id = {}
+    for game in itertools.chain(period_games, compare_games, compare_month_total_games):
+        if game.id:
+            payment_games_by_id[game.id] = game
+    payment_breakdowns = _load_payment_item_breakdowns(session, list(payment_games_by_id.values()))
 
     # ========= 4. 营收（溢出单不计入） =========
     total_revenue = round(sum(_received_amount_for_game(g, payment_breakdowns) for g in normal_period_games), 2)
@@ -6468,6 +7119,22 @@ def get_brand_store_dashboard_stats(
     revenue_trend = [round(revenue_by_day[k], 2) for k in trend_labels]
     private_order_trend = [private_orders_by_day[k] for k in trend_labels]
     self_arrival_order_trend = [self_arrival_orders_by_day[k] for k in trend_labels]
+    revenue_compare_chart = _build_revenue_month_compare_chart(
+        games=compare_games,
+        payment_breakdowns=payment_breakdowns,
+        months=selected_compare_months,
+        start_day=compare_start_day,
+        end_day=compare_end_day
+    )
+    revenue_total_compare_chart = _build_revenue_total_compare_chart(
+        games=compare_month_total_games,
+        payment_breakdowns=payment_breakdowns,
+        months=selected_compare_months
+    )
+    compare_month_options = _build_revenue_compare_month_options(
+        base_month=_month_start(start_date),
+        selected_months=selected_compare_months
+    )
 
     # ========= 11. 溢出单补充统计 =========
     overflow_order_count = len(overflow_period_games)
@@ -6514,9 +7181,22 @@ def get_brand_store_dashboard_stats(
             "profit_total": overflow_profit_total,
         },
 
+        "compare": {
+            "mode": normalized_compare_mode,
+            "mode_label": REVENUE_COMPARE_MODE_LABELS.get(normalized_compare_mode, "不对比"),
+            "selected_months": _revenue_compare_month_items(selected_compare_months),
+            "month_options": compare_month_options,
+            "max_months": REVENUE_COMPARE_MAX_MONTHS,
+        },
+
         "charts": {
             "trend_labels": trend_labels,
             "revenue_trend": revenue_trend,
+            "revenue_compare_labels": revenue_compare_chart["labels"],
+            "revenue_compare_datasets": revenue_compare_chart["datasets"],
+            "revenue_total_compare_labels": revenue_total_compare_chart["labels"],
+            "revenue_total_compare_data": revenue_total_compare_chart["data"],
+            "revenue_total_compare_date_ranges": revenue_total_compare_chart["date_ranges"],
             "private_order_trend": private_order_trend,
             "self_arrival_order_trend": self_arrival_order_trend,
             "customer_funnel": [
@@ -7404,6 +8084,8 @@ DUTY_WORK_ACTION_TYPES = {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN}
 DUTY_REVIEW_SESSION_COOKIE = "employee_review_session_id"
 DUTY_REVIEW_SESSION_MAX_AGE_SECONDS = 15 * 60
 DUTY_DEFAULT_LOGIN_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
+DUTY_LUNCH_START_TIME = time(11, 30)
+DUTY_LUNCH_END_TIME = time(12, 30)
 
 
 def _is_logistics_employee(user: Optional[User]) -> bool:
@@ -7415,6 +8097,205 @@ def _format_minutes_duration(total_minutes: int) -> str:
     hours = total_minutes // 60
     minutes = total_minutes % 60
     return f"{hours}小时{minutes}分钟"
+
+
+def _parse_duty_lunch_datetime(raw: Optional[str]) -> Optional[datetime]:
+    clean = str(raw or "").strip()
+    if not clean:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(clean, fmt)
+        except ValueError:
+            pass
+    try:
+        return datetime.fromisoformat(clean)
+    except ValueError:
+        return None
+
+
+def _deserialize_duty_lunch_breaks(raw: Optional[str]) -> List[dict]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+
+    breaks = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        start_at = _parse_duty_lunch_datetime(item.get("start_at"))
+        if not start_at:
+            continue
+        end_at = _parse_duty_lunch_datetime(item.get("end_at"))
+        breaks.append({
+            "start_at": start_at,
+            "end_at": end_at,
+        })
+    return breaks
+
+
+def _serialize_duty_lunch_breaks(breaks: List[dict]) -> str:
+    clean = []
+    for item in breaks or []:
+        start_at = item.get("start_at")
+        if not isinstance(start_at, datetime):
+            continue
+        end_at = item.get("end_at")
+        clean.append({
+            "start_at": start_at.strftime("%Y-%m-%dT%H:%M:%S"),
+            "end_at": end_at.strftime("%Y-%m-%dT%H:%M:%S") if isinstance(end_at, datetime) else None,
+        })
+    return json.dumps(clean, ensure_ascii=False)
+
+
+def _duty_lunch_breaks(duty: Optional[EmployeeDutySession]) -> List[dict]:
+    return _deserialize_duty_lunch_breaks(getattr(duty, "lunch_breaks_json", None))
+
+
+def _active_duty_lunch_break(duty: Optional[EmployeeDutySession]) -> Optional[dict]:
+    for item in reversed(_duty_lunch_breaks(duty)):
+        if item.get("start_at") and not item.get("end_at"):
+            return item
+    return None
+
+
+def _is_duty_on_lunch(duty: Optional[EmployeeDutySession]) -> bool:
+    return _active_duty_lunch_break(duty) is not None
+
+
+def _duty_lunch_window_for_date(target_date: date) -> Tuple[datetime, datetime]:
+    return (
+        datetime.combine(target_date, DUTY_LUNCH_START_TIME),
+        datetime.combine(target_date, DUTY_LUNCH_END_TIME),
+    )
+
+
+def _duty_lunch_break_warning_labels(
+        lunch_break: dict,
+        *,
+        now: Optional[datetime] = None
+) -> List[str]:
+    start_at = lunch_break.get("start_at")
+    if not isinstance(start_at, datetime):
+        return []
+
+    end_at = lunch_break.get("end_at")
+    calc_end = end_at if isinstance(end_at, datetime) else (now or datetime.now())
+    scheduled_start, scheduled_end = _duty_lunch_window_for_date(start_at.date())
+    labels = []
+
+    if start_at < scheduled_start:
+        labels.append("提前午休")
+    if calc_end > scheduled_end:
+        labels.append("午休超时")
+    return labels
+
+
+def _duty_lunch_break_minutes(
+        lunch_break: dict,
+        *,
+        range_start: datetime,
+        range_end: datetime
+) -> int:
+    start_at = lunch_break.get("start_at")
+    if not isinstance(start_at, datetime):
+        return 0
+    end_at = lunch_break.get("end_at") or range_end
+    if not isinstance(end_at, datetime) or end_at <= start_at:
+        return 0
+    overlap_start = max(start_at, range_start)
+    overlap_end = min(end_at, range_end)
+    if overlap_end <= overlap_start:
+        return 0
+    return max(int((overlap_end - overlap_start).total_seconds() // 60), 0)
+
+
+def _duty_lunch_total_minutes(
+        duty: Optional[EmployeeDutySession],
+        *,
+        range_start: datetime,
+        range_end: datetime
+) -> int:
+    return sum(
+        _duty_lunch_break_minutes(item, range_start=range_start, range_end=range_end)
+        for item in _duty_lunch_breaks(duty)
+    )
+
+
+def _duty_work_minutes(
+        duty: Optional[EmployeeDutySession],
+        *,
+        end_for_calc: datetime
+) -> int:
+    start_at = getattr(duty, "started_at", None)
+    if not duty or not start_at or end_for_calc <= start_at:
+        return 0
+    gross_minutes = max(int((end_for_calc - start_at).total_seconds() // 60), 0)
+    lunch_minutes = _duty_lunch_total_minutes(
+        duty,
+        range_start=start_at,
+        range_end=end_for_calc
+    )
+    return max(gross_minutes - lunch_minutes, 0)
+
+
+def _build_duty_lunch_display_rows(
+        duty: Optional[EmployeeDutySession],
+        *,
+        now: Optional[datetime] = None
+) -> List[dict]:
+    current_time = now or datetime.now()
+    rows = []
+    for item in _duty_lunch_breaks(duty):
+        start_at = item.get("start_at")
+        if not isinstance(start_at, datetime):
+            continue
+        end_at = item.get("end_at")
+        warning_labels = _duty_lunch_break_warning_labels(item, now=current_time)
+        rows.append({
+            "start_at": start_at,
+            "end_at": end_at if isinstance(end_at, datetime) else None,
+            "start_text": start_at.strftime("%Y-%m-%d %H:%M"),
+            "end_text": end_at.strftime("%Y-%m-%d %H:%M") if isinstance(end_at, datetime) else "午休中",
+            "warning_labels": warning_labels,
+            "has_warning": bool(warning_labels),
+        })
+    return rows
+
+
+def _duty_lunch_summary(
+        duty: Optional[EmployeeDutySession],
+        *,
+        now: Optional[datetime] = None,
+        end_for_calc: Optional[datetime] = None
+) -> dict:
+    current_time = now or datetime.now()
+    started_at = getattr(duty, "started_at", None)
+    calc_end = end_for_calc or getattr(duty, "ended_at", None) or current_time
+    total_minutes = (
+        _duty_lunch_total_minutes(duty, range_start=started_at, range_end=calc_end)
+        if duty and started_at and calc_end
+        else 0
+    )
+    rows = _build_duty_lunch_display_rows(duty, now=current_time)
+    warning_labels = []
+    for row in rows:
+        for label in row["warning_labels"]:
+            if label not in warning_labels:
+                warning_labels.append(label)
+    return {
+        "rows": rows,
+        "is_on_lunch": _is_duty_on_lunch(duty),
+        "total_minutes": total_minutes,
+        "total_text": _format_minutes_duration(total_minutes),
+        "warning_labels": warning_labels,
+        "has_warning": bool(warning_labels),
+    }
 
 
 def _encode_duty_store_names(store_names: List[str]) -> str:
@@ -7494,6 +8375,7 @@ def _build_duty_scope_session(
         started_at=duty.started_at,
         reviewed_at=duty.reviewed_at,
         ended_at=duty.ended_at,
+        lunch_breaks_json=getattr(duty, "lunch_breaks_json", None),
         created_at=duty.created_at,
         updated_at=duty.updated_at
     )
@@ -7552,6 +8434,8 @@ def _employee_duty_action_label(action_type: str) -> str:
 
 def _employee_duty_status_label(item: EmployeeDutySession) -> str:
     if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN}:
+        if item.action_type == DUTY_ACTION_STORE and not item.ended_at and _is_duty_on_lunch(item):
+            return "午休中"
         return "已下班" if item.ended_at else "上班中"
     return "无需下班"
 
@@ -7614,6 +8498,10 @@ def _build_employee_duty_status(
         "active_store_names": [],
         "active_started_at": None,
         "active_session_id": None,
+        "is_on_lunch": False,
+        "active_lunch_started_at": None,
+        "lunch_total_text": "0小时0分钟",
+        "lunch_warning_labels": [],
         "store_options": [s.name for s in active_stores],
     }
 
@@ -7630,6 +8518,12 @@ def _build_employee_duty_status(
         status["active_store_names"] = _decode_duty_store_names(store_session.store_names_json)
         status["active_started_at"] = store_session.started_at
         status["active_session_id"] = store_session.id
+        lunch_break = _active_duty_lunch_break(store_session)
+        lunch_summary = _duty_lunch_summary(store_session)
+        status["is_on_lunch"] = lunch_break is not None
+        status["active_lunch_started_at"] = lunch_break.get("start_at") if lunch_break else None
+        status["lunch_total_text"] = lunch_summary["total_text"]
+        status["lunch_warning_labels"] = lunch_summary["warning_labels"]
     elif review_session:
         status["is_released"] = True
         status["active_session_id"] = review_session.id
@@ -8455,6 +9349,8 @@ async def enforce_employee_duty_release(request: Request, call_next):
         "/employee-duty/update-stores",
         "/employee-duty/review",
         "/employee-duty/end",
+        "/employee-duty/lunch/start",
+        "/employee-duty/lunch/end",
     }
 
     if path in allowed_paths or any(path.startswith(prefix) for prefix in allowed_prefixes):
@@ -8882,6 +9778,11 @@ async def update_employee_store_duty_stores(
             url=_build_root_redirect_url(current_store, error="当前没有进行中的带店记录，无法调整负责门店"),
             status_code=303
         )
+    if _is_duty_on_lunch(active):
+        return RedirectResponse(
+            url=_build_root_redirect_url(current_store, error="当前正在午休，请先点击继续带店后再调整门店"),
+            status_code=303
+        )
 
     clean_store_names = _normalize_duty_store_names(session, store_names)
     if not clean_store_names:
@@ -8935,6 +9836,95 @@ async def update_employee_store_duty_stores(
             clean_store_names[0],
             success=f"负责门店已更新，当前负责：{'、'.join(clean_store_names)}{removed_text}{added_text}{warning_text}"
         ),
+        status_code=303
+    )
+
+
+@app.post("/employee-duty/lunch/start")
+async def start_employee_store_duty_lunch(
+        current_store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role == "admin":
+        return RedirectResponse(url=_build_root_redirect_url(current_store), status_code=303)
+
+    active = _active_store_duty_session(session, user.id)
+    if not active:
+        return RedirectResponse(
+            url=_build_root_redirect_url(current_store, error="当前没有进行中的带店记录，无法开始午休"),
+            status_code=303
+        )
+    if _is_duty_on_lunch(active):
+        return RedirectResponse(
+            url=_build_root_redirect_url(current_store, success="当前已在午休中"),
+            status_code=303
+        )
+
+    now = datetime.now()
+    lunch_breaks = _duty_lunch_breaks(active)
+    lunch_breaks.append({
+        "start_at": now,
+        "end_at": None,
+    })
+    active.lunch_breaks_json = _serialize_duty_lunch_breaks(lunch_breaks)
+    active.updated_at = now
+    session.add(active)
+    session.commit()
+
+    labels = _duty_lunch_break_warning_labels(lunch_breaks[-1], now=now)
+    warning_text = f"（{'、'.join(labels)}）" if labels else ""
+    store_name = current_store or (_decode_duty_store_names(active.store_names_json) or [""])[0]
+    return RedirectResponse(
+        url=_build_root_redirect_url(store_name, success=f"已停止带店进入午休{warning_text}"),
+        status_code=303
+    )
+
+
+@app.post("/employee-duty/lunch/end")
+async def end_employee_store_duty_lunch(
+        current_store: str = Form(""),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role == "admin":
+        return RedirectResponse(url=_build_root_redirect_url(current_store), status_code=303)
+
+    active = _active_store_duty_session(session, user.id)
+    if not active:
+        return RedirectResponse(
+            url=_build_root_redirect_url(current_store, error="当前没有进行中的带店记录，无法继续带店"),
+            status_code=303
+        )
+
+    lunch_breaks = _duty_lunch_breaks(active)
+    active_lunch = None
+    for item in reversed(lunch_breaks):
+        if item.get("start_at") and not item.get("end_at"):
+            active_lunch = item
+            break
+    if not active_lunch:
+        return RedirectResponse(
+            url=_build_root_redirect_url(current_store, success="当前未处于午休中"),
+            status_code=303
+        )
+
+    now = datetime.now()
+    active_lunch["end_at"] = now
+    active.lunch_breaks_json = _serialize_duty_lunch_breaks(lunch_breaks)
+    active.updated_at = now
+    session.add(active)
+    session.commit()
+
+    labels = _duty_lunch_break_warning_labels(active_lunch, now=now)
+    warning_text = f"（{'、'.join(labels)}）" if labels else ""
+    store_name = current_store or (_decode_duty_store_names(active.store_names_json) or [""])[0]
+    return RedirectResponse(
+        url=_build_root_redirect_url(store_name, success=f"已继续带店{warning_text}"),
         status_code=303
     )
 
@@ -9020,6 +10010,14 @@ async def end_employee_store_duty(
 
     active = _active_store_duty_session(session, user.id)
     if active:
+        if _is_duty_on_lunch(active):
+            return RedirectResponse(
+                url=_build_root_redirect_url(
+                    current_store or (_decode_duty_store_names(active.store_names_json) or [""])[0],
+                    error="当前正在午休，请先点击继续带店后再结束带店"
+                ),
+                status_code=303
+            )
         clicked_at = _parse_store_duty_clicked_at(self_check_clicked_at) or datetime.now()
         non_blocking_ack_values = {item[0] for item in STORE_DUTY_NON_BLOCKING_SELF_CHECKS}
         acknowledged_first_warning = acknowledge_self_check in {
@@ -9274,6 +10272,7 @@ async def employees_page(
     leave_approval_requests = []
     logistics_leave_map = {}
     leave_rest_replacement_candidates_map = {}
+    leave_flexible_replacement_dates_map = {}
     pending_leave_count = 0
     my_current_month_leave_count = 0
     flexible_replacement_employees = []
@@ -9391,6 +10390,13 @@ async def employees_page(
                 )
             else:
                 leave_rest_replacement_candidates_map[item.id] = []
+            if item.status == "pending_admin_review" and applicant and not logistics_leave_map[item.id]:
+                leave_flexible_replacement_dates_map[item.id] = _build_leave_flexible_replacement_date_options(
+                    session=session,
+                    leave_req=item
+                )
+            else:
+                leave_flexible_replacement_dates_map[item.id] = []
         flexible_replacement_employees = [
             employee for employee in active_employees
             if (employee.employee_type or "regular") == "flexible"
@@ -9581,14 +10587,16 @@ async def employees_page(
             login_session = _active_login_duty_session(session, emp.id) if _is_logistics_employee(emp) else None
             review_session = _today_review_session(session, emp.id)
             if store_session:
-                total_minutes = max(int((now - store_session.started_at).total_seconds() // 60), 0) if store_session.started_at else 0
+                total_minutes = _duty_work_minutes(store_session, end_for_calc=now) if store_session.started_at else 0
+                lunch_summary = _duty_lunch_summary(store_session, now=now, end_for_calc=now)
                 current_duty_rows.append({
                     "employee": emp,
-                    "status_label": "上班中",
+                    "status_label": "午休中" if lunch_summary["is_on_lunch"] else "上班中",
                     "action_label": "开始带店",
                     "store_names": "、".join(_decode_duty_store_names(store_session.store_names_json)) or "-",
                     "action_time": store_session.started_at,
                     "duration_text": _format_minutes_duration(total_minutes) if store_session.started_at else "-",
+                    "lunch_summary": lunch_summary,
                 })
             elif login_session:
                 total_minutes = max(int((now - login_session.started_at).total_seconds() // 60), 0) if login_session.started_at else 0
@@ -9599,6 +10607,7 @@ async def employees_page(
                     "store_names": "-",
                     "action_time": login_session.started_at,
                     "duration_text": _format_minutes_duration(total_minutes) if login_session.started_at else "-",
+                    "lunch_summary": None,
                 })
             elif review_session:
                 current_duty_rows.append({
@@ -9608,6 +10617,7 @@ async def employees_page(
                     "store_names": "-",
                     "action_time": review_session.reviewed_at,
                     "duration_text": "无需下班",
+                    "lunch_summary": None,
                 })
             else:
                 current_duty_rows.append({
@@ -9617,6 +10627,7 @@ async def employees_page(
                     "store_names": "-",
                     "action_time": None,
                     "duration_text": "-",
+                    "lunch_summary": None,
                 })
 
         today = date.today()
@@ -9663,25 +10674,41 @@ async def employees_page(
             if duty_action_type != "all" and item.action_type != duty_action_type:
                 continue
             item_status = (
-                "active" if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN} and not item.ended_at
+                "lunch" if item.action_type == DUTY_ACTION_STORE and not item.ended_at and _is_duty_on_lunch(item)
+                else "active" if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN} and not item.ended_at
                 else "ended" if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN}
                 else "review"
             )
-            if duty_status != "all" and item_status != duty_status:
+            if duty_status != "all" and not (
+                item_status == duty_status
+                or (duty_status == "active" and item_status == "lunch")
+            ):
                 continue
 
             end_time = item.ended_at
             duration_text = "-"
+            work_minutes = 0
+            lunch_summary = None
             if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN} and action_time:
                 end_for_calc = end_time or now
-                total_minutes = max(int((end_for_calc - action_time).total_seconds() // 60), 0)
-                duration_text = _format_minutes_duration(total_minutes)
+                work_minutes = (
+                    _duty_work_minutes(item, end_for_calc=end_for_calc)
+                    if item.action_type == DUTY_ACTION_STORE
+                    else max(int((end_for_calc - action_time).total_seconds() // 60), 0)
+                )
+                duration_text = _format_minutes_duration(work_minutes)
+                lunch_summary = (
+                    _duty_lunch_summary(item, now=now, end_for_calc=end_for_calc)
+                    if item.action_type == DUTY_ACTION_STORE
+                    else None
+                )
 
             duty_session_rows.append({
                 "record": item,
                 "action_label": "开始带店" if item.action_type == DUTY_ACTION_STORE else "复查补信息",
                 "status_label": (
-                    "上班中" if item.action_type == DUTY_ACTION_STORE and not item.ended_at
+                    "午休中" if item.action_type == DUTY_ACTION_STORE and not item.ended_at and _is_duty_on_lunch(item)
+                    else "上班中" if item.action_type == DUTY_ACTION_STORE and not item.ended_at
                     else "已下班" if item.action_type == DUTY_ACTION_STORE
                     else "无需下班"
                 ),
@@ -9689,6 +10716,8 @@ async def employees_page(
                 "action_time": action_time,
                 "end_time": end_time,
                 "duration_text": duration_text,
+                "work_minutes": work_minutes,
+                "lunch_summary": lunch_summary,
             })
             if item.action_type == DUTY_ACTION_LOGIN:
                 duty_session_rows[-1]["action_label"] = "登录上班"
@@ -9711,7 +10740,7 @@ async def employees_page(
                 "total_minutes": 0,
                 "completed_record_count": 0,
             })
-            user_summary["total_minutes"] += max(int((end_time - action_time).total_seconds() // 60), 0)
+            user_summary["total_minutes"] += int(row.get("work_minutes") or 0)
             user_summary["completed_record_count"] += 1
             user_summary["work_days"].add(action_time.date())
 
@@ -9789,6 +10818,7 @@ async def employees_page(
         "leave_type_label": _leave_type_label,
         "logistics_leave_map": logistics_leave_map,
         "leave_rest_replacement_candidates_map": leave_rest_replacement_candidates_map,
+        "leave_flexible_replacement_dates_map": leave_flexible_replacement_dates_map,
         "pending_leave_count": pending_leave_count,
         "my_current_month_leave_count": my_current_month_leave_count,
         "flexible_replacement_employees": flexible_replacement_employees,
@@ -9843,6 +10873,125 @@ async def employees_page(
         "duty_filters": duty_filters,
         "duty_summary_rows": duty_summary_rows,
     })
+
+
+@app.post("/employees/whiteboard/store-target/update")
+async def update_whiteboard_store_target(
+        request: Request,
+        store: str = Form(""),
+        whiteboard_year: int = Form(...),
+        whiteboard_month: int = Form(...),
+        whiteboard_employee: str = Form("all"),
+        store_id: int = Form(...),
+        target_order_count: int = Form(...),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("请先登录", 401)
+        return RedirectResponse(url="/login", status_code=303)
+
+    if not _can_manage_whiteboard_store_targets(user):
+        if _is_ajax_request(request):
+            return _employee_ajax_error("只有领班、管理员可以修改门店月目标", 403)
+        return RedirectResponse(
+            url=_build_employee_whiteboard_url(
+                store,
+                year=whiteboard_year,
+                month=whiteboard_month,
+                selected_employee_name=whiteboard_employee,
+                error="只有领班、管理员可以修改门店月目标"
+            ),
+            status_code=303
+        )
+
+    if whiteboard_month < 1 or whiteboard_month > 12 or whiteboard_year < 2020 or whiteboard_year > 2100:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("月份参数不正确")
+        return RedirectResponse(
+            url=_build_employee_whiteboard_url(
+                store,
+                year=None,
+                month=None,
+                selected_employee_name=whiteboard_employee,
+                error="月份参数不正确"
+            ),
+            status_code=303
+        )
+
+    if target_order_count < 0 or target_order_count > 99999:
+        if _is_ajax_request(request):
+            return _employee_ajax_error("目标单量必须在 0 到 99999 之间")
+        return RedirectResponse(
+            url=_build_employee_whiteboard_url(
+                store,
+                year=whiteboard_year,
+                month=whiteboard_month,
+                selected_employee_name=whiteboard_employee,
+                error="目标单量必须在 0 到 99999 之间"
+            ),
+            status_code=303
+        )
+
+    store_obj = session.get(Store, store_id)
+    if not store_obj or not getattr(store_obj, "is_active", True):
+        if _is_ajax_request(request):
+            return _employee_ajax_error("门店不存在或已停用", 404)
+        return RedirectResponse(
+            url=_build_employee_whiteboard_url(
+                store,
+                year=whiteboard_year,
+                month=whiteboard_month,
+                selected_employee_name=whiteboard_employee,
+                error="门店不存在或已停用"
+            ),
+            status_code=303
+        )
+
+    snapshot = _get_or_create_store_monthly_target_snapshot(
+        session=session,
+        store_obj=store_obj,
+        year=whiteboard_year,
+        month=whiteboard_month
+    )
+    snapshot.target_order_count = target_order_count
+    snapshot.is_reached = (
+        snapshot.actual_order_count >= target_order_count
+        if target_order_count > 0
+        else False
+    )
+    snapshot.updated_at = datetime.now()
+
+    session.add(snapshot)
+    session.commit()
+    session.refresh(snapshot)
+
+    if _is_ajax_request(request):
+        return _employee_ajax_success(
+            message="门店月目标已更新",
+            action="whiteboard_store_target_updated",
+            payload={
+                "store_id": store_obj.id,
+                "store_name": store_obj.name,
+                "year": whiteboard_year,
+                "month": whiteboard_month,
+                "target_order_count": snapshot.target_order_count,
+                "actual_order_count": snapshot.actual_order_count,
+                "is_reached": snapshot.is_reached,
+            }
+        )
+
+    return RedirectResponse(
+        url=_build_employee_whiteboard_url(
+            store,
+            year=whiteboard_year,
+            month=whiteboard_month,
+            selected_employee_name=whiteboard_employee,
+            success=f"{store_obj.name} {whiteboard_year}年{whiteboard_month}月目标已更新为 {target_order_count} 单"
+        ),
+        status_code=303
+    )
 
 
 # =========================
@@ -10937,6 +12086,23 @@ async def employee_leave_apply(
                 status_code=303
             )
 
+    leave_item_dates: List[date] = []
+    for item in leave_items:
+        item_end_date = item["leave_end_date"] or item["leave_date"]
+        leave_item_dates.extend(_iter_date_range(item["leave_date"], item_end_date))
+
+    daily_conflict = _find_other_employee_leave_request_on_dates(
+        session=session,
+        dates=leave_item_dates,
+        user_id=user.id
+    )
+    if daily_conflict:
+        conflict_date, conflict = daily_conflict
+        message = _leave_daily_conflict_message(conflict_date, conflict)
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
+
     month_leave_counts: Dict[Tuple[int, int], int] = {}
     for item in leave_items:
         work_date = item["leave_date"]
@@ -11182,6 +12348,19 @@ async def employee_leave_update_pending(
             return _employee_ajax_error("所选日期范围内已有待审批或已通过的请假申请，请勿重复提交")
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="所选日期范围内已有待审批或已通过的请假申请，请勿重复提交"), status_code=303)
 
+    daily_conflict = _find_other_employee_leave_request_on_dates(
+        session=session,
+        dates=_iter_date_range(leave_d, leave_end_d),
+        user_id=user.id,
+        exclude_leave_id=leave_req.id
+    )
+    if daily_conflict:
+        conflict_date, conflict = daily_conflict
+        message = _leave_daily_conflict_message(conflict_date, conflict)
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
+
     shift_type = _get_shift_type_for_employee_on_date(session=session, employee_name=user.display_name, work_date=leave_d)
     shift_snapshot_json = None
     if leave_type == "public_rest":
@@ -11359,6 +12538,19 @@ async def employee_leave_rest_replacement(
             status_code=303
         )
 
+    daily_conflict = _find_other_employee_leave_request_on_dates(
+        session=session,
+        dates=_iter_leave_request_dates(leave_req),
+        user_id=leave_req.user_id,
+        exclude_leave_id=leave_req.id
+    )
+    if daily_conflict:
+        conflict_date, conflict = daily_conflict
+        message = _leave_daily_conflict_message(conflict_date, conflict)
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
+
     if _is_logistics_employee(applicant):
         now = datetime.now()
         approval_note = _normalize_text(approval_note)
@@ -11489,7 +12681,7 @@ async def employee_leave_rest_replacement(
 async def employee_leave_flexible_replacement(
         request: Request,
         leave_id: int,
-        replacement_user_id: int = Form(...),
+        replacement_user_id: Optional[int] = Form(None),
         store: str = Form(""),
         approval_note: str = Form(""),
         session: Session = Depends(get_session),
@@ -11515,24 +12707,28 @@ async def employee_leave_flexible_replacement(
         return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="该请假申请当前不能安排机动顶班"), status_code=303)
 
     applicant = session.get(User, leave_req.user_id)
-    replacement = session.get(User, replacement_user_id)
-    if not applicant or not replacement:
+    if not applicant:
         if _is_ajax_request(request):
-            return _employee_ajax_error("请假员工或机动员工账号不存在", 404)
-        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="请假员工或机动员工账号不存在"), status_code=303)
+            return _employee_ajax_error("请假员工账号不存在", 404)
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="请假员工账号不存在"), status_code=303)
     if _is_logistics_employee(applicant):
         message = "后勤员工请假无需安排机动顶班，请直接批准并扣除固定日薪"
         if _is_ajax_request(request):
             return _employee_ajax_error(message)
         return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
-    if not replacement.is_active or (replacement.employee_type or "regular") != "flexible":
+
+    daily_conflict = _find_other_employee_leave_request_on_dates(
+        session=session,
+        dates=_iter_leave_request_dates(leave_req),
+        user_id=leave_req.user_id,
+        exclude_leave_id=leave_req.id
+    )
+    if daily_conflict:
+        conflict_date, conflict = daily_conflict
+        message = _leave_daily_conflict_message(conflict_date, conflict)
         if _is_ajax_request(request):
-            return _employee_ajax_error("请选择在职的机动类型员工")
-        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="请选择在职的机动类型员工"), status_code=303)
-    if replacement.id == applicant.id:
-        if _is_ajax_request(request):
-            return _employee_ajax_error("请假员工不能为自己顶班")
-        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="请假员工不能为自己顶班"), status_code=303)
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
 
     now = datetime.now()
     approval_note = _normalize_text(approval_note)
@@ -11540,24 +12736,66 @@ async def employee_leave_flexible_replacement(
     leave_dates = _iter_leave_request_dates(leave_req)
     shift_snapshot = _deserialize_shift_snapshot(getattr(leave_req, "shift_snapshot_json", None))
 
+    form_data = await request.form()
+    has_date_specific_selection = any(
+        _normalize_text(str(form_data.get(f"replacement_user_id_{work_date.isoformat()}") or ""))
+        for work_date in leave_dates
+    )
+    selected_replacement_ids: Dict[date, int] = {}
     for work_date in leave_dates:
+        raw_replacement_id = (
+            form_data.get(f"replacement_user_id_{work_date.isoformat()}")
+            if has_date_specific_selection
+            else replacement_user_id
+        )
+        raw_replacement_id = _normalize_text(str(raw_replacement_id or ""))
+        try:
+            parsed_replacement_id = int(raw_replacement_id)
+        except Exception:
+            parsed_replacement_id = 0
+        if parsed_replacement_id <= 0:
+            message = f"请为 {work_date} 选择一名机动员工"
+            if _is_ajax_request(request):
+                return _employee_ajax_error(message)
+            return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
+        selected_replacement_ids[work_date] = parsed_replacement_id
+
+    replacement_by_id: Dict[int, User] = {}
+    selected_replacements_by_date: Dict[date, User] = {}
+    for work_date, selected_user_id in selected_replacement_ids.items():
+        replacement = replacement_by_id.get(selected_user_id)
+        if not replacement:
+            replacement = session.get(User, selected_user_id)
+            if replacement:
+                replacement_by_id[selected_user_id] = replacement
+        if not replacement:
+            message = f"{work_date} 选择的机动员工账号不存在"
+            if _is_ajax_request(request):
+                return _employee_ajax_error(message, 404)
+            return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
+        if not replacement.is_active or (replacement.employee_type or "regular") != "flexible":
+            message = f"{replacement.display_name} 不是在职机动类型员工"
+            if _is_ajax_request(request):
+                return _employee_ajax_error(message)
+            return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
+        if replacement.id == applicant.id:
+            if _is_ajax_request(request):
+                return _employee_ajax_error("请假员工不能为自己顶班")
+            return RedirectResponse(url=_build_employees_url(store, "leave_approval", error="请假员工不能为自己顶班"), status_code=303)
+
         replacement_shift_type = _get_shift_type_for_employee_on_date(
             session=session,
             employee_name=replacement.display_name,
             work_date=work_date
         )
         if replacement_shift_type != "off":
-            message = (
-                f"{replacement.display_name} 在 {work_date} 已有具体班次，请选择其他机动员工"
-                if is_public_rest_leave
-                else f"{replacement.display_name} 当天已有具体班次，请选择其他机动员工"
-            )
+            message = f"{replacement.display_name} 在 {work_date} 已有具体班次，请选择其他机动员工"
             if _is_ajax_request(request):
                 return _employee_ajax_error(message)
             return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
 
-    leave_req.replacement_user_id = replacement.id
-    leave_req.replacement_employee_name_snapshot = replacement.display_name
+        selected_replacements_by_date[work_date] = replacement
+
     leave_req.replacement_response = "accepted"
     leave_req.replacement_response_at = now
     leave_req.approved_by_user_id = user.id
@@ -11565,47 +12803,71 @@ async def employee_leave_flexible_replacement(
     leave_req.approved_at = now
     leave_req.approval_note = approval_note or None
     leave_req.updated_at = now
-    session.add(leave_req)
 
     if is_public_rest_leave:
         for work_date in leave_dates:
             upsert_shift(session, applicant.display_name, work_date, SHIFT_TYPE_PUBLIC_REST)
         session.flush()
 
+    replacement_months: Dict[int, set[Tuple[int, int]]] = {}
     for work_date in leave_dates:
+        replacement = selected_replacements_by_date[work_date]
         replacement_shift = shift_snapshot.get(work_date.isoformat(), leave_req.shift_type)
         upsert_shift(session, replacement.display_name, work_date, replacement_shift)
+        replacement_months.setdefault(replacement.id, set()).add((work_date.year, work_date.month))
     session.flush()
-    for year, month in _leave_affected_months(leave_req):
-        _rebuild_flexible_employee_shift_flows(
-            session=session,
-            employee=replacement,
-            year=year,
-            month=month,
-            operator=user
-        )
+    for replacement_id, months in replacement_months.items():
+        replacement = replacement_by_id[replacement_id]
+        for year, month in sorted(months):
+            _rebuild_flexible_employee_shift_flows(
+                session=session,
+                employee=replacement,
+                year=year,
+                month=month,
+                operator=user
+            )
     session.flush()
+
+    selected_names = sorted({replacement.display_name for replacement in selected_replacements_by_date.values()})
     replacement_shift_rows = session.exec(
         select(ShiftSchedule).where(
-            ShiftSchedule.operator_name == replacement.display_name,
+            ShiftSchedule.operator_name.in_(selected_names),
             ShiftSchedule.work_date >= leave_req.leave_date,
             ShiftSchedule.work_date <= _leave_request_end_date(leave_req)
         )
     ).all()
-    shift_id_by_date = {item.work_date: item.id for item in replacement_shift_rows if item.id}
+    shift_id_by_key = {(item.operator_name, item.work_date): item.id for item in replacement_shift_rows if item.id}
     flow_id_by_source: Dict[int, int] = {}
     shift_ids = [item.id for item in replacement_shift_rows if item.id]
     if shift_ids:
         replacement_salary_flows = session.exec(
             select(SalaryFlowRecord).where(
-                SalaryFlowRecord.user_id == replacement.id,
                 SalaryFlowRecord.source_type == "flexible_schedule",
                 SalaryFlowRecord.source_id.in_(shift_ids)
             )
         ).all()
         flow_id_by_source = {flow.source_id: flow.id for flow in replacement_salary_flows if flow.source_id}
 
-    first_shift_id = shift_id_by_date.get(leave_req.leave_date)
+    flexible_snapshot: Dict[date, dict] = {}
+    for work_date in leave_dates:
+        replacement = selected_replacements_by_date[work_date]
+        replacement_shift = shift_snapshot.get(work_date.isoformat(), leave_req.shift_type)
+        replacement_shift_id = shift_id_by_key.get((replacement.display_name, work_date))
+        flexible_snapshot[work_date] = {
+            "user_id": replacement.id,
+            "employee_name": replacement.display_name,
+            "shift_type": replacement_shift,
+            "shift_id": replacement_shift_id,
+            "salary_flow_id": flow_id_by_source.get(replacement_shift_id) if replacement_shift_id else None,
+        }
+
+    first_replacement = selected_replacements_by_date[leave_dates[0]]
+    snapshot_json = _serialize_flexible_replacement_snapshot(flexible_snapshot)
+    snapshot_data = _deserialize_flexible_replacement_snapshot(snapshot_json)
+    leave_req.replacement_user_id = first_replacement.id
+    leave_req.replacement_employee_name_snapshot = _flexible_replacement_summary(snapshot_data) or first_replacement.display_name
+    leave_req.flexible_replacement_snapshot_json = snapshot_json
+    first_shift_id = shift_id_by_key.get((first_replacement.display_name, leave_req.leave_date))
     leave_req.replacement_salary_flow_id = flow_id_by_source.get(first_shift_id) if first_shift_id else None
     session.add(leave_req)
 
@@ -11627,7 +12889,7 @@ async def employee_leave_flexible_replacement(
             operator=user,
             status="approved_with_flexible",
             approval_note=approval_note,
-            attendance_remark=f"管理员批准公休，并安排机动员工 {replacement.display_name} 顶班。"
+            attendance_remark=f"管理员批准公休，并按日期安排机动员工顶班：{leave_req.replacement_employee_name_snapshot}。"
         )
     else:
         _finalize_leave_for_applicant(
@@ -11638,12 +12900,13 @@ async def employee_leave_flexible_replacement(
             final_deduct=applicant_deduct,
             status="approved_with_flexible",
             approval_note=approval_note,
-            attendance_remark=f"管理员安排机动员工 {replacement.display_name} 顶班。"
+            attendance_remark=f"管理员安排机动员工 {first_replacement.display_name} 顶班。"
         )
 
     for work_date in leave_dates:
+        replacement = selected_replacements_by_date[work_date]
         replacement_shift = shift_snapshot.get(work_date.isoformat(), leave_req.shift_type)
-        replacement_shift_id = shift_id_by_date.get(work_date)
+        replacement_shift_id = shift_id_by_key.get((replacement.display_name, work_date))
         session.add(EmployeeAttendanceRecord(
             user_id=replacement.id,
             employee_name_snapshot=replacement.display_name,
@@ -11674,41 +12937,50 @@ async def employee_leave_flexible_replacement(
     _create_employee_notification(
         session=session,
         target_user=applicant,
-        related_user=replacement,
+        related_user=first_replacement,
         title="机动顶班已安排，申请已生效",
         content=(
-            f"管理员已批准您 {_leave_request_period_label(leave_req)} 的公休，并安排 {replacement.display_name} 为您顶班；对应排班已调整为公休，不扣除工资。"
+            f"管理员已批准您 {_leave_request_period_label(leave_req)} 的公休，并按日期安排机动顶班："
+            f"{'；'.join(f'{work_date} {selected_replacements_by_date[work_date].display_name}' for work_date in leave_dates)}；"
+            f"对应排班已调整为公休，不扣除工资。"
             if is_public_rest_leave
-            else f"管理员已安排 {replacement.display_name} 为您顶班，您的请假已生效，扣款 {applicant_deduct:.2f} 元。"
+            else f"管理员已安排 {first_replacement.display_name} 为您顶班，您的请假已生效，扣款 {applicant_deduct:.2f} 元。"
         ),
         notification_type="leave_flexible_replacement",
         source_type="leave_request",
         source_id=leave_req.id,
         created_at=now
     )
-    _create_employee_notification(
-        session=session,
-        target_user=replacement,
-        related_user=applicant,
-        title="已安排机动顶班",
-        content=(
-            f"管理员已安排您在 {_leave_request_period_label(leave_req)} 为 {leave_req.employee_name_snapshot} 顶班，"
-            f"对应排班已同步调整，工资流水已同步更新。"
-        ),
-        notification_type="leave_flexible_replacement_assigned",
-        source_type="leave_request",
-        source_id=leave_req.id,
-        created_at=now
-    )
+
+    replacement_dates_by_id: Dict[int, List[date]] = {}
+    for work_date, replacement in selected_replacements_by_date.items():
+        replacement_dates_by_id.setdefault(replacement.id, []).append(work_date)
+    for replacement_id, replacement_dates in replacement_dates_by_id.items():
+        replacement = replacement_by_id[replacement_id]
+        replacement_dates_label = "、".join(str(item) for item in sorted(replacement_dates))
+        _create_employee_notification(
+            session=session,
+            target_user=replacement,
+            related_user=applicant,
+            title="已安排机动顶班",
+            content=(
+                f"管理员已安排您在 {replacement_dates_label} 为 {leave_req.employee_name_snapshot} 顶班，"
+                f"对应排班已同步调整，工资流水已同步更新。"
+            ),
+            notification_type="leave_flexible_replacement_assigned",
+            source_type="leave_request",
+            source_id=leave_req.id,
+            created_at=now
+        )
     session.commit()
     session.refresh(leave_req)
 
     if _is_ajax_request(request):
         return _employee_ajax_success(
             message=(
-                f"已批准公休，并安排机动员工 {replacement.display_name} 顶班"
+                f"已批准公休，并按日期安排机动顶班"
                 if is_public_rest_leave
-                else f"已安排机动员工 {replacement.display_name} 顶班，请假已生效"
+                else f"已安排机动员工 {first_replacement.display_name} 顶班，请假已生效"
             ),
             action="leave_flexible_replacement_assigned",
             payload={"leave": _leave_request_payload(leave_req)}
@@ -11718,9 +12990,9 @@ async def employee_leave_flexible_replacement(
             store,
             "leave_approval",
             success=(
-                f"已批准公休，并安排机动员工 {replacement.display_name} 顶班"
+                f"已批准公休，并按日期安排机动顶班"
                 if is_public_rest_leave
-                else f"已安排机动员工 {replacement.display_name} 顶班，请假已生效"
+                else f"已安排机动员工 {first_replacement.display_name} 顶班，请假已生效"
             )
         ),
         status_code=303
@@ -11862,6 +13134,19 @@ async def employee_leave_replacement_accept(
             url=_build_employees_url(store, "my_leave", error="该顶班确认已处理"),
             status_code=303
         )
+
+    daily_conflict = _find_other_employee_leave_request_on_dates(
+        session=session,
+        dates=_iter_leave_request_dates(leave_req),
+        user_id=leave_req.user_id,
+        exclude_leave_id=leave_req.id
+    )
+    if daily_conflict:
+        conflict_date, conflict = daily_conflict
+        message = _leave_daily_conflict_message(conflict_date, conflict)
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
 
     now = datetime.now()
     leave_req.replacement_response = "accepted"
@@ -12142,6 +13427,19 @@ async def employee_leave_force_after_replacement_reject(
             url=_build_employees_url(store, "my_leave", error="该请假申请当前不能执行扣薪请假"),
             status_code=303
         )
+
+    daily_conflict = _find_other_employee_leave_request_on_dates(
+        session=session,
+        dates=_iter_leave_request_dates(leave_req),
+        user_id=leave_req.user_id,
+        exclude_leave_id=leave_req.id
+    )
+    if daily_conflict:
+        conflict_date, conflict = daily_conflict
+        message = _leave_daily_conflict_message(conflict_date, conflict)
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
 
     replacement = session.get(User, leave_req.replacement_user_id) if leave_req.replacement_user_id else None
     if not replacement:
@@ -22361,6 +23659,7 @@ async def brand_store_data_page(
         store: str = "牛王庙店",
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        compare_mode: str = "none",
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -22402,7 +23701,9 @@ async def brand_store_data_page(
         dimension=dimension,
         store_name=store if dimension == "store" else None,
         start_date=real_start_date,
-        end_date=real_end_date
+        end_date=real_end_date,
+        compare_mode=compare_mode,
+        compare_months=request.query_params.getlist("compare_months")
     )
 
     return templates.TemplateResponse("brand_store_data.html", {
@@ -22418,10 +23719,19 @@ async def brand_store_data_page(
         "end_date": real_end_date.strftime("%Y-%m-%d"),
 
         "stats": stats,
+        "compare_mode": stats["compare"]["mode"],
+        "compare_mode_options": REVENUE_COMPARE_MODE_OPTIONS,
+        "compare_month_options": stats["compare"]["month_options"],
+        "selected_compare_months": stats["compare"]["selected_months"],
 
         # 传给 JS
         "trend_labels_json": json.dumps(stats["charts"]["trend_labels"], ensure_ascii=False),
         "revenue_trend_json": json.dumps(stats["charts"]["revenue_trend"], ensure_ascii=False),
+        "revenue_compare_labels_json": json.dumps(stats["charts"]["revenue_compare_labels"], ensure_ascii=False),
+        "revenue_compare_datasets_json": json.dumps(stats["charts"]["revenue_compare_datasets"], ensure_ascii=False),
+        "revenue_total_compare_labels_json": json.dumps(stats["charts"]["revenue_total_compare_labels"], ensure_ascii=False),
+        "revenue_total_compare_data_json": json.dumps(stats["charts"]["revenue_total_compare_data"], ensure_ascii=False),
+        "revenue_total_compare_date_ranges_json": json.dumps(stats["charts"]["revenue_total_compare_date_ranges"], ensure_ascii=False),
         "private_order_trend_json": json.dumps(stats["charts"]["private_order_trend"], ensure_ascii=False),
         "self_arrival_order_trend_json": json.dumps(stats["charts"]["self_arrival_order_trend"], ensure_ascii=False),
         "customer_funnel_json": json.dumps(stats["charts"]["customer_funnel"], ensure_ascii=False),
@@ -22525,11 +23835,11 @@ def _get_flexible_locked_shift_keys(
     ).all()
     locked_keys: set[Tuple[str, date]] = set()
     for item in rows:
-        if not item.replacement_employee_name_snapshot:
-            continue
         for work_date in _iter_leave_request_dates(item):
             if month_start <= work_date <= month_end:
-                locked_keys.add((item.replacement_employee_name_snapshot, work_date))
+                entry = _flexible_replacement_entry_for_date(item, work_date)
+                if entry and entry.get("employee_name"):
+                    locked_keys.add((entry.get("employee_name"), work_date))
     return locked_keys
 
 
@@ -22641,19 +23951,29 @@ async def schedule_page(
         leave_label = "公休" if _is_public_rest_leave(item) else "请假"
         shift_snapshot = _deserialize_shift_snapshot(getattr(item, "shift_snapshot_json", None))
         has_replacement = (
-            item.replacement_employee_name_snapshot
-            and (
-                item.status == "approved_with_flexible"
-                or item.replacement_response == "accepted"
+            item.status == "approved_with_flexible"
+            or (
+                item.replacement_employee_name_snapshot
+                and item.replacement_response == "accepted"
             )
         )
         for work_date in _iter_leave_request_dates(item):
             if work_date < day_list[0] or work_date > day_list[-1]:
                 continue
             original_shift = shift_snapshot.get(work_date.isoformat(), item.shift_type)
+            flexible_replacement_entry = (
+                _flexible_replacement_entry_for_date(item, work_date)
+                if item.status == "approved_with_flexible"
+                else None
+            )
+            replacement_name = (
+                flexible_replacement_entry.get("employee_name")
+                if flexible_replacement_entry
+                else item.replacement_employee_name_snapshot
+            )
             replacement_note = (
-                f"；顶班：{item.replacement_employee_name_snapshot}"
-                if has_replacement else ""
+                f"；顶班：{replacement_name}"
+                if has_replacement and replacement_name else ""
             )
             add_schedule_event_mark(
                 item.employee_name_snapshot,
@@ -22665,9 +23985,9 @@ async def schedule_page(
                     f"{replacement_note}"
                 )
             )
-            if has_replacement:
+            if has_replacement and replacement_name:
                 add_schedule_event_mark(
-                    item.replacement_employee_name_snapshot,
+                    replacement_name,
                     work_date,
                     label="顶班",
                     color_class=color_class,
