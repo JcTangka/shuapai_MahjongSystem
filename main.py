@@ -2874,7 +2874,7 @@ def _salary_settlement_payload(
     employee_social_security_amount = round(float(getattr(item, "employee_social_security_amount", 0) or 0), 2)
     social_security_amount = round(float(getattr(item, "social_security_amount", 0) or 0), 2)
     payable_salary = round(final_salary + employee_social_security_amount, 2)
-    actual_salary = round(payable_salary - social_security_amount, 2)
+    actual_salary = round(payable_salary - employee_social_security_amount - social_security_amount, 2)
     employee = session.get(User, item.user_id)
     employee_type = _employee_salary_type_for_month(
         session,
@@ -3258,7 +3258,8 @@ def _build_salary_settlement_data(
     generated_count = len([r for r in rows if r["settlement"]])
     total_final_salary = round(sum(
         float(r["settlement"].final_salary or 0) +
-        float(getattr(r["settlement"], "employee_social_security_amount", 0) or 0)
+        float(getattr(r["settlement"], "employee_social_security_amount", 0) or 0) -
+        float(getattr(r["settlement"], "social_security_amount", 0) or 0)
         for r in rows
         if r["settlement"]
     ), 2)
@@ -8190,9 +8191,9 @@ def _duty_lunch_break_warning_labels(
     labels = []
 
     if start_at < scheduled_start:
-        labels.append("提前午休")
+        labels.append("提前离岗就餐")
     if calc_end > scheduled_end:
-        labels.append("午休超时")
+        labels.append("离岗就餐超时")
     return labels
 
 
@@ -8261,7 +8262,7 @@ def _build_duty_lunch_display_rows(
             "start_at": start_at,
             "end_at": end_at if isinstance(end_at, datetime) else None,
             "start_text": start_at.strftime("%Y-%m-%d %H:%M"),
-            "end_text": end_at.strftime("%Y-%m-%d %H:%M") if isinstance(end_at, datetime) else "午休中",
+            "end_text": end_at.strftime("%Y-%m-%d %H:%M") if isinstance(end_at, datetime) else "离岗中",
             "warning_labels": warning_labels,
             "has_warning": bool(warning_labels),
         })
@@ -8435,7 +8436,7 @@ def _employee_duty_action_label(action_type: str) -> str:
 def _employee_duty_status_label(item: EmployeeDutySession) -> str:
     if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN}:
         if item.action_type == DUTY_ACTION_STORE and not item.ended_at and _is_duty_on_lunch(item):
-            return "午休中"
+            return "离岗中"
         return "已下班" if item.ended_at else "上班中"
     return "无需下班"
 
@@ -9780,7 +9781,7 @@ async def update_employee_store_duty_stores(
         )
     if _is_duty_on_lunch(active):
         return RedirectResponse(
-            url=_build_root_redirect_url(current_store, error="当前正在午休，请先点击继续带店后再调整门店"),
+            url=_build_root_redirect_url(current_store, error="当前正在离岗就餐，请先点击继续带店后再调整门店"),
             status_code=303
         )
 
@@ -9854,12 +9855,12 @@ async def start_employee_store_duty_lunch(
     active = _active_store_duty_session(session, user.id)
     if not active:
         return RedirectResponse(
-            url=_build_root_redirect_url(current_store, error="当前没有进行中的带店记录，无法开始午休"),
+            url=_build_root_redirect_url(current_store, error="当前没有进行中的带店记录，无法开始离岗就餐"),
             status_code=303
         )
     if _is_duty_on_lunch(active):
         return RedirectResponse(
-            url=_build_root_redirect_url(current_store, success="当前已在午休中"),
+            url=_build_root_redirect_url(current_store, success="当前已在离岗就餐中"),
             status_code=303
         )
 
@@ -9878,7 +9879,7 @@ async def start_employee_store_duty_lunch(
     warning_text = f"（{'、'.join(labels)}）" if labels else ""
     store_name = current_store or (_decode_duty_store_names(active.store_names_json) or [""])[0]
     return RedirectResponse(
-        url=_build_root_redirect_url(store_name, success=f"已停止带店进入午休{warning_text}"),
+        url=_build_root_redirect_url(store_name, success=f"已停止带店进入离岗就餐{warning_text}"),
         status_code=303
     )
 
@@ -9909,7 +9910,7 @@ async def end_employee_store_duty_lunch(
             break
     if not active_lunch:
         return RedirectResponse(
-            url=_build_root_redirect_url(current_store, success="当前未处于午休中"),
+            url=_build_root_redirect_url(current_store, success="当前未处于离岗就餐中"),
             status_code=303
         )
 
@@ -10014,7 +10015,7 @@ async def end_employee_store_duty(
             return RedirectResponse(
                 url=_build_root_redirect_url(
                     current_store or (_decode_duty_store_names(active.store_names_json) or [""])[0],
-                    error="当前正在午休，请先点击继续带店后再结束带店"
+                    error="当前正在离岗就餐，请先点击继续带店后再结束带店"
                 ),
                 status_code=303
             )
@@ -10591,7 +10592,7 @@ async def employees_page(
                 lunch_summary = _duty_lunch_summary(store_session, now=now, end_for_calc=now)
                 current_duty_rows.append({
                     "employee": emp,
-                    "status_label": "午休中" if lunch_summary["is_on_lunch"] else "上班中",
+                    "status_label": "离岗中" if lunch_summary["is_on_lunch"] else "上班中",
                     "action_label": "开始带店",
                     "store_names": "、".join(_decode_duty_store_names(store_session.store_names_json)) or "-",
                     "action_time": store_session.started_at,
@@ -10707,7 +10708,7 @@ async def employees_page(
                 "record": item,
                 "action_label": "开始带店" if item.action_type == DUTY_ACTION_STORE else "复查补信息",
                 "status_label": (
-                    "午休中" if item.action_type == DUTY_ACTION_STORE and not item.ended_at and _is_duty_on_lunch(item)
+                    "离岗中" if item.action_type == DUTY_ACTION_STORE and not item.ended_at and _is_duty_on_lunch(item)
                     else "上班中" if item.action_type == DUTY_ACTION_STORE and not item.ended_at
                     else "已下班" if item.action_type == DUTY_ACTION_STORE
                     else "无需下班"
@@ -15227,11 +15228,17 @@ async def employee_salary_settlement_social_security_update(
     session.refresh(settlement)
 
     if _is_ajax_request(request):
+        summary_data = _build_salary_settlement_data(
+            session=session,
+            year=settlement.salary_year,
+            month=settlement.salary_month
+        )
         return _employee_ajax_success(
             message="社保金额已保存",
             action="salary_settlement_updated",
             payload={
-                "settlement": _salary_settlement_payload(session, settlement)
+                "settlement": _salary_settlement_payload(session, settlement),
+                "summary": _salary_settlement_summary_payload(summary_data)
             }
         )
 

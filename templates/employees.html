@@ -764,7 +764,7 @@
 <div class="card employee-module-card">
     <div class="card-header bg-white py-3">
         <div class="fw-bold"><i class="bi bi-clock-history me-1 text-primary"></i>员工上班情况</div>
-        <div class="employee-page-subtitle mt-1">展示开始带店、复查补信息、午休、下班时间和负责门店；在岗时间已扣除午休。</div>
+        <div class="employee-page-subtitle mt-1">展示开始带店、复查补信息、就餐离岗、下班时间和负责门店。</div>
     </div>
     <div class="card-body">
         <form method="get" action="/employees" class="row g-3 align-items-end mb-4">
@@ -819,7 +819,7 @@
                 <select class="form-select" name="duty_status">
                     <option value="all" {% if duty_filters.status == 'all' %}selected{% endif %}>全部状态</option>
                     <option value="active" {% if duty_filters.status == 'active' %}selected{% endif %}>上班中</option>
-                    <option value="lunch" {% if duty_filters.status == 'lunch' %}selected{% endif %}>午休中</option>
+                    <option value="lunch" {% if duty_filters.status == 'lunch' %}selected{% endif %}>离岗中</option>
                     <option value="ended" {% if duty_filters.status == 'ended' %}selected{% endif %}>已下班</option>
                     <option value="review" {% if duty_filters.status == 'review' %}selected{% endif %}>复查补信息</option>
                 </select>
@@ -845,7 +845,7 @@
                         <th>放行方式</th>
                         <th>负责门店</th>
                         <th>开始/复查时间</th>
-                        <th>午休情况</th>
+                        <th>离岗情况</th>
                         <th>在岗时长</th>
                     </tr>
                 </thead>
@@ -856,7 +856,7 @@
                         <td>
                             {% if row.status_label == '上班中' %}
                                 <span class="badge bg-success">{{ row.status_label }}</span>
-                            {% elif row.status_label == '午休中' %}
+                            {% elif row.status_label == '离岗中' %}
                                 <span class="badge bg-warning text-dark">{{ row.status_label }}</span>
                             {% elif row.status_label == '已放行' %}
                                 <span class="badge bg-info text-dark">{{ row.status_label }}</span>
@@ -877,7 +877,7 @@
                                     {% endfor %}
                                 </div>
                                 {% endfor %}
-                                <div class="small text-muted mt-1">午休合计：{{ row.lunch_summary.total_text }}</div>
+                                <div class="small text-muted mt-1">就餐离岗合计：{{ row.lunch_summary.total_text }}</div>
                             {% else %}
                                 <span class="text-muted">-</span>
                             {% endif %}
@@ -923,7 +923,7 @@
                 </tbody>
             </table>
             <div class="small text-muted px-3 py-2 bg-light border-top">
-                统计口径：仅统计已下班的开始带店/登录上班记录；上班天数按每名员工的自然日去重，同一天多段上班时长累计；开始带店记录会扣除午休时间。
+                统计口径：仅统计已下班的开始带店/登录上班记录；上班天数按每名员工的自然日去重，同一天多段上班时长累计；开始带店记录会扣除就餐离岗时间。
             </div>
         </div>
         <div class="table-responsive">
@@ -936,7 +936,7 @@
                         <th>负责门店</th>
                         <th>上班/复查时间</th>
                         <th>下班时间</th>
-                        <th>午休情况</th>
+                        <th>离岗情况</th>
                         <th>在岗时长</th>
                     </tr>
                 </thead>
@@ -948,7 +948,7 @@
                         <td>
                             {% if row.status_label == '上班中' %}
                                 <span class="badge bg-success">{{ row.status_label }}</span>
-                            {% elif row.status_label == '午休中' %}
+                            {% elif row.status_label == '离岗中' %}
                                 <span class="badge bg-warning text-dark">{{ row.status_label }}</span>
                             {% elif row.status_label == '已下班' %}
                                 <span class="badge bg-secondary">{{ row.status_label }}</span>
@@ -975,7 +975,7 @@
                                     {% endfor %}
                                 </div>
                                 {% endfor %}
-                                <div class="small text-muted mt-1">午休合计：{{ row.lunch_summary.total_text }}</div>
+                                <div class="small text-muted mt-1">就餐离岗合计：{{ row.lunch_summary.total_text }}</div>
                             {% else %}
                                 <span class="text-muted">-</span>
                             {% endif %}
@@ -2638,7 +2638,7 @@
             <div class="fw-bold text-dark mb-1">结算口径</div>
             <div>
                 应发工资 = 基础工资 + 单量提成 + 奖金 + 手工调整 + 员工社保。
-                实发工资 = 应发工资 - 代缴社保。所有工资流水都会先归入基础工资、单量提成、奖金、手工调整四类之一，不重复计算。
+                实发工资 = 应发工资 - 员工社保 - 代缴社保。所有工资流水都会先归入基础工资、单量提成、奖金、手工调整四类之一，不重复计算。
                 其中，请假扣款、迟到扣款、旷工扣款、工作失误扣款、顶班补贴、临时奖金等都来自工资流水表。
             </div>
         </div>
@@ -2711,7 +2711,7 @@
                     {% set employee_social_security_amount = item.employee_social_security_amount or 0 %}
                     {% set social_security_amount = item.social_security_amount or 0 %}
                     {% set payable_salary = (item.final_salary or 0) + employee_social_security_amount %}
-                    {% set actual_salary = payable_salary - social_security_amount %}
+                    {% set actual_salary = payable_salary - employee_social_security_amount - social_security_amount %}
 
                     <td>
                         {% if salary_settlement_read_only or item.status != 'draft' %}
@@ -4173,7 +4173,7 @@
             {% set employee_social_security_amount = settlement.employee_social_security_amount or 0 %}
             {% set social_security_amount = settlement.social_security_amount or 0 %}
             {% set payable_salary = (settlement.final_salary or 0) + employee_social_security_amount %}
-            {% set actual_salary = payable_salary - social_security_amount %}
+            {% set actual_salary = payable_salary - employee_social_security_amount - social_security_amount %}
             <div class="row g-3">
                 <div class="col-md-6 col-xl-3">
                     <div class="border rounded-3 p-3 bg-light h-100">
@@ -7171,7 +7171,7 @@ function renderSalarySettlementRow(item) {
     const employeeSocialSecurity = Number(item.employee_social_security_amount || 0);
     const socialSecurity = Number(item.social_security_amount || 0);
     const payableSalary = Number(item.payable_salary || (Number(item.final_salary || 0) + employeeSocialSecurity));
-    const actualSalary = Number(item.actual_salary ?? (payableSalary - socialSecurity));
+    const actualSalary = Number(item.actual_salary ?? (payableSalary - employeeSocialSecurity - socialSecurity));
     const employeeSocialSecurityHtml = (salarySettlementReadOnly || item.status !== "draft")
         ? `<span class="fw-bold text-success">¥${employeeSocialSecurity.toFixed(2)}</span>`
         : `
@@ -7428,7 +7428,7 @@ function updateSalarySettlementSummary(summary) {
      * 更新工资结算顶部概览。
      *
      * 说明：
-     * 为避免过度复杂，第一版只在生成全员工资后更新页面已有 summary 卡片数字。
+     * AJAX 操作后只更新页面已有 summary 卡片数字。
      */
     if (!summary) return;
 
@@ -7728,6 +7728,9 @@ function handleEmployeeAjaxResult(result) {
 
     if (result.action === "salary_settlement_updated") {
         updateSalarySettlementRow(payload.settlement);
+        if (payload.summary) {
+            updateSalarySettlementSummary(payload.summary);
+        }
     }
 
     employeeShowToast(result.message || "操作成功", "success");
