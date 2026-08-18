@@ -115,6 +115,16 @@
     --schedule-event-border: #868e96;
     --schedule-event-accent: #495057;
   }
+
+  .auto-schedule-modal-body {
+    max-height: 65vh;
+    overflow: auto;
+  }
+
+  .schedule-shift-select.auto-scheduled {
+    border-color: #f59f00;
+    box-shadow: 0 0 0 0.15rem rgba(245, 159, 0, 0.18);
+  }
 </style>
 
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
@@ -153,8 +163,13 @@
   <input type="hidden" name="year" value="{{ year }}">
   <input type="hidden" name="month" value="{{ month }}">
 
-  <div class="d-flex justify-content-end mb-2">
+  <div id="autoScheduleResultAlert" class="alert alert-warning py-2 d-none" role="alert"></div>
+
+  <div class="d-flex justify-content-end gap-2 mb-2">
     {% if current_user.role == "admin" %}
+      <button type="button" id="autoScheduleBtn" class="btn btn-warning">
+        <i class="bi bi-calendar2-week"></i> 一键排班
+      </button>
       <button type="submit" class="btn btn-success">
         <i class="bi bi-save"></i> 保存排班
       </button>
@@ -162,6 +177,76 @@
       <span class="badge bg-secondary">只读</span>
     {% endif %}
   </div>
+
+  {% if current_user.role == "admin" %}
+  <div class="modal fade" id="autoScheduleModal" tabindex="-1" aria-labelledby="autoScheduleModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="autoScheduleModalLabel">一键排班</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+        </div>
+        <div class="modal-body auto-schedule-modal-body">
+          <div class="alert alert-info py-2">
+            班次将按“晚2班、晚1班、大中班、中班、早班、休息”从本月 1 号开始循环生成。生成后仍需点击“保存排班”才会写入数据库。
+          </div>
+          <div id="autoScheduleWarning" class="alert alert-danger border border-danger d-none" role="alert" tabindex="-1"></div>
+
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="fw-bold">选择员工和 1 号起始班次</div>
+            <button type="button" id="autoScheduleSelectAllBtn" class="btn btn-outline-secondary btn-sm">
+              全选
+            </button>
+          </div>
+
+          <table class="table table-sm table-bordered align-middle mb-0">
+            <thead class="table-light">
+              <tr>
+                <th style="width: 60px;" class="text-center">选择</th>
+                <th>员工</th>
+                <th style="width: 180px;">1 号班次</th>
+                <th style="width: 130px;">当前状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for name in operator_names %}
+              <tr class="auto-schedule-row">
+                <td class="text-center">
+                  <input class="form-check-input auto-schedule-employee"
+                         type="checkbox"
+                         id="autoEmployee{{ loop.index0 }}"
+                         data-operator="{{ name }}">
+                </td>
+                <td>
+                  <label for="autoEmployee{{ loop.index0 }}" class="mb-0">{{ name }}</label>
+                </td>
+                <td>
+                  <select class="form-select form-select-sm auto-schedule-start" disabled>
+                    {% for val, label in auto_schedule_shift_cycle %}
+                    <option value="{{ val }}">{{ label }}</option>
+                    {% endfor %}
+                  </select>
+                </td>
+                <td class="small text-secondary">
+                  {% if name in existing_scheduled_operator_names %}
+                    <span class="badge bg-warning text-dark">已有排班</span>
+                  {% else %}
+                    <span class="text-secondary">未保存排班</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+          <button type="button" id="autoScheduleApplyBtn" class="btn btn-primary">生成排班</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 
   <div class="table-responsive schedule-wrap" style="width: 1550px">
     <table class="table table-bordered align-middle small schedule-table" style="min-width: 1600px;">
@@ -199,8 +284,12 @@
                 <span class="badge bg-primary">{{ shift_label.get(st, "休息") }}</span>
                 <div class="small text-primary mt-1">机动顶班已锁定</div>
                 {% else %}
-                <select class="form-select form-select-sm"
-                        name="shift__{{ name }}__{{ d.isoformat() }}">
+                <select class="form-select form-select-sm schedule-shift-select"
+                        name="shift__{{ name }}__{{ d.isoformat() }}"
+                        data-operator="{{ name }}"
+                        data-date="{{ d.isoformat() }}"
+                        data-day-index="{{ loop.index0 }}"
+                        data-existing="{% if key in shifts_map %}1{% else %}0{% endif %}">
                   {% for val, label in shift_options %}
                     <option value="{{ val }}" {% if val == st %}selected{% endif %}>{{ label }}</option>
                   {% endfor %}
@@ -227,12 +316,168 @@
   </div>
 </form>
 
+{% endblock %}
+
+{% block scripts %}
 <script>
   document.getElementById("applyBtn").addEventListener("click", () => {
     const y = document.getElementById("yearSelect").value;
     const m = document.getElementById("monthSelect").value;
     window.location.href = `/schedule?year=${y}&month=${m}`;
   });
-</script>
 
+  const autoScheduleBtn = document.getElementById("autoScheduleBtn");
+  const autoScheduleModalEl = document.getElementById("autoScheduleModal");
+  const autoScheduleApplyBtn = document.getElementById("autoScheduleApplyBtn");
+  const autoScheduleWarning = document.getElementById("autoScheduleWarning");
+  const autoScheduleResultAlert = document.getElementById("autoScheduleResultAlert");
+  const autoScheduleSelectAllBtn = document.getElementById("autoScheduleSelectAllBtn");
+  const autoScheduleCycle = {{ auto_schedule_shift_cycle | tojson }};
+  const daysInMonth = {{ days_in_month }};
+  let autoScheduleOverwriteAcknowledged = false;
+
+  if (autoScheduleBtn && autoScheduleModalEl && autoScheduleApplyBtn) {
+    const autoScheduleModal = new bootstrap.Modal(autoScheduleModalEl);
+    const employeeChecks = Array.from(document.querySelectorAll(".auto-schedule-employee"));
+    const shiftSelects = Array.from(document.querySelectorAll(".schedule-shift-select"));
+
+    const selectedRows = () => employeeChecks
+      .filter((check) => check.checked)
+      .map((check) => ({
+        check,
+        operator: check.dataset.operator,
+        row: check.closest(".auto-schedule-row"),
+        startSelect: check.closest(".auto-schedule-row").querySelector(".auto-schedule-start"),
+      }));
+
+    const selectsForOperator = (operator) => shiftSelects
+      .filter((select) => select.dataset.operator === operator);
+
+    const hasExistingOrCurrentSchedule = (operator) => selectsForOperator(operator).some((select) => {
+      return select.dataset.existing === "1"
+        || select.dataset.autoScheduled === "1"
+        || select.value !== "off";
+    });
+
+    const resetOverwriteConfirmation = () => {
+      autoScheduleOverwriteAcknowledged = false;
+      autoScheduleApplyBtn.classList.remove("btn-danger");
+      autoScheduleApplyBtn.classList.add("btn-primary");
+      autoScheduleApplyBtn.textContent = "生成排班";
+    };
+
+    const showWarning = (message) => {
+      autoScheduleWarning.textContent = message;
+      autoScheduleWarning.classList.remove("d-none");
+    };
+
+    const hideWarning = () => {
+      autoScheduleWarning.textContent = "";
+      autoScheduleWarning.classList.add("d-none");
+    };
+
+    const updateLiveWarning = () => {
+      if (autoScheduleOverwriteAcknowledged) {
+        return;
+      }
+      const conflictNames = selectedRows()
+        .filter((item) => hasExistingOrCurrentSchedule(item.operator))
+        .map((item) => item.operator);
+      if (conflictNames.length) {
+        showWarning(`所选员工中 ${conflictNames.join("、")} 本月已有排班或已一键排班；继续生成会覆盖这些员工当前页面中可编辑的排班。`);
+      } else {
+        hideWarning();
+      }
+    };
+
+    const setCheckState = (check, checked) => {
+      check.checked = checked;
+      const row = check.closest(".auto-schedule-row");
+      const startSelect = row.querySelector(".auto-schedule-start");
+      startSelect.disabled = !checked;
+      row.classList.toggle("table-warning", checked);
+    };
+
+    employeeChecks.forEach((check) => {
+      check.addEventListener("change", () => {
+        setCheckState(check, check.checked);
+        resetOverwriteConfirmation();
+        updateLiveWarning();
+      });
+    });
+
+    document.querySelectorAll(".auto-schedule-start").forEach((select) => {
+      select.addEventListener("change", () => {
+        resetOverwriteConfirmation();
+      });
+    });
+
+    autoScheduleSelectAllBtn.addEventListener("click", () => {
+      const shouldSelectAll = employeeChecks.some((check) => !check.checked);
+      employeeChecks.forEach((check) => setCheckState(check, shouldSelectAll));
+      autoScheduleSelectAllBtn.textContent = shouldSelectAll ? "取消全选" : "全选";
+      resetOverwriteConfirmation();
+      updateLiveWarning();
+    });
+
+    autoScheduleBtn.addEventListener("click", () => {
+      hideWarning();
+      resetOverwriteConfirmation();
+      updateLiveWarning();
+      autoScheduleModal.show();
+    });
+
+    autoScheduleApplyBtn.addEventListener("click", () => {
+      const rows = selectedRows();
+      if (!rows.length) {
+        showWarning("请至少选择一名需要一键排班的员工。");
+        return;
+      }
+
+      const conflictNames = rows
+        .filter((item) => hasExistingOrCurrentSchedule(item.operator))
+        .map((item) => item.operator);
+
+      if (conflictNames.length && !autoScheduleOverwriteAcknowledged) {
+        showWarning(`覆盖提醒：${conflictNames.join("、")} 本月已有排班或已一键排班。再次点击“确认覆盖并生成”后，会覆盖这些员工当前页面中可编辑的排班；锁定的机动顶班不会被改动。`);
+        autoScheduleOverwriteAcknowledged = true;
+        autoScheduleApplyBtn.classList.remove("btn-primary");
+        autoScheduleApplyBtn.classList.add("btn-danger");
+        autoScheduleApplyBtn.textContent = "确认覆盖并生成";
+        autoScheduleWarning.focus();
+        return;
+      }
+
+      let changedCount = 0;
+      let lockedSkippedCount = 0;
+      rows.forEach((item) => {
+        const startIndex = autoScheduleCycle.findIndex((shift) => shift[0] === item.startSelect.value);
+        if (startIndex < 0) {
+          return;
+        }
+
+        const editableSelects = selectsForOperator(item.operator);
+        lockedSkippedCount += Math.max(daysInMonth - editableSelects.length, 0);
+        editableSelects.forEach((select) => {
+          const dayIndex = Number.parseInt(select.dataset.dayIndex, 10);
+          if (Number.isNaN(dayIndex)) {
+            return;
+          }
+          const nextShift = autoScheduleCycle[(startIndex + dayIndex) % autoScheduleCycle.length][0];
+          select.value = nextShift;
+          select.dataset.autoScheduled = "1";
+          select.classList.add("auto-scheduled");
+          changedCount += 1;
+        });
+      });
+
+      const skippedText = lockedSkippedCount ? `，已跳过锁定的机动顶班 ${lockedSkippedCount} 项` : "";
+      autoScheduleResultAlert.textContent = `已一键生成 ${rows.length} 名员工、${changedCount} 个可编辑排班${skippedText}。请点击“保存排班”提交到数据库。`;
+      autoScheduleResultAlert.classList.remove("d-none");
+      hideWarning();
+      resetOverwriteConfirmation();
+      autoScheduleModal.hide();
+    });
+  }
+</script>
 {% endblock %}

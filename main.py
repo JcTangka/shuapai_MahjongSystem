@@ -74,6 +74,14 @@ SHIFT_OPTIONS = [
     (SHIFT_TYPE_NIGHT_1, "晚1班"),
     (SHIFT_TYPE_NIGHT_2, "晚2班"),
 ]
+AUTO_SCHEDULE_SHIFT_CYCLE = [
+    (SHIFT_TYPE_NIGHT_2, "晚2班"),
+    (SHIFT_TYPE_NIGHT_1, "晚1班"),
+    ("bigmid", "大中班"),
+    ("mid", "中班"),
+    ("early", "早班"),
+    ("off", "休息"),
+]
 ALLOWED_SHIFT_TYPES = {value for value, _ in SHIFT_OPTIONS}
 SHIFT_LABEL_MAP = {value: label for value, label in SHIFT_OPTIONS}
 # 兼容拆分晚班前已经保存的历史排班记录。
@@ -3728,16 +3736,42 @@ def _build_employee_whiteboard_data(
 
     # 当前月份应该展示的员工名：在职员工 + 本月仍展示的已停用员工
     visible_employee_names = set(_get_visible_employee_names_for_month(session, year, month))
+    today_for_champion = date.today()
+    champion_cutoff_date = min(today_for_champion, month_end)
+    champion_order_count_map = {}
+    if champion_cutoff_date >= month_start:
+        for g in month_games:
+            if not g.record_date or g.record_date > champion_cutoff_date:
+                continue
+            who_did = _normalize_text(g.who_did)
+            if who_did:
+                champion_order_count_map[who_did] = champion_order_count_map.get(who_did, 0) + 1
+
+    max_champion_order_count = max(champion_order_count_map.values() or [0])
+    champion_names = sorted([
+        employee_name
+        for employee_name, order_count in champion_order_count_map.items()
+        if order_count == max_champion_order_count and order_count > 0
+    ])
+    sales_champion = {
+        "names": champion_names,
+        "display_name": "、".join(champion_names) if champion_names else "",
+        "order_count": max_champion_order_count if champion_names else 0,
+        "as_of_date": champion_cutoff_date,
+        "is_tie": len(champion_names) > 1,
+    }
 
     # who_did 里可能存在历史名字，所以这里以实际有订单的人为准，0 单不展示
     for employee_name, order_count in employee_order_count_map.items():
         if order_count <= 0:
             continue
 
+        is_visible_employee = employee_name in visible_employee_names
+
         employee_rows.append({
             "employee_name": employee_name,
             "order_count": order_count,
-            "is_visible_employee": employee_name in visible_employee_names,
+            "is_visible_employee": is_visible_employee,
             "store_rows": employee_store_rows_by_employee.get(employee_name, []),
             "store_row_count": len(employee_store_rows_by_employee.get(employee_name, [])),
             "active_duty_store_names": sorted(active_duty_store_names_by_employee.get(employee_name, set())),
@@ -3832,6 +3866,7 @@ def _build_employee_whiteboard_data(
         "employee_count": len(employee_rows),
         "commission_nodes": commission_node_rows,
         "employee_axis_max": employee_axis_max,
+        "sales_champion": sales_champion,
 
         "attendance_rows": attendance_display_rows,
         "attendance_count": len(attendance_display_rows),
@@ -4744,6 +4779,11 @@ PAYMENT_TYPE_ALIPAY = "alipay"
 PAYMENT_TYPE_NORMAL_WECHAT = "normal_wechat_shuapai9725"
 PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET = "enterprise_wechat_red_packet_shuapai888"
 
+ACTIVE_PAYMENT_TYPES = (
+    PAYMENT_TYPE_ENTERPRISE_WECHAT,
+    PAYMENT_TYPE_ALIPAY,
+)
+
 EXPANDED_PAYMENT_TYPES = (
     PAYMENT_TYPE_ENTERPRISE_WECHAT,
     PAYMENT_TYPE_ALIPAY,
@@ -4751,12 +4791,11 @@ EXPANDED_PAYMENT_TYPES = (
     PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET,
 )
 
-EXPANDED_PAYMENT_LABELS = {
-    PAYMENT_TYPE_ENTERPRISE_WECHAT: "企业微信收款",
-    PAYMENT_TYPE_ALIPAY: "支付宝收款",
-    PAYMENT_TYPE_NORMAL_WECHAT: "普通微信收款（shuapai9725）",
-    PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET: "企业微信红包收款（shuapai888）",
-}
+LEGACY_JINNIU_WECHAT_PAYMENT_TYPES = (
+    PAYMENT_TYPE_ENTERPRISE_WECHAT,
+    PAYMENT_TYPE_NORMAL_WECHAT,
+    PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET,
+)
 
 
 def _normalize_formed_source_filter(source_filter: Optional[str]) -> str:
@@ -4782,7 +4821,7 @@ def _legacy_payment_breakdown(game: GameRecord) -> Dict[str, float]:
 
 
 def _payment_breakdown_total(breakdown: Dict[str, float]) -> float:
-    return round(sum(_safe_float(breakdown.get(payment_type)) for payment_type in EXPANDED_PAYMENT_TYPES), 2)
+    return round(sum(_safe_float(breakdown.get(payment_type)) for payment_type in ACTIVE_PAYMENT_TYPES), 2)
 
 
 def _load_payment_item_breakdowns(session: Session, games: List[GameRecord]) -> Dict[int, Dict[str, float]]:
@@ -4808,12 +4847,23 @@ def _payment_breakdown_for_game(
     game: GameRecord,
     item_breakdowns: Optional[Dict[int, Dict[str, float]]] = None
 ) -> Dict[str, float]:
+    breakdown = _legacy_payment_breakdown(game)
     if _is_jinniu_wanda_store(game.store_name) and game.id and item_breakdowns and game.id in item_breakdowns:
-        breakdown = _empty_payment_breakdown()
-        for payment_type in EXPANDED_PAYMENT_TYPES:
-            breakdown[payment_type] = round(_safe_float(item_breakdowns[game.id].get(payment_type)), 2)
-        return breakdown
-    return _legacy_payment_breakdown(game)
+        item_breakdown = item_breakdowns[game.id]
+        legacy_total = _payment_breakdown_total(item_breakdown) + sum(
+            _safe_float(item_breakdown.get(payment_type))
+            for payment_type in (
+                PAYMENT_TYPE_NORMAL_WECHAT,
+                PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET,
+            )
+        )
+        if legacy_total > 0:
+            breakdown[PAYMENT_TYPE_ENTERPRISE_WECHAT] = round(sum(
+                _safe_float(item_breakdown.get(payment_type))
+                for payment_type in LEGACY_JINNIU_WECHAT_PAYMENT_TYPES
+            ), 2)
+            breakdown[PAYMENT_TYPE_ALIPAY] = round(_safe_float(item_breakdown.get(PAYMENT_TYPE_ALIPAY)), 2)
+    return breakdown
 
 
 def _received_amount_for_game(
@@ -4830,6 +4880,28 @@ def _remaining_amount_for_game(
     return round(_safe_float(game.room_fee) - _received_amount_for_game(game, item_breakdowns), 2)
 
 
+def _outstanding_amount_for_game(
+    game: GameRecord,
+    item_breakdowns: Optional[Dict[int, Dict[str, float]]] = None
+) -> float:
+    return max(_remaining_amount_for_game(game, item_breakdowns), 0.0)
+
+
+def _earned_difference_for_game(
+    game: GameRecord,
+    item_breakdowns: Optional[Dict[int, Dict[str, float]]] = None
+) -> float:
+    received_amount = _received_amount_for_game(game, item_breakdowns)
+    return max(round(received_amount - _safe_float(game.room_fee), 2), 0.0)
+
+
+def _payment_overage_allowed_for_game(game: GameRecord) -> bool:
+    return (_normalize_text(game.record_source) or FORMED_SOURCE_NORMAL) in {
+        FORMED_SOURCE_NORMAL,
+        FORMED_SOURCE_OVERFLOW,
+    }
+
+
 def _load_single_payment_breakdown(session: Session, game: GameRecord) -> Dict[str, float]:
     return _payment_breakdown_for_game(game, _load_payment_item_breakdowns(session, [game]))
 
@@ -4838,37 +4910,15 @@ def _has_any_system_receipt(session: Session, game: GameRecord) -> bool:
     return _payment_breakdown_total(_load_single_payment_breakdown(session, game)) > 0
 
 
-def _save_expanded_payment_items(
-    session: Session,
-    game: GameRecord,
-    breakdown: Dict[str, float],
-    operator_name: str
-) -> None:
-    now = datetime.now()
+def _clear_expanded_payment_items(session: Session, game: GameRecord) -> None:
+    if not game.id:
+        return
+
     existing_items = session.exec(
         select(GamePaymentItem).where(GamePaymentItem.game_id == game.id)
     ).all()
-    item_map = {item.payment_type: item for item in existing_items}
-
-    for payment_type in EXPANDED_PAYMENT_TYPES:
-        amount = round(_safe_float(breakdown.get(payment_type)), 2)
-        item = item_map.get(payment_type)
-        if not item:
-            item = GamePaymentItem(
-                game_id=game.id,
-                store_name=game.store_name,
-                payment_type=payment_type,
-                amount=amount,
-                created_at=now,
-                updated_at=now,
-                updated_by=operator_name
-            )
-        else:
-            item.store_name = game.store_name
-            item.amount = amount
-            item.updated_at = now
-            item.updated_by = operator_name
-        session.add(item)
+    for item in existing_items:
+        session.delete(item)
 
 
 def _parse_required_self_arrival_order_start_time(order_start_time_full: str) -> Tuple[date, str]:
@@ -5359,9 +5409,7 @@ def _new_customer_pull_is_success(record: NewCustomerPullRecord) -> bool:
     return bool(
         _normalize_text(record.customer_nickname)
         and _normalize_text(record.customer_wechat_id)
-        and record.has_tag
         and record.in_group_chat
-        and record.remark_updated
     )
 
 
@@ -6498,7 +6546,6 @@ def _build_formed_games_excel_xml(
     end_d: date,
     payment_breakdowns: Optional[Dict[int, Dict[str, float]]] = None
 ) -> str:
-    is_jinniu_wanda_store = _is_jinniu_wanda_store(store_name)
     headers = [
         "ID",
         "门店",
@@ -6522,13 +6569,8 @@ def _build_formed_games_excel_xml(
         "下单/支付方式",
         "本单金额",
         "是否已收齐",
-        "企业微信收款" if is_jinniu_wanda_store else "微信收款",
+        "微信收款",
         "支付宝收款",
-        *(
-            ["普通微信收款（shuapai9725）", "企业微信红包收款（shuapai888）"]
-            if is_jinniu_wanda_store
-            else []
-        ),
         "未收金额",
         "接待店长",
         "创建时间",
@@ -6585,14 +6627,6 @@ def _build_formed_games_excel_xml(
             "是" if g.is_payAll else "否",
             breakdown.get(PAYMENT_TYPE_ENTERPRISE_WECHAT, 0),
             breakdown.get(PAYMENT_TYPE_ALIPAY, 0),
-            *(
-                [
-                    breakdown.get(PAYMENT_TYPE_NORMAL_WECHAT, 0),
-                    breakdown.get(PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET, 0),
-                ]
-                if is_jinniu_wanda_store
-                else []
-            ),
             remaining,
             g.who_did or "",
             g.created_at.strftime("%Y-%m-%d %H:%M:%S") if g.created_at else "",
@@ -17195,6 +17229,12 @@ async def update_game(
         smoke_type=smoke_type,
         updated_by=user.display_name
     )
+    _ensure_game_players_in_store_customer_pool(
+        session=session,
+        game=game,
+        store_name=store_name,
+        mark_visit=False,
+    )
     sync_formed_game_note_to_handover(
         session=session,
         game=game,
@@ -17218,8 +17258,6 @@ async def update_payment(
         store_name: str = Form(...),
         wechat_pay: float = Form(0.0),
         Alipay: float = Form(0.0),
-        normal_wechat_pay: float = Form(0.0),
-        enterprise_wechat_red_packet_pay: float = Form(0.0),
 
         source_filter: str = Form(""),
         pay_status: str = Form("all"),
@@ -17280,7 +17318,7 @@ async def update_payment(
 
     was_paid = game.is_payAll
 
-    if wechat_pay < 0 or Alipay < 0 or normal_wechat_pay < 0 or enterprise_wechat_red_packet_pay < 0:
+    if wechat_pay < 0 or Alipay < 0:
         msg = "收款金额不能小于0"
         if _is_ajax_request(request):
             return JSONResponse({"ok": False, "message": msg}, status_code=400)
@@ -17299,23 +17337,15 @@ async def update_payment(
         )
 
     fee_amount = round(float(game.room_fee or 0), 2)
-    if _is_jinniu_wanda_store(game.store_name):
-        submitted_breakdown = {
-            PAYMENT_TYPE_ENTERPRISE_WECHAT: wechat_pay,
-            PAYMENT_TYPE_ALIPAY: Alipay,
-            PAYMENT_TYPE_NORMAL_WECHAT: normal_wechat_pay,
-            PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET: enterprise_wechat_red_packet_pay,
-        }
-    else:
-        submitted_breakdown = {
-            PAYMENT_TYPE_ENTERPRISE_WECHAT: wechat_pay,
-            PAYMENT_TYPE_ALIPAY: Alipay,
-            PAYMENT_TYPE_NORMAL_WECHAT: 0.0,
-            PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET: 0.0,
-        }
+    submitted_breakdown = {
+        PAYMENT_TYPE_ENTERPRISE_WECHAT: wechat_pay,
+        PAYMENT_TYPE_ALIPAY: Alipay,
+        PAYMENT_TYPE_NORMAL_WECHAT: 0.0,
+        PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET: 0.0,
+    }
     received_amount = _payment_breakdown_total(submitted_breakdown)
-    is_overflow_game = game.record_source == FORMED_SOURCE_OVERFLOW
-    if received_amount > fee_amount and not is_overflow_game:
+    overage_allowed = _payment_overage_allowed_for_game(game)
+    if received_amount > fee_amount and not overage_allowed:
         msg = f"收款金额不能大于费用，当前多收 ¥{received_amount - fee_amount:.2f}"
         if _is_ajax_request(request):
             return JSONResponse({"ok": False, "message": msg}, status_code=400)
@@ -17333,21 +17363,14 @@ async def update_payment(
             status_code=303
         )
 
-    new_is_payAll = (received_amount >= fee_amount) if is_overflow_game else (received_amount == fee_amount)
+    new_is_payAll = (received_amount >= fee_amount) if overage_allowed else (received_amount == fee_amount)
     game.is_payAll = new_is_payAll
     game.wechat_pay = wechat_pay
     game.Alipay = Alipay
     game.updated_at = datetime.now()
     game.updated_by = user.display_name
     session.add(game)
-
-    if _is_jinniu_wanda_store(game.store_name):
-        _save_expanded_payment_items(
-            session=session,
-            game=game,
-            breakdown=submitted_breakdown,
-            operator_name=user.display_name
-        )
+    _clear_expanded_payment_items(session, game)
 
     if not was_paid and new_is_payAll:
         print(f"检测到牌局 #{game.serial_number} 完成结算，开始同步顾客到店与转化数据...")
@@ -17489,9 +17512,8 @@ async def formed_games(
     uncollected_amount = 0.0
     wechat_collection_amount = 0.0
     alipay_collection_amount = 0.0
-    normal_wechat_collection_amount = 0.0
-    enterprise_wechat_red_packet_collection_amount = 0.0
     normal_formed_order_count = 0
+    normal_earned_difference_total = 0.0
 
     overflow_order_count = 0
     overflow_reserved_total = 0.0
@@ -17509,21 +17531,20 @@ async def formed_games(
         ]
         total_collection_amount = round(sum((g.room_fee or 0) for g in collection_games), 2)
         collected_amount = round(sum(_received_amount_for_game(g, payment_breakdowns) for g in collection_games), 2)
-        uncollected_amount = round(total_collection_amount - collected_amount, 2)
+        uncollected_amount = round(sum(
+            _outstanding_amount_for_game(g, payment_breakdowns)
+            for g in collection_games
+        ), 2)
+        normal_earned_difference_total = round(sum(
+            _earned_difference_for_game(g, payment_breakdowns)
+            for g in collection_games
+        ), 2)
         wechat_collection_amount = round(sum(
             _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ENTERPRISE_WECHAT, 0.0)
             for g in collection_games
         ), 2)
         alipay_collection_amount = round(sum(
             _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ALIPAY, 0.0)
-            for g in collection_games
-        ), 2)
-        normal_wechat_collection_amount = round(sum(
-            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_NORMAL_WECHAT, 0.0)
-            for g in collection_games
-        ), 2)
-        enterprise_wechat_red_packet_collection_amount = round(sum(
-            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET, 0.0)
             for g in collection_games
         ), 2)
 
@@ -17541,14 +17562,6 @@ async def formed_games(
         ), 2)
         alipay_collection_amount = round(sum(
             _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ALIPAY, 0.0)
-            for g in filtered_results
-        ), 2)
-        normal_wechat_collection_amount = round(sum(
-            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_NORMAL_WECHAT, 0.0)
-            for g in filtered_results
-        ), 2)
-        enterprise_wechat_red_packet_collection_amount = round(sum(
-            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET, 0.0)
             for g in filtered_results
         ), 2)
         overflow_paid_count = len([g for g in filtered_results if g.is_payAll])
@@ -17572,14 +17585,6 @@ async def formed_games(
         ), 2)
         alipay_collection_amount = round(sum(
             _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ALIPAY, 0.0)
-            for g in self_arrival_charge_games
-        ), 2)
-        normal_wechat_collection_amount = round(sum(
-            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_NORMAL_WECHAT, 0.0)
-            for g in self_arrival_charge_games
-        ), 2)
-        enterprise_wechat_red_packet_collection_amount = round(sum(
-            _payment_breakdown_for_game(g, payment_breakdowns).get(PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET, 0.0)
             for g in self_arrival_charge_games
         ), 2)
         self_arrival_unpaid_count = len([g for g in self_arrival_charge_games if not g.is_payAll])
@@ -17633,11 +17638,9 @@ async def formed_games(
         "uncollected_amount": uncollected_amount,
         "wechat_collection_amount": wechat_collection_amount,
         "alipay_collection_amount": alipay_collection_amount,
-        "normal_wechat_collection_amount": normal_wechat_collection_amount,
-        "enterprise_wechat_red_packet_collection_amount": enterprise_wechat_red_packet_collection_amount,
         "payment_breakdowns": page_payment_breakdowns,
-        "is_jinniu_wanda_store": _is_jinniu_wanda_store(store),
         "normal_formed_order_count": normal_formed_order_count,
+        "normal_earned_difference_total": normal_earned_difference_total,
 
         "overflow_order_count": overflow_order_count,
         "overflow_reserved_total": overflow_reserved_total,
@@ -20052,6 +20055,12 @@ async def update_formed_game(
     session.add(game)
     session.flush()
 
+    _ensure_game_players_in_store_customer_pool(
+        session=session,
+        game=game,
+        store_name=store_name,
+        mark_visit=False,
+    )
     sync_formed_game_note_to_handover(
         session=session,
         game=game,
@@ -20182,8 +20191,6 @@ async def get_game_detail(
         "is_payAll": bool(game.is_payAll),
         "wechat_pay": payment_breakdown.get(PAYMENT_TYPE_ENTERPRISE_WECHAT, 0),
         "Alipay": payment_breakdown.get(PAYMENT_TYPE_ALIPAY, 0),
-        "normal_wechat_pay": payment_breakdown.get(PAYMENT_TYPE_NORMAL_WECHAT, 0),
-        "enterprise_wechat_red_packet_pay": payment_breakdown.get(PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET, 0),
         "remaining": remaining,
         "actual_received": actual_received,
         "profit_amount": profit_amount,
@@ -20398,6 +20405,7 @@ async def read_customers(
         tab: str = "store_customers",
         search_query: str = "",
         sort_by: str = "default",
+        duplicate_nickname: str = "",
         public_date_filter: str = "today",
         public_start_date: str = "",
         public_end_date: str = "",
@@ -20437,6 +20445,7 @@ async def read_customers(
         store = store_list[0]
 
     keyword = (search_query or "").strip()
+    duplicate_nickname = str(duplicate_nickname or "").strip().lower() in {"1", "true", "yes", "on"}
     tab = tab if tab in {
         "store_customers",
         "public_traffic",
@@ -20461,6 +20470,7 @@ async def read_customers(
         "current_user": user,
         "success": success,
         "error": error,
+        "duplicate_nickname": duplicate_nickname,
         "source_ports": PUBLIC_TRAFFIC_SOURCE_PORTS,
     }
 
@@ -20948,9 +20958,7 @@ async def read_customers(
                 "nickname": item["nickname"],
                 "wechat_id": item["wechat_id"],
                 "is_new": not is_old,
-                "has_tag": bool(followup.has_tag) if followup else False,
                 "in_group_chat": bool(followup.in_group_chat) if followup else False,
-                "remark_updated": bool(followup.remark_updated) if followup else False,
             })
 
         full_contact_customer_list.sort(key=lambda item: 0 if item["is_new"] else 1)
@@ -21048,9 +21056,7 @@ async def read_customers(
                 "source_label": _new_customer_pull_source_label(row),
                 "customer_nickname": row.customer_nickname or "",
                 "customer_wechat_id": row.customer_wechat_id or "",
-                "has_tag": bool(row.has_tag),
                 "in_group_chat": bool(row.in_group_chat),
-                "remark_updated": bool(row.remark_updated),
                 "remark": row.remark or "",
                 "status_text": "成功" if is_success else "待拉新",
             })
@@ -21094,7 +21100,7 @@ async def read_customers(
         # 关键改动：
         # - 无搜索词时：仍按当前门店隔离展示
         # - 有搜索词时：放开为全域搜索，不再按当前门店过滤
-        if not keyword:
+        if duplicate_nickname or not keyword:
             if store not in visited_store_names:
                 continue
 
@@ -21121,9 +21127,18 @@ async def read_customers(
             "current_store_visit_count": visit_count,
             "current_store_link_id": current_store_link.id if current_store_link else None,
             "in_group_chat": bool(current_store_link.in_group_chat) if current_store_link else False,
-            "has_tag": bool(current_store_link.has_tag) if current_store_link else False,
-            "remark_updated": bool(current_store_link.remark_updated) if current_store_link else False,
         })
+
+    if duplicate_nickname:
+        nickname_counts = {}
+        for item in customer_data_list:
+            nickname_key = _normalize_text(item.get("nickname")).casefold()
+            if nickname_key:
+                nickname_counts[nickname_key] = nickname_counts.get(nickname_key, 0) + 1
+        customer_data_list = [
+            item for item in customer_data_list
+            if nickname_counts.get(_normalize_text(item.get("nickname")).casefold(), 0) > 1
+        ]
 
     if sort_by == "last_visit_desc":
         customer_data_list.sort(
@@ -21149,6 +21164,13 @@ async def read_customers(
                 0 if (x["nickname"] or "") == keyword else 1,
                 0 if (x["wechat_id"] or "") == keyword else 1,
                 -(x["current_store_visit_count"] or 0),
+                x["id"]
+            )
+        )
+    elif duplicate_nickname:
+        customer_data_list.sort(
+            key=lambda x: (
+                _normalize_text(x.get("nickname")).casefold(),
                 x["id"]
             )
         )
@@ -21284,12 +21306,15 @@ def _build_store_customers_url(
     sort_by: str = "default",
     success: str = "",
     error: str = "",
+    duplicate_nickname: bool = False,
 ) -> str:
     params = {
         "store": store or "牛王庙店",
         "tab": "store_customers",
         "sort_by": sort_by or "default",
     }
+    if duplicate_nickname:
+        params["duplicate_nickname"] = "1"
     if search_query:
         params["search_query"] = search_query
     if success:
@@ -21306,6 +21331,7 @@ async def toggle_customer_recommendation_block(
         mode: str = Form(...),
         search_query: str = Form(""),
         sort_by: str = Form("default"),
+        duplicate_nickname: str = Form(""),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -21314,16 +21340,17 @@ async def toggle_customer_recommendation_block(
 
     store = _normalize_text(store)
     mode = _normalize_text(mode)
+    duplicate_filter = str(duplicate_nickname or "").strip().lower() in {"1", "true", "yes", "on"}
     if mode not in RECOMMENDATION_BLOCK_MODES:
         return RedirectResponse(
-            url=_build_store_customers_url(store, search_query, sort_by, error="推荐屏蔽类型无效"),
+            url=_build_store_customers_url(store, search_query, sort_by, error="推荐屏蔽类型无效", duplicate_nickname=duplicate_filter),
             status_code=303
         )
 
     customer = session.get(Customer, customer_id)
     if not customer or bool(getattr(customer, "is_deleted", False)):
         return RedirectResponse(
-            url=_build_store_customers_url(store, search_query, sort_by, error="顾客不存在"),
+            url=_build_store_customers_url(store, search_query, sort_by, error="顾客不存在", duplicate_nickname=duplicate_filter),
             status_code=303
         )
 
@@ -21335,7 +21362,7 @@ async def toggle_customer_recommendation_block(
     ).first()
     if not link:
         return RedirectResponse(
-            url=_build_store_customers_url(store, search_query, sort_by, error="该顾客不在当前门店组局散客池中"),
+            url=_build_store_customers_url(store, search_query, sort_by, error="该顾客不在当前门店组局散客池中", duplicate_nickname=duplicate_filter),
             status_code=303
         )
 
@@ -21383,7 +21410,7 @@ async def toggle_customer_recommendation_block(
         success_msg = "已设置近7天不出现在智能推荐中" if mode == RECOMMENDATION_BLOCK_TEMPORARY else "已设置一直不出现在智能推荐中"
 
     return RedirectResponse(
-        url=_build_store_customers_url(store, search_query, sort_by, success=success_msg),
+        url=_build_store_customers_url(store, search_query, sort_by, success=success_msg, duplicate_nickname=duplicate_filter),
         status_code=303
     )
 
@@ -21570,9 +21597,7 @@ def _merge_same_identity_contact_followups(session: Session, alias_keys: set[str
         return
 
     keep = next((row for row in rows if _normalize_text(row.wechat_id) == canonical_wechat), None) or rows[0]
-    keep.has_tag = any(bool(row.has_tag) for row in rows)
     keep.in_group_chat = any(bool(row.in_group_chat) for row in rows)
-    keep.remark_updated = any(bool(row.remark_updated) for row in rows)
     keep.updated_at = max([row.updated_at for row in rows if row.updated_at] or [datetime.now()])
     keep.updated_by = keep.updated_by or next((row.updated_by for row in rows if row.updated_by), None)
 
@@ -21707,8 +21732,6 @@ def _merge_customer_into_customer(
             target_link.created_at = _min_optional_date(target_link.created_at, source_link.created_at)
             target_link.last_visit_at_store = _max_optional_date(target_link.last_visit_at_store, source_link.last_visit_at_store)
             target_link.in_group_chat = bool(target_link.in_group_chat) or bool(source_link.in_group_chat)
-            target_link.has_tag = bool(target_link.has_tag) or bool(source_link.has_tag)
-            target_link.remark_updated = bool(target_link.remark_updated) or bool(source_link.remark_updated)
             target_link.remark = target_link.remark or source_link.remark
             target_link.followup_updated_at = _max_optional_date(target_link.followup_updated_at, source_link.followup_updated_at)
             target_link.followup_updated_by = target_link.followup_updated_by or source_link.followup_updated_by
@@ -21897,6 +21920,7 @@ async def save_store_customer_followup(
         store: str = Form("牛王庙店"),
         search_query: str = Form(""),
         sort_by: str = Form("default"),
+        duplicate_nickname: str = Form(""),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -21904,6 +21928,7 @@ async def save_store_customer_followup(
         return RedirectResponse(url="/login", status_code=303)
 
     form = await request.form()
+    duplicate_filter = str(duplicate_nickname or "").strip().lower() in {"1", "true", "yes", "on"}
     customer_ids = []
     for raw_id in form.getlist("customer_id"):
         try:
@@ -21924,8 +21949,6 @@ async def save_store_customer_followup(
             continue
 
         link.in_group_chat = form.get(f"in_group_chat_{customer_id}") == "1"
-        link.has_tag = form.get(f"has_tag_{customer_id}") == "1"
-        link.remark_updated = form.get(f"remark_updated_{customer_id}") == "1"
         link.followup_updated_at = now
         link.followup_updated_by = user.display_name
         session.add(link)
@@ -21938,7 +21961,8 @@ async def save_store_customer_followup(
             store,
             search_query,
             sort_by,
-            success=f"组局散客跟进信息已保存（{saved_count} 条）"
+            success=f"组局散客跟进信息已保存（{saved_count} 条）",
+            duplicate_nickname=duplicate_filter,
         ),
         status_code=303
     )
@@ -22514,13 +22538,9 @@ async def save_contact_customer_followup(
             followup = ContactCustomerFollowup(wechat_id=wechat_id)
 
         row_key = contact_row_keys[idx] if idx < len(contact_row_keys) else str(idx)
-        has_tag = form.get(f"has_tag_{row_key}") == "1"
         in_group_chat = form.get(f"in_group_chat_{row_key}") == "1"
-        remark_updated = form.get(f"remark_updated_{row_key}") == "1"
 
-        followup.has_tag = has_tag
         followup.in_group_chat = in_group_chat
-        followup.remark_updated = remark_updated
         followup.updated_at = now
         followup.updated_by = user.display_name
         session.add(followup)
@@ -22528,9 +22548,8 @@ async def save_contact_customer_followup(
         contact_store_name = _normalize_text(contact_store_names[idx] if idx < len(contact_store_names) else "")
         contact_nickname = _normalize_text(contact_nicknames[idx] if idx < len(contact_nicknames) else "") or "未知昵称"
         is_new_contact = (contact_is_new_values[idx] if idx < len(contact_is_new_values) else "") == "1"
-        has_any_followup = has_tag or in_group_chat or remark_updated
 
-        if is_new_contact and has_any_followup and contact_store_name in active_store_names:
+        if is_new_contact and in_group_chat and contact_store_name in active_store_names:
             customer = _find_customer_by_wechat_case_insensitive(session, wechat_id)
             if customer:
                 if bool(getattr(customer, "is_deleted", False)):
@@ -22570,9 +22589,7 @@ async def save_contact_customer_followup(
                 session.flush()
                 added_to_store_count += 1
 
-            link.has_tag = has_tag
             link.in_group_chat = in_group_chat
-            link.remark_updated = remark_updated
             link.followup_updated_at = now
             link.followup_updated_by = user.display_name
             session.add(link)
@@ -22663,9 +22680,7 @@ async def save_new_customer_pull_records(
 
         row.customer_nickname = _normalize_text(form.get(f"customer_nickname_{record_id}")) or ""
         row.customer_wechat_id = _normalize_text(form.get(f"customer_wechat_id_{record_id}")) or ""
-        row.has_tag = form.get(f"has_tag_{record_id}") == "1"
         row.in_group_chat = form.get(f"in_group_chat_{record_id}") == "1"
-        row.remark_updated = form.get(f"remark_updated_{record_id}") == "1"
         row.remark = _normalize_text(form.get(f"remark_{record_id}")) or None
         row.updated_at = now
         row.updated_by = user.display_name
@@ -23129,22 +23144,24 @@ async def delete_customer(
         store: str = Form("牛王庙店"),
         search_query: str = Form(""),
         sort_by: str = Form("default"),
+        duplicate_nickname: str = Form(""),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
+    duplicate_filter = str(duplicate_nickname or "").strip().lower() in {"1", "true", "yes", "on"}
     if user.role != "admin":
         return RedirectResponse(
-            url=_build_store_customers_url(store, search_query, sort_by, error="无权限，仅管理员可删除顾客"),
+            url=_build_store_customers_url(store, search_query, sort_by, error="无权限，仅管理员可删除顾客", duplicate_nickname=duplicate_filter),
             status_code=303
         )
 
     cust = session.get(Customer, customer_id)
     if not cust:
         return RedirectResponse(
-            url=_build_store_customers_url(store, search_query, sort_by, error="顾客不存在"),
+            url=_build_store_customers_url(store, search_query, sort_by, error="顾客不存在", duplicate_nickname=duplicate_filter),
             status_code=303
         )
 
@@ -23155,7 +23172,7 @@ async def delete_customer(
     session.commit()
 
     return RedirectResponse(
-        url=_build_store_customers_url(store, search_query, sort_by, success="顾客已删除"),
+        url=_build_store_customers_url(store, search_query, sort_by, success="顾客已删除", duplicate_nickname=duplicate_filter),
         status_code=303
     )
 
@@ -23887,6 +23904,11 @@ async def schedule_page(
     shifts_map = get_month_shifts_map(session, y, m)
     flexible_locked_shift_keys = _get_flexible_locked_shift_keys(session, day_list[0], day_list[-1])
     operator_name_set = set(operator_names)
+    existing_scheduled_operator_names = sorted({
+        operator_name
+        for operator_name, work_date in shifts_map.keys()
+        if operator_name in operator_name_set and day_list[0] <= work_date <= day_list[-1]
+    })
 
     def schedule_event_color_class(event_id: int) -> str:
         return f"schedule-event-{event_id % 8}"
@@ -24026,8 +24048,10 @@ async def schedule_page(
         "operator_names": operator_names,
         "shifts_map": shifts_map,
         "flexible_locked_shift_keys": flexible_locked_shift_keys,
+        "existing_scheduled_operator_names": existing_scheduled_operator_names,
         "schedule_event_marks": schedule_event_marks,
         "shift_options": shift_options,
+        "auto_schedule_shift_cycle": AUTO_SCHEDULE_SHIFT_CYCLE,
         "shift_label": shift_label,
 
         # 固定班次说明

@@ -347,6 +347,35 @@
         overflow: hidden;
     }
 
+    .whiteboard-champion {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        color: #b45309;
+        background: #fffbeb;
+        border: 1px solid #f59e0b;
+        border-radius: 999px;
+        padding: 8px 14px;
+        box-shadow: 0 0.125rem 0.5rem rgba(245, 158, 11, 0.16);
+    }
+
+    .whiteboard-champion .bi {
+        font-size: 1.35rem;
+        color: #f59e0b;
+    }
+
+    .whiteboard-champion-name {
+        font-size: 1.12rem;
+        font-weight: 900;
+        color: #92400e;
+    }
+
+    .whiteboard-champion-count {
+        font-size: 1rem;
+        font-weight: 900;
+        color: #dc2626;
+    }
+
     .whiteboard-bar-row {
         padding: 14px 0;
         border-bottom: 1px solid #eef2f7;
@@ -3323,11 +3352,27 @@
 <!-- 员工本月订单量柱状图 -->
 <div class="card whiteboard-chart-card mb-4">
     <div class="card-header bg-white py-3">
-        <div class="fw-bold">
-            <i class="bi bi-person-lines-fill text-primary me-1"></i>员工本月订单量对比
-        </div>
-        <div class="small text-muted mt-1">
-            仅展示本月订单量大于 0 的员工；红色竖线为个人提成关键节点：660、710、760、810、860……。点击员工可展开查看其每个门店的目标订单完成情况。
+        <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
+            <div>
+                <div class="fw-bold">
+                    <i class="bi bi-person-lines-fill text-primary me-1"></i>员工本月订单量对比
+                </div>
+                <div class="small text-muted mt-1">
+                    仅展示本月订单量大于 0 的员工；红色竖线为个人提成关键节点：660、710、760、810、860……。点击员工可展开查看其每个门店的目标订单完成情况。
+                </div>
+            </div>
+            {% if whiteboard_data.sales_champion and whiteboard_data.sales_champion.order_count %}
+            <div class="whiteboard-champion" title="仅展示截至 {{ whiteboard_data.sales_champion.as_of_date }} 的本月订单量第一名，不产生奖金或工资流水。">
+                <i class="bi bi-trophy-fill"></i>
+                <div>
+                    <div class="small fw-bold">当前销冠{% if whiteboard_data.sales_champion.is_tie %}（并列）{% endif %}</div>
+                    <div>
+                        <span class="whiteboard-champion-name">{{ whiteboard_data.sales_champion.display_name }}</span>
+                        <span class="whiteboard-champion-count ms-2">{{ whiteboard_data.sales_champion.order_count }} 单</span>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
         </div>
     </div>
 
@@ -3342,9 +3387,6 @@
                             aria-expanded="false"
                             aria-controls="whiteboard-employee-store-drawer-{{ loop.index }}">
                         <span>{{ row.employee_name }}</span>
-                        {% if not row.is_visible_employee %}
-                            <span class="badge bg-secondary ms-1">历史接待人</span>
-                        {% endif %}
                         {% if row.store_row_count %}
                             <span class="badge bg-light text-dark border ms-1">{{ row.store_row_count }} 个门店</span>
                             <i class="bi bi-chevron-down"></i>

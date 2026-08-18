@@ -149,7 +149,7 @@
     <div class="card border-0 shadow-sm"><div class="card-body p-0">
         <table class="table table-hover align-middle mb-0 text-center">
             <thead class="table-light"><tr>
-                <th>序号</th><th>拉新店长</th><th>门店</th><th>来源牌局</th><th style="min-width: 140px;">用户昵称</th><th style="min-width: 160px;">用户微信号</th><th style="min-width: 180px;">备注</th><th>添加微信激活标签</th><th>门店私域群聊邀请</th><th>微信名片备注修改</th><th>是否拉新成功</th>{% if tab == 'my_new_customer_pull' %}<th>是否转入团队待拉新</th>{% endif %}
+                <th>序号</th><th>拉新店长</th><th>门店</th><th>来源牌局</th><th style="min-width: 140px;">用户昵称</th><th style="min-width: 160px;">用户微信号</th><th style="min-width: 180px;">备注</th><th>门店私域群聊邀请</th><th>是否拉新成功</th>{% if tab == 'my_new_customer_pull' %}<th>是否转入团队待拉新</th>{% endif %}
             </tr></thead>
             <tbody>
             {% for item in pull_record_list %}
@@ -161,16 +161,14 @@
                     <td><input type="hidden" name="record_id" value="{{ item.id }}"><input type="text" class="form-control form-control-sm pull-status-text" name="customer_nickname_{{ item.id }}" value="{{ item.customer_nickname }}" data-row-id="{{ item.id }}"></td>
                     <td><input type="text" class="form-control form-control-sm pull-status-text" name="customer_wechat_id_{{ item.id }}" value="{{ item.customer_wechat_id }}" data-row-id="{{ item.id }}"></td>
                     <td><textarea class="form-control form-control-sm" name="remark_{{ item.id }}" rows="1" placeholder="备注顾客情况">{{ item.remark }}</textarea></td>
-                    <td><input class="form-check-input pull-status-checkbox" type="checkbox" name="has_tag_{{ item.id }}" value="1" data-row-id="{{ item.id }}" {% if item.has_tag %}checked{% endif %}></td>
                     <td><input class="form-check-input pull-status-checkbox" type="checkbox" name="in_group_chat_{{ item.id }}" value="1" data-row-id="{{ item.id }}" {% if item.in_group_chat %}checked{% endif %}></td>
-                    <td><input class="form-check-input pull-status-checkbox" type="checkbox" name="remark_updated_{{ item.id }}" value="1" data-row-id="{{ item.id }}" {% if item.remark_updated %}checked{% endif %}></td>
                     <td><span class="badge pull-status-badge {% if item.status_text == '成功' %}bg-success{% else %}bg-warning text-dark{% endif %}" data-row-id="{{ item.id }}">{{ item.status_text }}</span></td>
                     {% if tab == 'my_new_customer_pull' %}
                     <td><button type="submit" class="btn btn-sm btn-outline-primary" formaction="/new-customer-pull/transfer/{{ item.id }}">转入团队</button></td>
                     {% endif %}
                 </tr>
             {% else %}
-                <tr><td colspan="{% if tab == 'my_new_customer_pull' %}12{% else %}11{% endif %}" class="text-muted py-5"><i class="bi bi-person-plus fs-1 d-block mb-3"></i>当前时间范围暂无待拉新记录。</td></tr>
+                <tr><td colspan="{% if tab == 'my_new_customer_pull' %}10{% else %}9{% endif %}" class="text-muted py-5"><i class="bi bi-person-plus fs-1 d-block mb-3"></i>当前时间范围暂无待拉新记录。</td></tr>
             {% endfor %}
             </tbody>
         </table>
@@ -233,13 +231,18 @@
     <input type="hidden" name="store" value="{{ current_store }}">
     <input type="hidden" name="search_query" value="{{ search_query }}">
     <input type="hidden" name="sort_by" value="{{ sort_by }}">
-    {% if customer_list %}
-    <div class="text-end mb-3">
+    <input type="hidden" name="duplicate_nickname" value="{{ '1' if duplicate_nickname else '' }}">
+    <div class="d-flex justify-content-end gap-2 mb-3">
+        <a href="/customers?store={{ current_store|urlencode }}&tab=store_customers&sort_by={{ sort_by|urlencode }}&duplicate_nickname=1"
+           class="btn {% if duplicate_nickname %}btn-primary{% else %}btn-outline-primary{% endif %} rounded-pill px-4">
+            <i class="bi bi-search me-1"></i>检索重名顾客
+        </a>
+        {% if customer_list %}
         <button type="submit" class="btn btn-primary rounded-pill px-4">
             <i class="bi bi-save me-1"></i>批量保存
         </button>
+        {% endif %}
     </div>
-    {% endif %}
 
 <div class="card border-0 shadow-sm">
     <div class="card-body p-0">
@@ -254,8 +257,6 @@
                     <th>本门店次数</th>
                     <th>常玩玩法</th>
                     <th>门店私域群聊邀请</th>
-                    <th>添加微信激活标签</th>
-                    <th>微信名片备注修改</th>
                     <th>操作</th>
                 </tr>
             </thead>
@@ -314,18 +315,6 @@
                     </td>
 
                     <td>
-                        <input class="form-check-input" type="checkbox" name="has_tag_{{ cust.id }}" value="1"
-                               {% if cust.has_tag %}checked{% endif %}
-                               {% if not cust.current_store_link_id %}disabled{% endif %}>
-                    </td>
-
-                    <td>
-                        <input class="form-check-input" type="checkbox" name="remark_updated_{{ cust.id }}" value="1"
-                               {% if cust.remark_updated %}checked{% endif %}
-                               {% if not cust.current_store_link_id %}disabled{% endif %}>
-                    </td>
-
-                    <td>
                         <div class="d-inline-flex flex-wrap justify-content-center gap-2">
                             <button type="button" class="btn btn-sm btn-outline-info"
                                     onclick="openDetailModal({{ cust.id }})">
@@ -338,6 +327,7 @@
                                     data-mode="temporary"
                                     data-search-query="{{ search_query }}"
                                     data-sort-by="{{ sort_by }}"
+                                    data-duplicate-nickname="{{ '1' if duplicate_nickname else '' }}"
                                     {% if not cust.current_store_link_id %}disabled{% endif %}
                                     onclick="toggleRecommendationBlockFromButton(this)">
                                 {% if cust.recommendation_block_mode == 'temporary' %}取消近7天{% else %}近7天不推荐{% endif %}
@@ -349,6 +339,7 @@
                                     data-mode="permanent"
                                     data-search-query="{{ search_query }}"
                                     data-sort-by="{{ sort_by }}"
+                                    data-duplicate-nickname="{{ '1' if duplicate_nickname else '' }}"
                                     {% if not cust.current_store_link_id %}disabled{% endif %}
                                     onclick="toggleRecommendationBlockFromButton(this)">
                                 {% if cust.recommendation_block_mode == 'permanent' %}取消一直{% else %}一直不推荐{% endif %}
@@ -360,6 +351,7 @@
                                     data-store="{{ current_store }}"
                                     data-search-query="{{ search_query }}"
                                     data-sort-by="{{ sort_by }}"
+                                    data-duplicate-nickname="{{ '1' if duplicate_nickname else '' }}"
                                     onclick="deleteCustomerFromList(this)">
                                 删除
                             </button>
@@ -372,7 +364,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="11" class="text-muted py-5">
+                    <td colspan="9" class="text-muted py-5">
                         <i class="bi bi-people fs-1 d-block mb-3"></i>
                         暂无符合条件的顾客数据。
                     </td>
@@ -1203,9 +1195,7 @@
                         <th>昵称</th>
                         <th>微信号</th>
                         <th>所属门店</th>
-                        <th>添加微信激活标签</th>
                         <th>门店私域群聊邀请</th>
-                        <th>微信名片备注修改</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1230,21 +1220,13 @@
                             <input type="hidden" name="contact_store_name" value="{{ item.store_name or '' }}">
                             <input type="hidden" name="contact_nickname" value="{{ item.nickname or '' }}">
                             <input type="hidden" name="contact_is_new" value="{{ 1 if item.is_new else 0 }}">
-                            <input class="form-check-input contact-followup-checkbox" type="checkbox" name="has_tag_{{ row_index }}" value="1"
-                                   data-wechat="{{ item.wechat_id }}" data-field="has_tag" {% if item.has_tag %}checked{% endif %}>
-                        </td>
-                        <td>
                             <input class="form-check-input contact-followup-checkbox" type="checkbox" name="in_group_chat_{{ row_index }}" value="1"
                                    data-wechat="{{ item.wechat_id }}" data-field="in_group_chat" {% if item.in_group_chat %}checked{% endif %}>
-                        </td>
-                        <td>
-                            <input class="form-check-input contact-followup-checkbox" type="checkbox" name="remark_updated_{{ row_index }}" value="1"
-                                   data-wechat="{{ item.wechat_id }}" data-field="remark_updated" {% if item.remark_updated %}checked{% endif %}>
                         </td>
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="8" class="text-muted py-5">
+                        <td colspan="6" class="text-muted py-5">
                             <i class="bi bi-person-lines-fill fs-1 d-block mb-3"></i>
                             当前时间范围暂无接触顾客。
                         </td>
@@ -2317,6 +2299,7 @@
             ['mode', button.dataset.mode || 'temporary'],
             ['search_query', button.dataset.searchQuery || ''],
             ['sort_by', button.dataset.sortBy || 'default'],
+            ['duplicate_nickname', button.dataset.duplicateNickname || ''],
         ].forEach(([name, value]) => {
             const input = document.createElement('input');
             input.type = 'hidden';
@@ -2341,6 +2324,7 @@
             ['store', button.dataset.store || ''],
             ['search_query', button.dataset.searchQuery || ''],
             ['sort_by', button.dataset.sortBy || 'default'],
+            ['duplicate_nickname', button.dataset.duplicateNickname || ''],
         ].forEach(([name, value]) => {
             const input = document.createElement('input');
             input.type = 'hidden';

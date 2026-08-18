@@ -451,15 +451,11 @@
                                 <div class="col-md-4">
                                     <label class="form-label fw-bold">分数大小</label>
                                     <select class="form-select" name="stakes_select" id="stakesSelect" onchange="toggleCustomStakes()">
+                                        <option value="0.5-8">0.5-8</option>
                                         <option value="1-16">1-16</option>
-                                        <option value="1-32">1-32</option>
                                         <option value="2-32">2-32</option>
-                                        <option value="2-64">2-64</option>
                                         <option value="5-40">5-40</option>
                                         <option value="5-80">5-80</option>
-                                        <option value="0.125">0.125</option>
-                                        <option value="0.25">0.25</option>
-                                        <option value="0.5">0.5</option>
                                         <option value="其他">其他</option>
                                     </select>
                                 </div>
@@ -477,6 +473,7 @@
                                         <option value="幺鸡47">幺鸡47</option>
                                         <option value="素鸡">素鸡</option>
                                         <option value="两门">两门</option>
+                                        <option value="素8鸡">素8鸡</option>
                                     </select>
                                 </div>
 
@@ -971,6 +968,46 @@ ${blacklistButton}
         return now.toISOString().slice(0, 16);
     }
 
+    const STAKES_OPTIONS_BY_GAME_TYPE = {
+        '换三': ['0.5-8', '1-16', '2-32', '5-40', '5-80'],
+        '定缺': ['0.5-8', '1-16', '2-32', '5-40', '5-80'],
+        '两门': ['0.5-8', '1-16', '2-32', '5-40', '5-80'],
+        '素鸡': ['0.5-16', '1-32', '2-64'],
+        '幺鸡47': ['0.125', '0.25', '0.5', '1'],
+        '素8鸡': ['0.5-32', '1-64'],
+    };
+
+    function getStakesOptionsForGameType(gameType) {
+        return STAKES_OPTIONS_BY_GAME_TYPE[gameType] || STAKES_OPTIONS_BY_GAME_TYPE['换三'];
+    }
+
+    function rebuildStakesOptions(selectedStakes = '') {
+        const select = document.getElementById('stakesSelect');
+        const gameType = document.getElementById('gameTypeInput').value;
+        const options = getStakesOptionsForGameType(gameType);
+        const normalizedStakes = (selectedStakes || '').trim();
+        const shouldUseCustom = normalizedStakes && !options.includes(normalizedStakes) && normalizedStakes !== '其他';
+
+        select.innerHTML = '';
+        options.concat(['其他']).forEach((value) => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = value;
+            select.appendChild(option);
+        });
+
+        if (shouldUseCustom) {
+            select.value = '其他';
+            document.getElementById('stakesCustomInput').value = normalizedStakes;
+        } else if (normalizedStakes) {
+            select.value = normalizedStakes;
+        } else {
+            select.value = options[0] || '其他';
+        }
+
+        toggleCustomStakes();
+    }
+
     function toggleCustomStakes() {
         const select = document.getElementById('stakesSelect');
         const wrapper = document.getElementById('customStakesWrapper');
@@ -997,7 +1034,7 @@ ${blacklistButton}
         document.getElementById('tableNoteInput').value = '';
         document.getElementById('smokeTypeInput').value = 'smoking';
 
-        toggleCustomStakes();
+        rebuildStakesOptions();
         clearPlayerWarningStyle();
         resetIndicesColor();
         hideAllSuggestBoxes();
@@ -1032,16 +1069,7 @@ ${blacklistButton}
         document.getElementById('paymentMethodInput').value = btn.dataset.payment || '';
         document.getElementById('roomFeeInput').value = btn.dataset.fee || 0;
 
-        const stakeVal = btn.dataset.stakes || '';
-        const defaultOptions = ['1-16', '1-32', '2-32', '2-64', '5-40', '5-80', '0.125', '0.25', '0.5'];
-        if (defaultOptions.includes(stakeVal)) {
-            document.getElementById('stakesSelect').value = stakeVal;
-            document.getElementById('stakesCustomInput').value = '';
-        } else {
-            document.getElementById('stakesSelect').value = '其他';
-            document.getElementById('stakesCustomInput').value = stakeVal;
-        }
-        toggleCustomStakes();
+        rebuildStakesOptions(btn.dataset.stakes || '');
 
         for (let i = 1; i <= 4; i++) {
             document.getElementById(`player_${i}`).value = btn.dataset[`p${i}`] || '';
@@ -1297,6 +1325,15 @@ ${blacklistButton}
     document.addEventListener('DOMContentLoaded', function () {
         [1, 2, 3, 4].forEach(bindCustomerAutocomplete);
         document.getElementById('startTimeInput').value = getNowISOString();
+        rebuildStakesOptions();
+
+        const gameTypeInput = document.getElementById('gameTypeInput');
+        if (gameTypeInput) {
+            gameTypeInput.addEventListener('change', function () {
+                document.getElementById('stakesCustomInput').value = '';
+                rebuildStakesOptions();
+            });
+        }
 
         const addGameModal = document.getElementById('addGameModal');
         if (addGameModal) {

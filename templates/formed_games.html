@@ -462,21 +462,28 @@
                 <div class="border rounded-3 p-3 bg-light h-100">
                     <div class="stat-card-title">已收金额</div>
                     <div class="fs-4 fw-bold text-success">¥{{ collected_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">支付方式为“代客收款”的{% if is_jinniu_wanda_store %}四类收款{% else %}微信收款 + 支付宝收款{% endif %}总和</div>
+                    <div class="small text-muted mt-1">支付方式为“代客收款”的微信收款 + 支付宝收款总和</div>
                 </div>
             </div>
             <div class="col-md-6 col-xl">
                 <div class="border rounded-3 p-3 bg-light h-100">
                     <div class="stat-card-title">未收金额</div>
                     <div class="fs-4 fw-bold text-danger">¥{{ uncollected_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">代客收款总金额 - 已收金额</div>
+                    <div class="small text-muted mt-1">逐单统计未收部分，多收部分不抵扣其他订单</div>
                 </div>
             </div>
             <div class="col-md-6 col-xl">
                 <div class="border rounded-3 p-3 bg-light h-100">
-                    <div class="stat-card-title">{% if is_jinniu_wanda_store %}企业微信支付{% else %}微信支付{% endif %}</div>
+                    <div class="stat-card-title">赚取差额总额</div>
+                    <div class="fs-4 fw-bold text-warning">¥{{ normal_earned_difference_total or 0 }}</div>
+                    <div class="small text-muted mt-1">实收金额超过本单金额的正差额合计</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl">
+                <div class="border rounded-3 p-3 bg-light h-100">
+                    <div class="stat-card-title">微信支付</div>
                     <div class="fs-4 fw-bold text-success">¥{{ wechat_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">支付方式为“代客收款”的{% if is_jinniu_wanda_store %}企业微信{% else %}微信{% endif %}收款总和</div>
+                    <div class="small text-muted mt-1">支付方式为“代客收款”的微信收款总和</div>
                 </div>
             </div>
             <div class="col-md-6 col-xl">
@@ -486,22 +493,6 @@
                     <div class="small text-muted mt-1">支付方式为“代客收款”的支付宝收款总和</div>
                 </div>
             </div>
-            {% if is_jinniu_wanda_store %}
-            <div class="col-md-6 col-xl">
-                <div class="border rounded-3 p-3 bg-light h-100">
-                    <div class="stat-card-title">普通微信收款</div>
-                    <div class="fs-4 fw-bold text-success">¥{{ normal_wechat_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">shuaipai3725</div>
-                </div>
-            </div>
-            <div class="col-md-6 col-xl">
-                <div class="border rounded-3 p-3 bg-light h-100">
-                    <div class="stat-card-title">企业微信红包收款</div>
-                    <div class="fs-4 fw-bold text-success">¥{{ enterprise_wechat_red_packet_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">shuapai888</div>
-                </div>
-            </div>
-            {% endif %}
         </div>
     </div>
 </div>
@@ -545,39 +536,9 @@
                 <div class="border rounded-3 p-3 bg-light h-100">
                     <div class="stat-card-title">实收金额总额</div>
                     <div class="fs-4 fw-bold text-success">¥{{ overflow_received_total or 0 }}</div>
-                    <div class="small text-muted mt-1">{% if is_jinniu_wanda_store %}四类收款实收合计{% else %}微信 + 支付宝实收合计{% endif %}</div>
+                    <div class="small text-muted mt-1">微信 + 支付宝实收合计</div>
                 </div>
             </div>
-            {% if is_jinniu_wanda_store %}
-            <div class="col-md-6 col-xl">
-                <div class="border rounded-3 p-3 bg-light h-100">
-                    <div class="stat-card-title">企业微信支付</div>
-                    <div class="fs-4 fw-bold text-success">¥{{ wechat_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">企业微信收款合计</div>
-                </div>
-            </div>
-            <div class="col-md-6 col-xl">
-                <div class="border rounded-3 p-3 bg-light h-100">
-                    <div class="stat-card-title">支付宝支付</div>
-                    <div class="fs-4 fw-bold text-primary">¥{{ alipay_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">支付宝收款合计</div>
-                </div>
-            </div>
-            <div class="col-md-6 col-xl">
-                <div class="border rounded-3 p-3 bg-light h-100">
-                    <div class="stat-card-title">普通微信收款</div>
-                    <div class="fs-4 fw-bold text-success">¥{{ normal_wechat_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">shuaipai3725</div>
-                </div>
-            </div>
-            <div class="col-md-6 col-xl">
-                <div class="border rounded-3 p-3 bg-light h-100">
-                    <div class="stat-card-title">企业微信红包收款</div>
-                    <div class="fs-4 fw-bold text-success">¥{{ enterprise_wechat_red_packet_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">shuapai888</div>
-                </div>
-            </div>
-            {% endif %}
             <div class="col-md-6 col-xl">
                 <div class="border rounded-3 p-3 bg-light h-100">
                     <div class="stat-card-title">赚取差额总额</div>
@@ -629,39 +590,9 @@
                 <div class="border rounded-3 p-3 bg-light h-100">
                     <div class="stat-card-title">已收金额</div>
                     <div class="fs-4 fw-bold text-success">¥{{ '%.2f'|format(self_arrival_received_amount or 0) }}</div>
-                    <div class="small text-muted mt-1">代客收款登记单的{% if is_jinniu_wanda_store %}四类收款{% else %}微信 + 支付宝{% endif %}实收合计</div>
+                    <div class="small text-muted mt-1">代客收款登记单的微信 + 支付宝实收合计</div>
                 </div>
             </div>
-            {% if is_jinniu_wanda_store %}
-            <div class="col-md-6 col-xl">
-                <div class="border rounded-3 p-3 bg-light h-100">
-                    <div class="stat-card-title">企业微信支付</div>
-                    <div class="fs-4 fw-bold text-success">¥{{ wechat_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">代客收款登记单企业微信收款合计</div>
-                </div>
-            </div>
-            <div class="col-md-6 col-xl">
-                <div class="border rounded-3 p-3 bg-light h-100">
-                    <div class="stat-card-title">支付宝支付</div>
-                    <div class="fs-4 fw-bold text-primary">¥{{ alipay_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">代客收款登记单支付宝收款合计</div>
-                </div>
-            </div>
-            <div class="col-md-6 col-xl">
-                <div class="border rounded-3 p-3 bg-light h-100">
-                    <div class="stat-card-title">普通微信收款</div>
-                    <div class="fs-4 fw-bold text-success">¥{{ normal_wechat_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">shuaipai3725</div>
-                </div>
-            </div>
-            <div class="col-md-6 col-xl">
-                <div class="border rounded-3 p-3 bg-light h-100">
-                    <div class="stat-card-title">企业微信红包收款</div>
-                    <div class="fs-4 fw-bold text-success">¥{{ enterprise_wechat_red_packet_collection_amount or 0 }}</div>
-                    <div class="small text-muted mt-1">shuapai888</div>
-                </div>
-            </div>
-            {% endif %}
             <div class="col-md-6 col-xl">
                 <div class="border rounded-3 p-3 bg-light h-100">
                     <div class="stat-card-title">未收金额</div>
@@ -705,7 +636,7 @@
             <tbody>
                 {% for game in game_list %}
                 {% set pb = payment_breakdowns.get(game.id, {}) %}
-                {% set actual_received = (pb.get('enterprise_wechat', 0) or 0) + (pb.get('alipay', 0) or 0) + (pb.get('normal_wechat_shuapai9725', 0) or 0) + (pb.get('enterprise_wechat_red_packet_shuapai888', 0) or 0) %}
+                {% set actual_received = (pb.get('enterprise_wechat', 0) or 0) + (pb.get('alipay', 0) or 0) %}
                 {% set profit_amount = actual_received - (game.room_fee or 0) %}
                 <tr id="game-row-{{ game.id }}" class="overflow-row {% if focus_game_id and focus_game_id == game.id %}focus-highlight-row{% endif %}">
                     <td class="fw-bold text-secondary">
@@ -773,12 +704,7 @@
                     <td>
                         <div class="fw-bold text-success">¥{{ actual_received|round(2) }}</div>
                         <div class="small text-muted">
-                            {% if is_jinniu_wanda_store %}
-                                企业微信 {{ pb.get('enterprise_wechat', 0) or 0 }} / 支付宝 {{ pb.get('alipay', 0) or 0 }}<br>
-                                普通微信 {{ pb.get('normal_wechat_shuapai9725', 0) or 0 }} / 企业微信红包 {{ pb.get('enterprise_wechat_red_packet_shuapai888', 0) or 0 }}
-                            {% else %}
-                                微信 {{ pb.get('enterprise_wechat', 0) or 0 }} / 支付宝 {{ pb.get('alipay', 0) or 0 }}
-                            {% endif %}
+                            微信 {{ pb.get('enterprise_wechat', 0) or 0 }} / 支付宝 {{ pb.get('alipay', 0) or 0 }}
                         </div>
                     </td>
                     <td>
@@ -815,8 +741,6 @@
                                     data-fee="{{ game.room_fee }}"
                                     data-wechat="{{ pb.get('enterprise_wechat', 0) or 0 }}"
                                     data-alipay="{{ pb.get('alipay', 0) or 0 }}"
-                                    data-normal-wechat="{{ pb.get('normal_wechat_shuapai9725', 0) or 0 }}"
-                                    data-enterprise-wechat-red-packet="{{ pb.get('enterprise_wechat_red_packet_shuapai888', 0) or 0 }}"
                                     data-payall="{{ 'true' if game.is_payAll else 'false' }}">
                                 <i class="bi bi-calculator"></i> 结算
                             </button>
@@ -897,7 +821,7 @@
             <tbody>
                 {% for game in game_list %}
                 {% set pb = payment_breakdowns.get(game.id, {}) %}
-                {% set actual_received = (pb.get('enterprise_wechat', 0) or 0) + (pb.get('alipay', 0) or 0) + (pb.get('normal_wechat_shuapai9725', 0) or 0) + (pb.get('enterprise_wechat_red_packet_shuapai888', 0) or 0) %}
+                {% set actual_received = (pb.get('enterprise_wechat', 0) or 0) + (pb.get('alipay', 0) or 0) %}
                 {% set remaining = (game.room_fee or 0) - actual_received %}
                 <tr id="game-row-{{ game.id }}" class="self-arrival-row {% if focus_game_id and focus_game_id == game.id %}focus-highlight-row{% endif %}">
                     <td class="fw-bold text-secondary">
@@ -961,12 +885,8 @@
                     <td>
                         {% if game.payment_method == '代客收款' %}
                         <div class="small text-start" style="width: 140px; margin: auto;">
-                            <div><i class="bi bi-wechat text-success me-1"></i>{% if is_jinniu_wanda_store %}企业微信{% else %}微信{% endif %}: {{ pb.get('enterprise_wechat', 0) or 0 }}</div>
+                            <div><i class="bi bi-wechat text-success me-1"></i>微信: {{ pb.get('enterprise_wechat', 0) or 0 }}</div>
                             <div><i class="bi bi-alipay text-primary me-1"></i>支付宝: {{ pb.get('alipay', 0) or 0 }}</div>
-                            {% if is_jinniu_wanda_store %}
-                            <div><i class="bi bi-wechat text-success me-1"></i>普通微信: {{ pb.get('normal_wechat_shuapai9725', 0) or 0 }}</div>
-                            <div><i class="bi bi-gift text-success me-1"></i>企业微信红包: {{ pb.get('enterprise_wechat_red_packet_shuapai888', 0) or 0 }}</div>
-                            {% endif %}
                             <div class="border-top mt-1 pt-1 fw-bold {{ 'text-danger' if remaining > 0 else 'text-success' }}">
                                 还需: ¥{{ remaining }}
                             </div>
@@ -1005,8 +925,6 @@
                                     data-fee="{{ game.room_fee }}"
                                     data-wechat="{{ pb.get('enterprise_wechat', 0) or 0 }}"
                                     data-alipay="{{ pb.get('alipay', 0) or 0 }}"
-                                    data-normal-wechat="{{ pb.get('normal_wechat_shuapai9725', 0) or 0 }}"
-                                    data-enterprise-wechat-red-packet="{{ pb.get('enterprise_wechat_red_packet_shuapai888', 0) or 0 }}"
                                     data-payall="{{ 'true' if game.is_payAll else 'false' }}">
                                 <i class="bi bi-calculator"></i> 结算
                             </button>
@@ -1080,6 +998,7 @@
                     <th>费用详情</th>
                     <th>支付状态</th>
                     <th>收款详情</th>
+                    <th>赚取差额</th>
                     <th>接待店长</th>
                     <th>整桌备注</th>
                     <th>操作</th>
@@ -1088,7 +1007,8 @@
             <tbody>
                 {% for game in game_list %}
                 {% set pb = payment_breakdowns.get(game.id, {}) %}
-                {% set actual_received = (pb.get('enterprise_wechat', 0) or 0) + (pb.get('alipay', 0) or 0) + (pb.get('normal_wechat_shuapai9725', 0) or 0) + (pb.get('enterprise_wechat_red_packet_shuapai888', 0) or 0) %}
+                {% set actual_received = (pb.get('enterprise_wechat', 0) or 0) + (pb.get('alipay', 0) or 0) %}
+                {% set earned_difference = actual_received - (game.room_fee or 0) %}
                 <tr id="game-row-{{ game.id }}" class="{% if focus_game_id and focus_game_id == game.id %}focus-highlight-row{% endif %}">
                     <td class="fw-bold text-secondary">#{{ game.serial_number }}</td>
                     <td>
@@ -1161,17 +1081,24 @@
                     </td>
                     <td>
                         <div class="small text-start" style="width: 140px; margin: auto;">
-                            <div><i class="bi bi-wechat text-success me-1"></i>{% if is_jinniu_wanda_store %}企业微信{% else %}微信{% endif %}: {{ pb.get('enterprise_wechat', 0) or 0 }}</div>
+                            <div><i class="bi bi-wechat text-success me-1"></i>微信: {{ pb.get('enterprise_wechat', 0) or 0 }}</div>
                             <div><i class="bi bi-alipay text-primary me-1"></i>支付宝: {{ pb.get('alipay', 0) or 0 }}</div>
-                            {% if is_jinniu_wanda_store %}
-                            <div><i class="bi bi-wechat text-success me-1"></i>普通微信: {{ pb.get('normal_wechat_shuapai9725', 0) or 0 }}</div>
-                            <div><i class="bi bi-gift text-success me-1"></i>企业微信红包: {{ pb.get('enterprise_wechat_red_packet_shuapai888', 0) or 0 }}</div>
-                            {% endif %}
                             {% set remaining = (game.room_fee or 0) - actual_received %}
                             <div class="border-top mt-1 pt-1 fw-bold {{ 'text-danger' if remaining > 0 else 'text-success' }}">
-                                还需: ¥{{ remaining }}
+                                {% if remaining > 0 %}
+                                    还需: ¥{{ remaining|round(2) }}
+                                {% else %}
+                                    还需: ¥0
+                                {% endif %}
                             </div>
                         </div>
+                    </td>
+                    <td>
+                        {% if earned_difference > 0 %}
+                            <div class="fw-bold text-warning">¥{{ earned_difference|round(2) }}</div>
+                        {% else %}
+                            <span class="text-muted">¥0</span>
+                        {% endif %}
                     </td>
                     <td>
                         <span class="badge bg-info text-dark">
@@ -1197,8 +1124,6 @@
                                     data-fee="{{ game.room_fee }}"
                                     data-wechat="{{ pb.get('enterprise_wechat', 0) or 0 }}"
                                     data-alipay="{{ pb.get('alipay', 0) or 0 }}"
-                                    data-normal-wechat="{{ pb.get('normal_wechat_shuapai9725', 0) or 0 }}"
-                                    data-enterprise-wechat-red-packet="{{ pb.get('enterprise_wechat_red_packet_shuapai888', 0) or 0 }}"
                                     data-payall="{{ 'true' if game.is_payAll else 'false' }}">
                                 <i class="bi bi-calculator"></i> 结算
                             </button>
@@ -1246,7 +1171,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="12" class="text-muted py-5">
+                    <td colspan="13" class="text-muted py-5">
                         <i class="bi bi-check2-circle fs-1 d-block mb-3"></i>
                         当前门店暂无常规已组齐订单。
                     </td>
@@ -2194,25 +2119,13 @@
 
                     <div class="row g-3 mb-3">
                         <div class="col-6">
-                            <label class="form-label"><i class="bi bi-wechat text-success me-1"></i>{% if is_jinniu_wanda_store %}企业微信收款{% else %}微信收款{% endif %}</label>
+                            <label class="form-label"><i class="bi bi-wechat text-success me-1"></i>微信收款</label>
                             <input type="number" step="0.1" name="wechat_pay" id="inputWechat" class="form-control" placeholder="0">
                         </div>
                         <div class="col-6">
                             <label class="form-label"><i class="bi bi-alipay text-primary me-1"></i>支付宝收款</label>
                             <input type="number" step="0.1" name="Alipay" id="inputAlipay" class="form-control" placeholder="0">
                         </div>
-                        {% if is_jinniu_wanda_store %}
-                        <div class="col-6">
-                            <label class="form-label"><i class="bi bi-wechat text-success me-1"></i>普通微信收款</label>
-                            <input type="number" step="0.1" name="normal_wechat_pay" id="inputNormalWechat" class="form-control" placeholder="0">
-                            <div class="form-text">shuaipai3725</div>
-                        </div>
-                        <div class="col-6">
-                            <label class="form-label"><i class="bi bi-gift text-success me-1"></i>企业微信红包收款</label>
-                            <input type="number" step="0.1" name="enterprise_wechat_red_packet_pay" id="inputEnterpriseWechatRedPacket" class="form-control" placeholder="0">
-                            <div class="form-text">shuapai888</div>
-                        </div>
-                        {% endif %}
                     </div>
 
                     <div class="card bg-light border-0">
@@ -2919,17 +2832,15 @@
         const focusGameId = document.getElementById('payment_focus_game_id')?.value || '';
         const wechat = parseFloat(document.getElementById('inputWechat')?.value || 0) || 0;
         const alipay = parseFloat(document.getElementById('inputAlipay')?.value || 0) || 0;
-        const normalWechat = parseFloat(document.getElementById('inputNormalWechat')?.value || 0) || 0;
-        const enterpriseWechatRedPacket = parseFloat(document.getElementById('inputEnterpriseWechatRedPacket')?.value || 0) || 0;
-        const received = Math.round((wechat + alipay + normalWechat + enterpriseWechatRedPacket) * 100) / 100;
+        const received = Math.round((wechat + alipay) * 100) / 100;
         const fee = Math.round(currentRoomFee * 100) / 100;
 
-        if (wechat < 0 || alipay < 0 || normalWechat < 0 || enterpriseWechatRedPacket < 0) {
+        if (wechat < 0 || alipay < 0) {
             alert('收款金额不能小于 0');
             return false;
         }
 
-        if (received > fee && CURRENT_SOURCE_FILTER !== 'overflow') {
+        if (received > fee && !['normal', 'overflow'].includes(CURRENT_SOURCE_FILTER)) {
             alert(`收款金额不能大于费用，当前多收 ¥${(received - fee).toFixed(2)}`);
             return false;
         }
@@ -3290,17 +3201,11 @@
         currentRoomFee = parseFloat(btn.dataset.fee) || 0;
         const wechat = btn.dataset.wechat;
         const alipay = btn.dataset.alipay;
-        const normalWechat = btn.dataset.normalWechat || 0;
-        const enterpriseWechatRedPacket = btn.dataset.enterpriseWechatRedPacket || 0;
 
         document.getElementById('paymentForm').action = "/update-payment/" + gameId;
         document.getElementById('displayRoomFee').innerText = '¥' + currentRoomFee;
         document.getElementById('inputWechat').value = wechat;
         document.getElementById('inputAlipay').value = alipay;
-        const normalWechatInput = document.getElementById('inputNormalWechat');
-        const enterpriseWechatRedPacketInput = document.getElementById('inputEnterpriseWechatRedPacket');
-        if (normalWechatInput) normalWechatInput.value = normalWechat;
-        if (enterpriseWechatRedPacketInput) enterpriseWechatRedPacketInput.value = enterpriseWechatRedPacket;
 
         const hiddenInput = document.getElementById('payment_focus_game_id');
         if (hiddenInput) {
@@ -3313,18 +3218,17 @@
     function calculateRemaining() {
         const wechat = parseFloat(document.getElementById('inputWechat').value) || 0;
         const alipay = parseFloat(document.getElementById('inputAlipay').value) || 0;
-        const normalWechat = parseFloat(document.getElementById('inputNormalWechat')?.value || 0) || 0;
-        const enterpriseWechatRedPacket = parseFloat(document.getElementById('inputEnterpriseWechatRedPacket')?.value || 0) || 0;
 
-        const remaining = currentRoomFee - wechat - alipay - normalWechat - enterpriseWechatRedPacket;
+        const remaining = currentRoomFee - wechat - alipay;
         const displayEl = document.getElementById('displayRemaining');
         const labelEl = document.getElementById('displayRemainingLabel');
 
         displayEl.classList.remove('text-danger', 'text-success');
+        const shouldShowEarnedDifference = ['normal', 'overflow'].includes(CURRENT_SOURCE_FILTER);
         if (remaining < 0) {
-            if (labelEl) labelEl.innerText = CURRENT_SOURCE_FILTER === 'overflow' ? '赚取差额：' : '多收金额：';
+            if (labelEl) labelEl.innerText = shouldShowEarnedDifference ? '赚取差额：' : '多收金额：';
             displayEl.innerText = '¥' + Math.abs(remaining).toFixed(1);
-            displayEl.classList.add(CURRENT_SOURCE_FILTER === 'overflow' ? 'text-success' : 'text-danger');
+            displayEl.classList.add(shouldShowEarnedDifference ? 'text-success' : 'text-danger');
         } else if (Math.round(remaining * 100) === 0) {
             if (labelEl) labelEl.innerText = '已收齐：';
             displayEl.innerText = '¥0.0';
@@ -3434,13 +3338,13 @@
                 ? Number(data.actual_received)
                 : (
                     Number(data.wechat_pay || 0) +
-                    Number(data.Alipay || 0) +
-                    Number(data.normal_wechat_pay || 0) +
-                    Number(data.enterprise_wechat_red_packet_pay || 0)
+                    Number(data.Alipay || 0)
                 );
             const profitAmount = (data.profit_amount !== undefined && data.profit_amount !== null)
                 ? Number(data.profit_amount)
                 : (actualReceived - Number(data.room_fee || 0));
+            const outstandingAmount = Math.max(Number(data.remaining || 0), 0);
+            const shouldShowEarnedDifference = ['normal', 'overflow'].includes(data.record_source || 'normal');
 
             const playersHtml = (data.players || []).length > 0
                 ? data.players.map(p => `
@@ -3615,35 +3519,25 @@
                                     <div class="detail-value">${data.is_payAll ? '已收齐' : '未收齐'}</div>
                                 </div>
                                 <div class="col-md-4">
-                                    <div class="detail-label">${data.store_name === '金牛万达店' ? '企业微信收款' : '微信收款'}</div>
+                                    <div class="detail-label">微信收款</div>
                                     <div class="detail-value">${data.wechat_pay || 0}</div>
                                 </div>
                                 <div class="col-md-4">
                                     <div class="detail-label">支付宝收款</div>
                                     <div class="detail-value">${data.Alipay || 0}</div>
                                 </div>
-                                ${data.store_name === '金牛万达店' ? `
-                                <div class="col-md-4">
-                                    <div class="detail-label">普通微信收款（shuaipai3725）</div>
-                                    <div class="detail-value">${data.normal_wechat_pay || 0}</div>
-                                </div>
-                                <div class="col-md-4">
-                                    <div class="detail-label">企业微信红包收款（shuapai888）</div>
-                                    <div class="detail-value">${data.enterprise_wechat_red_packet_pay || 0}</div>
-                                </div>
-                                ` : ''}
                                 <div class="col-md-4">
                                     <div class="detail-label">实收金额</div>
                                     <div class="detail-value">¥${actualReceived.toFixed(2)}</div>
                                 </div>
                                 <div class="col-md-4">
                                     <div class="detail-label">还需收取</div>
-                                    <div class="detail-value">¥${Number(data.remaining || 0).toFixed(2)}</div>
+                                    <div class="detail-value">¥${outstandingAmount.toFixed(2)}</div>
                                 </div>
-                                ${data.record_source === 'overflow' ? `
+                                ${shouldShowEarnedDifference ? `
                                 <div class="col-md-4">
                                     <div class="detail-label">赚取差额</div>
-                                    <div class="detail-value">¥${profitAmount.toFixed(2)}</div>
+                                    <div class="detail-value">¥${Math.max(profitAmount, 0).toFixed(2)}</div>
                                 </div>` : ''}
                             </div>
                         </div>
@@ -3715,13 +3609,9 @@
 
         const wechatInput = document.getElementById('inputWechat');
         const alipayInput = document.getElementById('inputAlipay');
-        const normalWechatInput = document.getElementById('inputNormalWechat');
-        const enterpriseWechatRedPacketInput = document.getElementById('inputEnterpriseWechatRedPacket');
 
         if (wechatInput) wechatInput.addEventListener('input', calculateRemaining);
         if (alipayInput) alipayInput.addEventListener('input', calculateRemaining);
-        if (normalWechatInput) normalWechatInput.addEventListener('input', calculateRemaining);
-        if (enterpriseWechatRedPacketInput) enterpriseWechatRedPacketInput.addEventListener('input', calculateRemaining);
 
         const paymentModal = document.getElementById('paymentModal');
         if (paymentModal) {
