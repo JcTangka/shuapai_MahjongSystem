@@ -1,5 +1,5 @@
 from sqlmodel import func,SQLModel, Field, create_engine, Session, select
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from typing import Optional,Dict, List, Tuple, Any
 import calendar
 from sqlalchemy import UniqueConstraint,text
@@ -356,6 +356,7 @@ class ContactCustomerFollowup(SQLModel, table=True):
     has_tag: bool = Field(default=False, index=True)
     in_group_chat: bool = Field(default=False, index=True)
     remark_updated: bool = Field(default=False, index=True)
+    remark: Optional[str] = Field(default=None)
     updated_at: datetime = Field(default_factory=datetime.now, index=True)
     updated_by: Optional[str] = Field(default=None, index=True)
 
@@ -561,10 +562,81 @@ class CustomerRecommendationTimeBucketStat(SQLModel, table=True):
     store_name: str = Field(index=True)
     play_label: str = Field(index=True)
     smoke_type: str = Field(default="smoking", index=True)
-    time_bucket: int = Field(index=True)  # 0..11，每 2 小时一个轴
+    time_bucket: int = Field(index=True)  # 0..4，对应智能推荐的 5 个时间轴
     play_count: int = Field(default=0, index=True)
     last_played_at: datetime = Field(index=True)
     updated_at: datetime = Field(default_factory=datetime.now, index=True)
+
+
+class RecommendationHolidayDate(SQLModel, table=True):
+    """智能推荐日期偏好使用的法定节假日日期表，不处理调休。"""
+    __tablename__ = "recommendationholidaydate"
+    __table_args__ = (
+        UniqueConstraint("holiday_date", name="uq_recommendation_holiday_date"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    holiday_date: date = Field(index=True)
+    name: Optional[str] = Field(default=None)
+    is_active: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+
+
+class RecommendationDailySnapshot(SQLModel, table=True):
+    """智能推荐日粒度偏好快照，可按最近 14 天滚动重算。"""
+    __tablename__ = "recommendationdailysnapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "stat_date",
+            "wechat_id",
+            "store_name",
+            "play_label",
+            "smoke_type",
+            "date_type",
+            "time_bucket",
+            name="uq_recommendation_daily_snapshot",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    stat_date: date = Field(index=True)
+    wechat_id: str = Field(index=True)
+    store_name: str = Field(index=True)
+    play_label: str = Field(index=True)
+    smoke_type: str = Field(default="smoking", index=True)
+    date_type: str = Field(index=True)
+    time_bucket: int = Field(index=True)
+    play_count: int = Field(default=0, index=True)
+    last_played_at: datetime = Field(index=True)
+    snapshot_at: datetime = Field(default_factory=datetime.now, index=True)
+
+
+class RecommendationPreferenceSnapshot(SQLModel, table=True):
+    """智能推荐查询用汇总偏好快照。"""
+    __tablename__ = "recommendationpreferencesnapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "wechat_id",
+            "store_name",
+            "play_label",
+            "smoke_type",
+            "date_type",
+            "time_bucket",
+            name="uq_recommendation_preference_snapshot",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    wechat_id: str = Field(index=True)
+    store_name: str = Field(index=True)
+    play_label: str = Field(index=True)
+    smoke_type: str = Field(default="smoking", index=True)
+    date_type: str = Field(index=True)
+    time_bucket: int = Field(index=True)
+    play_count: int = Field(default=0, index=True)
+    last_played_at: datetime = Field(index=True)
+    snapshot_at: datetime = Field(default_factory=datetime.now, index=True)
 
 # === 人情维护表 ===
 class MaintenanceRecord(SQLModel, table=True):
@@ -771,6 +843,7 @@ class PublicTrafficLead(SQLModel, table=True):
 
     source_port: str = Field(index=True)
     wechat_id: str = Field(index=True)
+    intended_store_names_json: Optional[str] = Field(default=None)
 
     created_at: datetime = Field(default_factory=datetime.now, index=True)
     created_by: Optional[str] = Field(default=None, index=True)
@@ -1674,11 +1747,16 @@ def migrate_public_traffic_lead_table():
                 id INTEGER PRIMARY KEY,
                 source_port TEXT NOT NULL,
                 wechat_id TEXT NOT NULL,
+                intended_store_names_json TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 created_by TEXT,
                 CONSTRAINT uq_publictrafficlead_source_wechat UNIQUE (source_port, wechat_id)
             )
         """))
+        columns = conn.execute(text("PRAGMA table_info(publictrafficlead)")).fetchall()
+        column_names = {col[1] for col in columns}
+        if "intended_store_names_json" not in column_names:
+            conn.execute(text("ALTER TABLE publictrafficlead ADD COLUMN intended_store_names_json TEXT"))
         conn.execute(text("""
             CREATE UNIQUE INDEX IF NOT EXISTS ix_publictrafficlead_source_wechat
             ON publictrafficlead (source_port, wechat_id)
@@ -1708,11 +1786,16 @@ def migrate_contact_customer_followup_table():
                 has_tag BOOLEAN NOT NULL DEFAULT 0,
                 in_group_chat BOOLEAN NOT NULL DEFAULT 0,
                 remark_updated BOOLEAN NOT NULL DEFAULT 0,
+                remark TEXT,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_by TEXT,
                 CONSTRAINT uq_contactcustomerfollowup_wechat_id UNIQUE (wechat_id)
             )
         """))
+        columns = conn.execute(text("PRAGMA table_info(contactcustomerfollowup)")).fetchall()
+        column_names = {col[1] for col in columns}
+        if "remark" not in column_names:
+            conn.execute(text("ALTER TABLE contactcustomerfollowup ADD COLUMN remark TEXT"))
         conn.execute(text("""
             CREATE UNIQUE INDEX IF NOT EXISTS ix_contactcustomerfollowup_wechat_id
             ON contactcustomerfollowup (wechat_id)
@@ -1871,6 +1954,251 @@ def _migration_game_player_wechats(game: GameRecord) -> List[str]:
         result.append(clean)
     return result
 
+MIGRATION_RECOMMENDATION_TIME_BUCKETS = (
+    (0, 9),
+    (9, 13),
+    (13, 17),
+    (17, 20),
+    (20, 24),
+)
+RECOMMENDATION_DATE_TYPE_WORKDAY = "workday"
+RECOMMENDATION_DATE_TYPE_WEEKEND = "weekend"
+RECOMMENDATION_DATE_TYPE_HOLIDAY = "holiday"
+RECOMMENDATION_SNAPSHOT_WINDOW_DAYS = 14
+
+def _migration_recommendation_time_bucket(played_at: datetime) -> int:
+    hour = int((played_at or datetime.min).hour)
+    for idx, (start_hour, end_hour) in enumerate(MIGRATION_RECOMMENDATION_TIME_BUCKETS):
+        if start_hour <= hour < end_hour:
+            return idx
+    return 0
+
+def _migration_recommendation_date_type(played_date: date, holiday_dates: set[date]) -> str:
+    if played_date in holiday_dates:
+        return RECOMMENDATION_DATE_TYPE_HOLIDAY
+    if played_date.weekday() >= 5:
+        return RECOMMENDATION_DATE_TYPE_WEEKEND
+    return RECOMMENDATION_DATE_TYPE_WORKDAY
+
+def _rebuild_recommendation_time_bucket_stats(session: Session) -> int:
+    smoke_rows = session.exec(select(GameSmokeSetting)).all()
+    smoke_by_game_id = {
+        row.game_id: row.smoke_type
+        for row in smoke_rows
+        if row.game_id is not None and row.smoke_type in {"smoking", "non_smoking"}
+    }
+
+    stats: Dict[Tuple[str, str, str, str, int], Dict[str, Any]] = {}
+    games = session.exec(
+        select(GameRecord).where(
+            GameRecord.status == "formed",
+            GameRecord.record_source != "self_arrival"
+        )
+    ).all()
+
+    for game in games:
+        play_label = _migration_game_play_label(game)
+        store_name = _normalize_migration_text(game.store_name)
+        if not play_label or not store_name:
+            continue
+
+        played_at = _migration_game_played_at(game)
+        time_bucket = _migration_recommendation_time_bucket(played_at)
+        smoke_type = smoke_by_game_id.get(game.id or 0, "smoking")
+        if smoke_type not in {"smoking", "non_smoking"}:
+            smoke_type = "smoking"
+
+        for wechat_id in _migration_game_player_wechats(game):
+            key = (wechat_id, store_name, play_label, smoke_type, time_bucket)
+            item = stats.setdefault(key, {"count": 0, "last_played_at": played_at})
+            item["count"] += 1
+            if played_at > item["last_played_at"]:
+                item["last_played_at"] = played_at
+
+    for row in session.exec(select(CustomerRecommendationTimeBucketStat)).all():
+        session.delete(row)
+    session.flush()
+
+    now = datetime.now()
+    for (wechat_id, store_name, play_label, smoke_type, time_bucket), item in stats.items():
+        session.add(CustomerRecommendationTimeBucketStat(
+            wechat_id=wechat_id,
+            store_name=store_name,
+            play_label=play_label,
+            smoke_type=smoke_type,
+            time_bucket=time_bucket,
+            play_count=item["count"],
+            last_played_at=item["last_played_at"],
+            updated_at=now,
+        ))
+
+    return len(stats)
+
+def _load_active_recommendation_holiday_dates(session: Session) -> set[date]:
+    return {
+        row.holiday_date
+        for row in session.exec(
+            select(RecommendationHolidayDate).where(RecommendationHolidayDate.is_active == True)
+        ).all()
+        if row.holiday_date
+    }
+
+def _build_recommendation_daily_snapshot_rows(
+        session: Session,
+        start_date: Optional[date] = None,
+) -> Tuple[List[RecommendationDailySnapshot], int]:
+    smoke_rows = session.exec(select(GameSmokeSetting)).all()
+    smoke_by_game_id = {
+        row.game_id: row.smoke_type
+        for row in smoke_rows
+        if row.game_id is not None and row.smoke_type in {"smoking", "non_smoking"}
+    }
+    holiday_dates = _load_active_recommendation_holiday_dates(session)
+
+    stmt = select(GameRecord).where(
+        GameRecord.status == "formed",
+        GameRecord.record_source != "self_arrival",
+    )
+    if start_date:
+        stmt = stmt.where(GameRecord.record_date >= start_date)
+
+    stats: Dict[Tuple[date, str, str, str, str, str, int], Dict[str, Any]] = {}
+    scanned_game_count = 0
+    for game in session.exec(stmt).all():
+        play_label = _migration_game_play_label(game)
+        store_name = _normalize_migration_text(game.store_name)
+        if not play_label or not store_name:
+            continue
+
+        played_at = _migration_game_played_at(game)
+        stat_date = played_at.date()
+        if start_date and stat_date < start_date:
+            continue
+
+        time_bucket = _migration_recommendation_time_bucket(played_at)
+        date_type = _migration_recommendation_date_type(stat_date, holiday_dates)
+        smoke_type = smoke_by_game_id.get(game.id or 0, "smoking")
+        if smoke_type not in {"smoking", "non_smoking"}:
+            smoke_type = "smoking"
+
+        scanned_game_count += 1
+        for wechat_id in _migration_game_player_wechats(game):
+            key = (stat_date, wechat_id, store_name, play_label, smoke_type, date_type, time_bucket)
+            item = stats.setdefault(key, {"count": 0, "last_played_at": played_at})
+            item["count"] += 1
+            if played_at > item["last_played_at"]:
+                item["last_played_at"] = played_at
+
+    snapshot_at = datetime.now()
+    rows = [
+        RecommendationDailySnapshot(
+            stat_date=stat_date,
+            wechat_id=wechat_id,
+            store_name=store_name,
+            play_label=play_label,
+            smoke_type=smoke_type,
+            date_type=date_type,
+            time_bucket=time_bucket,
+            play_count=item["count"],
+            last_played_at=item["last_played_at"],
+            snapshot_at=snapshot_at,
+        )
+        for (stat_date, wechat_id, store_name, play_label, smoke_type, date_type, time_bucket), item in stats.items()
+    ]
+    return rows, scanned_game_count
+
+def _rebuild_recommendation_preference_snapshot(session: Session) -> int:
+    for row in session.exec(select(RecommendationPreferenceSnapshot)).all():
+        session.delete(row)
+    session.flush()
+
+    stats: Dict[Tuple[str, str, str, str, str, int], Dict[str, Any]] = {}
+    for row in session.exec(select(RecommendationDailySnapshot)).all():
+        key = (
+            row.wechat_id,
+            row.store_name,
+            row.play_label,
+            row.smoke_type,
+            row.date_type,
+            int(row.time_bucket or 0),
+        )
+        item = stats.setdefault(key, {"count": 0, "last_played_at": row.last_played_at})
+        item["count"] += int(row.play_count or 0)
+        if row.last_played_at and row.last_played_at > item["last_played_at"]:
+            item["last_played_at"] = row.last_played_at
+
+    snapshot_at = datetime.now()
+    for (wechat_id, store_name, play_label, smoke_type, date_type, time_bucket), item in stats.items():
+        session.add(RecommendationPreferenceSnapshot(
+            wechat_id=wechat_id,
+            store_name=store_name,
+            play_label=play_label,
+            smoke_type=smoke_type,
+            date_type=date_type,
+            time_bucket=time_bucket,
+            play_count=item["count"],
+            last_played_at=item["last_played_at"],
+            snapshot_at=snapshot_at,
+        ))
+
+    return len(stats)
+
+def rebuild_recommendation_snapshots(
+        session: Session,
+        *,
+        start_date: Optional[date] = None,
+        full_rebuild: bool = False,
+) -> Dict[str, Any]:
+    if full_rebuild:
+        start_date = None
+
+    if start_date:
+        for row in session.exec(
+            select(RecommendationDailySnapshot).where(
+                RecommendationDailySnapshot.stat_date >= start_date
+            )
+        ).all():
+            session.delete(row)
+    else:
+        for row in session.exec(select(RecommendationDailySnapshot)).all():
+            session.delete(row)
+    session.flush()
+
+    daily_rows, scanned_game_count = _build_recommendation_daily_snapshot_rows(
+        session,
+        start_date=start_date,
+    )
+    for row in daily_rows:
+        session.add(row)
+    session.flush()
+
+    preference_count = _rebuild_recommendation_preference_snapshot(session)
+    snapshot_at = datetime.now()
+    return {
+        "start_date": start_date,
+        "full_rebuild": full_rebuild,
+        "scanned_game_count": scanned_game_count,
+        "daily_snapshot_count": len(daily_rows),
+        "preference_snapshot_count": preference_count,
+        "snapshot_at": snapshot_at,
+    }
+
+def refresh_recommendation_snapshots(
+        session: Session,
+        *,
+        window_days: int = RECOMMENDATION_SNAPSHOT_WINDOW_DAYS,
+        force_full: bool = False,
+) -> Dict[str, Any]:
+    daily_count = session.exec(select(func.count(RecommendationDailySnapshot.id))).first() or 0
+    preference_count = session.exec(select(func.count(RecommendationPreferenceSnapshot.id))).first() or 0
+    full_rebuild = force_full or daily_count <= 0 or preference_count <= 0
+    start_date = None if full_rebuild else date.today() - timedelta(days=max(1, int(window_days or 1)) - 1)
+    return rebuild_recommendation_snapshots(
+        session,
+        start_date=start_date,
+        full_rebuild=full_rebuild,
+    )
+
 def migrate_customer_play_type_stat_table():
     """
     创建并首次回填顾客常玩玩法统计表。
@@ -1955,9 +2283,24 @@ def migrate_recommendation_prerequisite_tables():
     智能推荐前置表：
     1. gamesmokesetting：牌局烟局设置，不改 GameRecord 大表；
     2. customerrecommendationblock：组局散客推荐屏蔽；
-    3. customerrecommendationtimebucketstat：玩法/烟局/2 小时时间轴统计。
+    3. customerrecommendationtimebucketstat：玩法/烟局/5 段时间轴统计。
+    4. recommendationdailysnapshot / recommendationpreferencesnapshot：智能推荐评分快照。
     """
+    time_bucket_version_key = "recommendation_time_bucket_version"
+    time_bucket_version = "5_bucket_v1"
+    snapshot_version_key = "recommendation_snapshot_version"
+    snapshot_version = "preference_snapshot_v1"
+    needs_time_bucket_rebuild = True
+    needs_snapshot_full_rebuild = True
+
     with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS systemmigrationstate (
+                key_name TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
         for sql in [
             "CREATE INDEX IF NOT EXISTS ix_gamesmokesetting_game_id ON gamesmokesetting (game_id)",
             "CREATE INDEX IF NOT EXISTS ix_gamesmokesetting_smoke_type ON gamesmokesetting (smoke_type)",
@@ -1973,63 +2316,91 @@ def migrate_recommendation_prerequisite_tables():
             "CREATE INDEX IF NOT EXISTS ix_customerrecommendationtimebucketstat_time_bucket ON customerrecommendationtimebucketstat (time_bucket)",
             "CREATE INDEX IF NOT EXISTS ix_customerrecommendationtimebucketstat_play_count ON customerrecommendationtimebucketstat (play_count)",
             "CREATE INDEX IF NOT EXISTS ix_customerrecommendationtimebucketstat_last_played_at ON customerrecommendationtimebucketstat (last_played_at)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationholidaydate_holiday_date ON recommendationholidaydate (holiday_date)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationholidaydate_is_active ON recommendationholidaydate (is_active)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationdailysnapshot_stat_date ON recommendationdailysnapshot (stat_date)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationdailysnapshot_wechat_id ON recommendationdailysnapshot (wechat_id)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationdailysnapshot_store_name ON recommendationdailysnapshot (store_name)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationdailysnapshot_play_label ON recommendationdailysnapshot (play_label)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationdailysnapshot_smoke_type ON recommendationdailysnapshot (smoke_type)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationdailysnapshot_date_type ON recommendationdailysnapshot (date_type)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationdailysnapshot_time_bucket ON recommendationdailysnapshot (time_bucket)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationdailysnapshot_play_count ON recommendationdailysnapshot (play_count)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationdailysnapshot_last_played_at ON recommendationdailysnapshot (last_played_at)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpreferencesnapshot_wechat_id ON recommendationpreferencesnapshot (wechat_id)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpreferencesnapshot_store_name ON recommendationpreferencesnapshot (store_name)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpreferencesnapshot_play_label ON recommendationpreferencesnapshot (play_label)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpreferencesnapshot_smoke_type ON recommendationpreferencesnapshot (smoke_type)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpreferencesnapshot_date_type ON recommendationpreferencesnapshot (date_type)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpreferencesnapshot_time_bucket ON recommendationpreferencesnapshot (time_bucket)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpreferencesnapshot_play_count ON recommendationpreferencesnapshot (play_count)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpreferencesnapshot_last_played_at ON recommendationpreferencesnapshot (last_played_at)",
         ]:
             conn.execute(text(sql))
 
-    with Session(engine) as session:
-        existing_count = session.exec(select(func.count(CustomerRecommendationTimeBucketStat.id))).first() or 0
-        if existing_count > 0:
-            return
+        version_row = conn.execute(
+            text("SELECT value FROM systemmigrationstate WHERE key_name = :key_name"),
+            {"key_name": time_bucket_version_key}
+        ).fetchone()
+        needs_time_bucket_rebuild = not version_row or version_row[0] != time_bucket_version
+        snapshot_version_row = conn.execute(
+            text("SELECT value FROM systemmigrationstate WHERE key_name = :key_name"),
+            {"key_name": snapshot_version_key}
+        ).fetchone()
+        needs_snapshot_full_rebuild = not snapshot_version_row or snapshot_version_row[0] != snapshot_version
 
-        smoke_rows = session.exec(select(GameSmokeSetting)).all()
-        smoke_by_game_id = {
-            row.game_id: row.smoke_type
-            for row in smoke_rows
-            if row.game_id is not None and row.smoke_type in {"smoking", "non_smoking"}
-        }
+    rebuilt_count = 0
+    snapshot_result = None
+    if needs_time_bucket_rebuild or needs_snapshot_full_rebuild:
+        with Session(engine) as session:
+            if needs_time_bucket_rebuild:
+                rebuilt_count = _rebuild_recommendation_time_bucket_stats(session)
+            if needs_snapshot_full_rebuild:
+                snapshot_result = refresh_recommendation_snapshots(session, force_full=True)
+            session.commit()
 
-        stats: Dict[Tuple[str, str, str, str, int], Dict[str, Any]] = {}
-        games = session.exec(
-            select(GameRecord).where(
-                GameRecord.status == "formed",
-                GameRecord.record_source != "self_arrival"
+    with engine.begin() as conn:
+        if needs_time_bucket_rebuild:
+            conn.execute(
+                text("DELETE FROM systemmigrationstate WHERE key_name = :key_name"),
+                {"key_name": time_bucket_version_key}
             )
-        ).all()
+            conn.execute(
+                text("""
+                    INSERT INTO systemmigrationstate (key_name, value, updated_at)
+                    VALUES (:key_name, :value, :updated_at)
+                """),
+                {
+                    "key_name": time_bucket_version_key,
+                    "value": time_bucket_version,
+                    "updated_at": datetime.now(),
+                }
+            )
+        if needs_snapshot_full_rebuild:
+            conn.execute(
+                text("DELETE FROM systemmigrationstate WHERE key_name = :key_name"),
+                {"key_name": snapshot_version_key}
+            )
+            conn.execute(
+                text("""
+                    INSERT INTO systemmigrationstate (key_name, value, updated_at)
+                    VALUES (:key_name, :value, :updated_at)
+                """),
+                {
+                    "key_name": snapshot_version_key,
+                    "value": snapshot_version,
+                    "updated_at": datetime.now(),
+                }
+            )
 
-        for game in games:
-            play_label = _migration_game_play_label(game)
-            store_name = _normalize_migration_text(game.store_name)
-            if not play_label or not store_name:
-                continue
-
-            played_at = _migration_game_played_at(game)
-            time_bucket = max(0, min(11, int(played_at.hour // 2)))
-            smoke_type = smoke_by_game_id.get(game.id or 0, "smoking")
-            if smoke_type not in {"smoking", "non_smoking"}:
-                smoke_type = "smoking"
-
-            for wechat_id in _migration_game_player_wechats(game):
-                key = (wechat_id, store_name, play_label, smoke_type, time_bucket)
-                item = stats.setdefault(key, {"count": 0, "last_played_at": played_at})
-                item["count"] += 1
-                if played_at > item["last_played_at"]:
-                    item["last_played_at"] = played_at
-
-        now = datetime.now()
-        for (wechat_id, store_name, play_label, smoke_type, time_bucket), item in stats.items():
-            session.add(CustomerRecommendationTimeBucketStat(
-                wechat_id=wechat_id,
-                store_name=store_name,
-                play_label=play_label,
-                smoke_type=smoke_type,
-                time_bucket=time_bucket,
-                play_count=item["count"],
-                last_played_at=item["last_played_at"],
-                updated_at=now,
-            ))
-
-        session.commit()
-        print(f"已回填智能推荐时间轴统计 {len(stats)} 条")
+    if needs_time_bucket_rebuild:
+        print(f"已按新版智能推荐时间轴重建统计 {rebuilt_count} 条")
+    if snapshot_result:
+        print(
+            "已构建智能推荐偏好快照 "
+            f"{snapshot_result['daily_snapshot_count']} 条日快照 / "
+            f"{snapshot_result['preference_snapshot_count']} 条汇总快照"
+        )
 
 def migrate_brand_blacklist_entry_table():
     """

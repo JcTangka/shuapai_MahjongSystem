@@ -25,6 +25,16 @@
 .customer-suggest-name { font-weight: 700; }
 .customer-suggest-meta { color: #6c757d; font-size: .875rem; }
 .customer-suggest-empty { padding: .75rem; color: #6c757d; font-size: .875rem; }
+.public-traffic-store-checklist {
+    max-height: 168px;
+    overflow-y: auto;
+}
+.public-traffic-store-checklist .form-check {
+    margin-bottom: .35rem;
+}
+.public-traffic-store-checklist .form-check:last-child {
+    margin-bottom: 0;
+}
 </style>
 {% endblock %}
 
@@ -516,6 +526,7 @@
         <form method="get" action="/customers" class="row g-3 align-items-end">
             <input type="hidden" name="store" value="{{ current_store }}">
             <input type="hidden" name="tab" value="public_traffic">
+            <input type="hidden" name="public_same_store_rate_store" value="{{ public_same_store_rate_store or current_store }}">
 
             <div class="col-lg-2 col-md-6">
                 <label class="form-label fw-bold text-secondary">日期范围</label>
@@ -561,7 +572,7 @@
 </div>
 
 <div class="row g-3 mb-4">
-    <div class="col-md-4">
+    <div class="col-md-3">
         <div class="card border-0 shadow-sm h-100">
             <div class="card-body">
                 <div class="text-secondary small mb-1">当前周期引流人数</div>
@@ -569,7 +580,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-4">
+    <div class="col-md-3">
         <div class="card border-0 shadow-sm h-100">
             <div class="card-body">
                 <div class="text-secondary small mb-1">转化人数</div>
@@ -577,11 +588,37 @@
             </div>
         </div>
     </div>
-    <div class="col-md-4">
+    <div class="col-md-3">
         <div class="card border-0 shadow-sm h-100">
             <div class="card-body">
                 <div class="text-secondary small mb-1">转化率</div>
                 <div class="h3 fw-bold text-primary mb-0">{{ public_conversion_rate or 0 }}%</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="d-flex align-items-center justify-content-between gap-2 mb-1">
+                    <div class="text-secondary small">单门店转化率</div>
+                    <form method="get" action="/customers" class="m-0">
+                        <input type="hidden" name="store" value="{{ current_store }}">
+                        <input type="hidden" name="tab" value="public_traffic">
+                        <input type="hidden" name="public_date_filter" value="{{ public_date_filter or 'today' }}">
+                        <input type="hidden" name="public_start_date" value="{{ public_start_date or '' }}">
+                        <input type="hidden" name="public_end_date" value="{{ public_end_date or '' }}">
+                        <input type="hidden" name="public_source_port" value="{{ public_source_port or 'all' }}">
+                        <select class="form-select form-select-sm" name="public_same_store_rate_store" onchange="this.form.submit()">
+                            {% for store_name in store_list %}
+                            <option value="{{ store_name }}" {% if public_same_store_rate_store == store_name %}selected{% endif %}>{{ store_name }}</option>
+                            {% endfor %}
+                        </select>
+                    </form>
+                </div>
+                <div class="h3 fw-bold text-warning mb-0">{{ public_same_store_conversion_rate or 0 }}%</div>
+                <div class="text-secondary small mt-1">
+                    {{ public_same_store_converted_count or 0 }} / {{ public_intended_store_count or 0 }}
+                </div>
             </div>
         </div>
     </div>
@@ -595,6 +632,7 @@
                     <th>录入日期</th>
                     <th>引流端口</th>
                     <th>微信号</th>
+                    <th>意向门店</th>
                     <th>是否转化</th>
                     <th>转化门店</th>
                     <th>操作</th>
@@ -610,6 +648,7 @@
                         </span>
                     </td>
                     <td class="fw-bold">{{ lead.wechat_id }}</td>
+                    <td>{{ lead.intended_store_label }}</td>
                     <td>
                         {% if lead.is_converted %}
                             <span class="badge bg-success">已转化</span>
@@ -625,6 +664,7 @@
                                     data-lead-id="{{ lead.id }}"
                                     data-source-port="{{ lead.source_port }}"
                                     data-wechat-id="{{ lead.wechat_id }}"
+                                    data-intended-store-names='{{ lead.intended_store_names|tojson|forceescape }}'
                                     onclick="openEditPublicTrafficLeadModal(this)">
                                 <i class="bi bi-pencil-square me-1"></i>编辑
                             </button>
@@ -637,6 +677,7 @@
                                 <input type="hidden" name="public_start_date" value="{{ public_start_date or '' }}">
                                 <input type="hidden" name="public_end_date" value="{{ public_end_date or '' }}">
                                 <input type="hidden" name="public_source_port" value="{{ public_source_port or 'all' }}">
+                                <input type="hidden" name="public_same_store_rate_store" value="{{ public_same_store_rate_store or current_store }}">
                                 <button type="submit" class="btn btn-sm btn-outline-danger">
                                     <i class="bi bi-trash me-1"></i>删除
                                 </button>
@@ -646,7 +687,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="6" class="text-muted py-5">
+                    <td colspan="7" class="text-muted py-5">
                         <i class="bi bi-broadcast-pin fs-1 d-block mb-3"></i>
                         当前日期范围暂无公域流量顾客。
                     </td>
@@ -1180,7 +1221,7 @@
     {% if contact_customer_list %}
     <div class="text-end mb-3">
         <button type="submit" class="btn btn-primary rounded-pill px-4">
-            <i class="bi bi-save me-1"></i>批量保存
+            <i class="bi bi-save me-1"></i>保存
         </button>
     </div>
     {% endif %}
@@ -1195,6 +1236,7 @@
                         <th>昵称</th>
                         <th>微信号</th>
                         <th>所属门店</th>
+                        <th style="min-width: 220px;">备注</th>
                         <th>门店私域群聊邀请</th>
                     </tr>
                 </thead>
@@ -1215,6 +1257,9 @@
                         <td class="fw-bold">{{ item.wechat_id }}</td>
                         <td>{{ item.store_name or '-' }}</td>
                         <td>
+                            <textarea class="form-control form-control-sm" name="remark_{{ row_index }}" rows="1" placeholder="填写备注">{{ item.remark }}</textarea>
+                        </td>
+                        <td>
                             <input type="hidden" name="wechat_id" value="{{ item.wechat_id }}">
                             <input type="hidden" name="contact_row_key" value="{{ row_index }}">
                             <input type="hidden" name="contact_store_name" value="{{ item.store_name or '' }}">
@@ -1226,7 +1271,7 @@
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="6" class="text-muted py-5">
+                        <td colspan="7" class="text-muted py-5">
                             <i class="bi bi-person-lines-fill fs-1 d-block mb-3"></i>
                             当前时间范围暂无接触顾客。
                         </td>
@@ -1414,6 +1459,7 @@
                 <input type="hidden" name="public_start_date" value="{{ public_start_date or '' }}">
                 <input type="hidden" name="public_end_date" value="{{ public_end_date or '' }}">
                 <input type="hidden" name="public_source_port" value="{{ public_source_port or 'all' }}">
+                <input type="hidden" name="public_same_store_rate_store" value="{{ public_same_store_rate_store or current_store }}">
 
                 <div class="modal-body">
                     <div class="mb-3">
@@ -1427,6 +1473,18 @@
                     <div class="mb-3">
                         <label class="form-label fw-bold">微信号</label>
                         <input type="text" name="wechat_id" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">意向门店</label>
+                        <div class="public-traffic-store-checklist border rounded-2 p-2">
+                            {% for store_name in store_list %}
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="intended_store_names" value="{{ store_name }}" id="addPublicTrafficIntendedStore{{ loop.index }}">
+                                <label class="form-check-label" for="addPublicTrafficIntendedStore{{ loop.index }}">{{ store_name }}</label>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <div class="form-text">选填，可勾选一个或多个门店。</div>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -1451,6 +1509,7 @@
                 <input type="hidden" name="public_start_date" value="{{ public_start_date or '' }}">
                 <input type="hidden" name="public_end_date" value="{{ public_end_date or '' }}">
                 <input type="hidden" name="public_source_port" value="{{ public_source_port or 'all' }}">
+                <input type="hidden" name="public_same_store_rate_store" value="{{ public_same_store_rate_store or current_store }}">
 
                 <div class="modal-body">
                     <div class="mb-3">
@@ -1464,6 +1523,18 @@
                     <div class="mb-3">
                         <label class="form-label fw-bold">微信号</label>
                         <input type="text" name="wechat_id" id="editPublicTrafficWechatId" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">意向门店</label>
+                        <div class="public-traffic-store-checklist border rounded-2 p-2" id="editPublicTrafficIntendedStores">
+                            {% for store_name in store_list %}
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="intended_store_names" value="{{ store_name }}" id="editPublicTrafficIntendedStore{{ loop.index }}">
+                                <label class="form-check-label" for="editPublicTrafficIntendedStore{{ loop.index }}">{{ store_name }}</label>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <div class="form-text">选填，可勾选一个或多个门店。</div>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -2460,13 +2531,24 @@
         const form = document.getElementById('editPublicTrafficLeadForm');
         const sourcePortSelect = document.getElementById('editPublicTrafficSourcePort');
         const wechatInput = document.getElementById('editPublicTrafficWechatId');
+        const intendedStoreSelect = document.getElementById('editPublicTrafficIntendedStores');
         const modalEl = document.getElementById('editPublicTrafficLeadModal');
-        if (!form || !sourcePortSelect || !wechatInput || !modalEl) return;
+        if (!form || !sourcePortSelect || !wechatInput || !intendedStoreSelect || !modalEl) return;
 
         const leadId = button.dataset.leadId || '';
         form.action = `/public-traffic-leads/${encodeURIComponent(leadId)}/update`;
         sourcePortSelect.value = button.dataset.sourcePort || '';
         wechatInput.value = button.dataset.wechatId || '';
+        let intendedStoreNames = [];
+        try {
+            intendedStoreNames = JSON.parse(button.dataset.intendedStoreNames || '[]');
+        } catch (err) {
+            intendedStoreNames = [];
+        }
+        const intendedStoreSet = new Set(Array.isArray(intendedStoreNames) ? intendedStoreNames : []);
+        intendedStoreSelect.querySelectorAll('input[name="intended_store_names"]').forEach(input => {
+            input.checked = intendedStoreSet.has(input.value);
+        });
 
         bootstrap.Modal.getOrCreateInstance(modalEl).show();
     }

@@ -1614,6 +1614,8 @@
                             <i class="bi bi-people me-1 text-warning"></i>参与人信息
                         </div>
 
+                        <div class="alert alert-danger d-none mb-3 py-2" id="overflow_add_player_conflict_notice"></div>
+
                         <div class="row g-3">
                             {% for i in range(1, 5) %}
                             <div class="col-md-6">
@@ -1793,6 +1795,7 @@
 
                     <div class="form-section-card p-3">
                         <div class="form-section-title"><i class="bi bi-people me-1 text-warning"></i>参与人信息</div>
+                        <div class="alert alert-danger d-none mb-3 py-2" id="overflow_edit_player_conflict_notice"></div>
                         <div class="row g-3">
                             {% for i in range(1, 5) %}
                             <div class="col-md-6">
@@ -2019,10 +2022,16 @@
                     </div>
 
                     <div class="row g-3">
+                        <div class="col-12">
+                            <div class="alert alert-danger d-none mb-0 py-2" id="formedEditPlayerConflictNotice"></div>
+                        </div>
                         {% for i in range(1, 5) %}
                         <div class="col-md-6">
                             <div class="border rounded-3 p-3 bg-light h-100">
-                                <div class="fw-bold mb-2">参与人 {{ i }}</div>
+                                <div class="d-flex align-items-center justify-content-between mb-2">
+                                    <div class="fw-bold">参与人 {{ i }}</div>
+                                    <span class="badge bg-light text-secondary border" id="edit_idx_{{ i }}">#{{ i }}</span>
+                                </div>
 
                                 <div class="mb-2">
                                     <label class="form-label small text-muted">昵称</label>
@@ -2248,7 +2257,9 @@
                 const detail = Array.isArray(data.detail)
                     ? data.detail.map(item => item.msg).filter(Boolean).join('；')
                     : '';
-                throw new Error(data.message || detail || '保存失败');
+                const error = new Error(data.message || detail || '保存失败');
+                error.responseData = data;
+                throw error;
             }
 
             return data;
@@ -2566,10 +2577,13 @@
                 idxBadge.classList.add('bg-light', 'text-secondary');
             }
         }
+        hidePlayerConflictNotice(`overflow_${mode}_player_conflict_notice`);
     }
 
-    function highlightOverflowIndices(mode, indices) {
-        (indices || []).forEach(idx => {
+    function highlightOverflowIndices(mode, indices, message) {
+        const cleanIndices = normalizePlayerIndices(indices);
+        showPlayerConflictNotice(`overflow_${mode}_player_conflict_notice`, message, cleanIndices);
+        cleanIndices.forEach(idx => {
             const idxBadge = document.getElementById(`overflow_${mode}_idx_${idx}`);
             if (idxBadge) {
                 idxBadge.classList.remove('bg-light', 'text-secondary');
@@ -2580,6 +2594,7 @@
             if (nameInput) nameInput.classList.add('player-invalid-warning');
             if (wechatInput) wechatInput.classList.add('player-invalid-warning');
         });
+        focusFirstHighlightedPlayer(`overflow_${mode}`, cleanIndices);
     }
 
     function validateOverflowFields(mode) {
@@ -2647,6 +2662,7 @@
             return false;
         }
         const wechatNameMap = {};
+        const wechatFirstIndexMap = {};
         for (let i = 1; i <= 4; i++) {
             const nameInput = document.getElementById(`overflow_${mode}_player_${i}`);
             const wechatInput = document.getElementById(`overflow_${mode}_player_${i}_wechat`);
@@ -2654,26 +2670,24 @@
             const wechat = (wechatInput?.value || '').trim();
 
             if ((name && !wechat) || (!name && wechat)) {
-                if (nameInput) nameInput.classList.add('player-invalid-warning');
-                if (wechatInput) wechatInput.classList.add('player-invalid-warning');
-                highlightOverflowIndices(mode, [i]);
-                alert(`参与人 ${i} 的昵称和微信号必须同时填写`);
+                const message = `参与人 ${i} 的昵称和微信号必须同时填写`;
+                highlightOverflowIndices(mode, [i], message);
+                alert(message);
                 return false;
             }
 
             if (wechat) {
                 if (wechatNameMap[wechat] && wechatNameMap[wechat] !== name) {
-                    const conflictIndices = [];
-                    for (let j = 1; j <= 4; j++) {
-                        const otherWechat = (document.getElementById(`overflow_${mode}_player_${j}_wechat`)?.value || '').trim();
-                        const otherName = (document.getElementById(`overflow_${mode}_player_${j}`)?.value || '').trim();
-                        if (otherWechat === wechat && otherName !== name) conflictIndices.push(j);
-                    }
-                    highlightOverflowIndices(mode, Array.from(new Set(conflictIndices)));
-                    alert(`同一局中微信号【${wechat}】对应了不同昵称，无法提交`);
+                    const conflictIndices = [wechatFirstIndexMap[wechat], i].filter(Boolean);
+                    const message = `同一局中微信号【${wechat}】对应了不同昵称，无法提交`;
+                    highlightOverflowIndices(mode, Array.from(new Set(conflictIndices)), message);
+                    alert(message);
                     return false;
                 }
                 wechatNameMap[wechat] = name;
+                if (!wechatFirstIndexMap[wechat]) {
+                    wechatFirstIndexMap[wechat] = i;
+                }
             }
         }
 
@@ -2698,7 +2712,7 @@
                 return false;
             }
             if (!data.ok) {
-                highlightOverflowIndices(mode, data.indices || []);
+                highlightOverflowIndices(mode, data.indices || [], data.message || '参与人校验未通过');
                 alert(data.message || '参与人校验未通过');
                 return false;
             }
@@ -2747,6 +2761,9 @@
 
             return false;
         } catch (err) {
+            if (err.responseData && Array.isArray(err.responseData.indices) && err.responseData.indices.length) {
+                highlightOverflowIndices('edit', err.responseData.indices, err.responseData.message || err.message);
+            }
             alert(err.message || '溢出单编辑保存失败');
             return false;
         }
@@ -2806,6 +2823,9 @@
             return false;
         }
 
+        const serverOk = await validateFormedPlayersViaServer();
+        if (!serverOk) return false;
+
         const gameId = (form.action.split('/').pop() || '').trim();
 
         try {
@@ -2822,6 +2842,9 @@
 
             return false;
         } catch (err) {
+            if (err.responseData && Array.isArray(err.responseData.indices) && err.responseData.indices.length) {
+                highlightFormedIndices(err.responseData.indices, err.responseData.message || err.message);
+            }
             alert(err.message || '编辑保存失败');
             return false;
         }
@@ -2897,6 +2920,7 @@
             document.getElementById(`edit_player_${i}_wechat`).value = btn.getAttribute(`data-p${i}-wx`) || '';
             document.getElementById(`edit_player_${i}_note`).value = btn.getAttribute(`data-p${i}-note`) || '';
         }
+        clearFormedPlayerWarningStyle();
     }
 
     function openSelfArrivalEditModal(btn) {
@@ -3004,10 +3028,86 @@
         }
     }
 
+    function normalizePlayerIndices(indices) {
+        const result = [];
+        const seen = new Set();
+        (indices || []).forEach(rawIdx => {
+            const idx = parseInt(rawIdx, 10);
+            if (idx >= 1 && idx <= 4 && !seen.has(idx)) {
+                seen.add(idx);
+                result.push(idx);
+            }
+        });
+        return result;
+    }
+
+    function playerIndicesLabel(indices) {
+        const cleanIndices = normalizePlayerIndices(indices);
+        return cleanIndices.map(idx => `#${idx}`).join('、');
+    }
+
+    function showPlayerConflictNotice(noticeId, message, indices) {
+        const notice = document.getElementById(noticeId);
+        if (!notice) return;
+
+        const conflictLabel = playerIndicesLabel(indices);
+        const baseMessage = message || '参与人校验未通过';
+        notice.textContent = conflictLabel
+            ? `${baseMessage}（冲突参与人：${conflictLabel}）`
+            : baseMessage;
+        notice.classList.remove('d-none');
+    }
+
+    function hidePlayerConflictNotice(noticeId) {
+        const notice = document.getElementById(noticeId);
+        if (!notice) return;
+        notice.textContent = '';
+        notice.classList.add('d-none');
+    }
+
+    function focusFirstHighlightedPlayer(prefix, indices) {
+        const firstIdx = normalizePlayerIndices(indices)[0];
+        if (!firstIdx) return;
+
+        const firstInput = document.getElementById(`${prefix}_player_${firstIdx}`);
+        if (!firstInput) return;
+
+        const target = firstInput.closest('.col-md-6') || firstInput;
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        window.setTimeout(() => {
+            firstInput.focus({ preventScroll: true });
+        }, 220);
+    }
+
     function clearFormedPlayerWarningStyle() {
         document.querySelectorAll('.formed-player-name-input, .formed-player-wechat-input').forEach(el => {
             el.classList.remove('player-invalid-warning');
         });
+        for (let i = 1; i <= 4; i++) {
+            const idxBadge = document.getElementById(`edit_idx_${i}`);
+            if (idxBadge) {
+                idxBadge.classList.remove('bg-danger', 'text-white');
+                idxBadge.classList.add('bg-light', 'text-secondary');
+            }
+        }
+        hidePlayerConflictNotice('formedEditPlayerConflictNotice');
+    }
+
+    function highlightFormedIndices(indices, message) {
+        const cleanIndices = normalizePlayerIndices(indices);
+        showPlayerConflictNotice('formedEditPlayerConflictNotice', message, cleanIndices);
+        cleanIndices.forEach(idx => {
+            const idxBadge = document.getElementById(`edit_idx_${idx}`);
+            if (idxBadge) {
+                idxBadge.classList.remove('bg-light', 'text-secondary');
+                idxBadge.classList.add('bg-danger', 'text-white');
+            }
+            const nameInput = document.getElementById(`edit_player_${idx}`);
+            const wechatInput = document.getElementById(`edit_player_${idx}_wechat`);
+            if (nameInput) nameInput.classList.add('player-invalid-warning');
+            if (wechatInput) wechatInput.classList.add('player-invalid-warning');
+        });
+        focusFirstHighlightedPlayer('edit', cleanIndices);
     }
 
     function hideAllFormedSuggestBoxes() {
@@ -3168,6 +3268,7 @@
         clearFormedPlayerWarningStyle();
 
         const wechatNameMap = {};
+        const wechatFirstIndexMap = {};
         for (let i = 1; i <= 4; i++) {
             const nameInput = document.getElementById(`edit_player_${i}`);
             const wechatInput = document.getElementById(`edit_player_${i}_wechat`);
@@ -3176,24 +3277,58 @@
             const wechat = (wechatInput?.value || '').trim();
 
             if ((name && !wechat) || (!name && wechat)) {
-                if (nameInput) nameInput.classList.add('player-invalid-warning');
-                if (wechatInput) wechatInput.classList.add('player-invalid-warning');
-                alert(`参与人 ${i} 的昵称和微信号必须同时填写`);
+                const message = `参与人 ${i} 的昵称和微信号必须同时填写`;
+                highlightFormedIndices([i], message);
+                alert(message);
                 return false;
             }
 
             if (wechat) {
                 if (wechatNameMap[wechat] && wechatNameMap[wechat] !== name) {
-                    if (nameInput) nameInput.classList.add('player-invalid-warning');
-                    if (wechatInput) wechatInput.classList.add('player-invalid-warning');
-                    alert(`同一局中微信号【${wechat}】对应了不同昵称，无法提交`);
+                    const conflictIndices = [wechatFirstIndexMap[wechat], i].filter(Boolean);
+                    const message = `同一局中微信号【${wechat}】对应了不同昵称，无法提交`;
+                    highlightFormedIndices(conflictIndices, message);
+                    alert(message);
                     return false;
                 }
                 wechatNameMap[wechat] = name;
+                if (!wechatFirstIndexMap[wechat]) {
+                    wechatFirstIndexMap[wechat] = i;
+                }
             }
         }
 
         return true;
+    }
+
+    async function validateFormedPlayersViaServer() {
+        const formData = new FormData();
+        for (let i = 1; i <= 4; i++) {
+            formData.append(`player_${i}`, document.getElementById(`edit_player_${i}`)?.value || '');
+            formData.append(`player_${i}_wechat`, document.getElementById(`edit_player_${i}_wechat`)?.value || '');
+        }
+
+        try {
+            const resp = await fetch('/api/validate-unformed-game-players', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+                alert(data?.detail || '参与人校验失败，请稍后重试');
+                return false;
+            }
+            if (!data.ok) {
+                highlightFormedIndices(data.indices || [], data.message || '参与人校验未通过');
+                alert(data.message || '参与人校验未通过');
+                return false;
+            }
+            return true;
+        } catch (err) {
+            console.error(err);
+            alert('参与人校验失败，请检查网络后重试');
+            return false;
+        }
     }
 
     function openPaymentModal(btn) {

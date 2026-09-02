@@ -12,6 +12,7 @@ import calendar
 import json
 import secrets
 import string
+import threading
 from sqlmodel import Session, select
 from sqlalchemy import func, or_, and_, delete, text  # 用于搜索逻辑；text 用于团队硬删除时兼容清理工资结算表
 from datetime import date, datetime,timedelta,time
@@ -23,7 +24,11 @@ from database import (GameRecord, GamePaymentItem, Store, Room, User,
                       Customer, CustomerStoreLink, CustomerComplaintRecord,
                       Blacklist, BrandBlacklistEntry, PlayFrequency, CustomerPlayTypeStat,
                       GameSmokeSetting, CustomerRecommendationBlock, CustomerRecommendationTimeBucketStat,
+                      RecommendationHolidayDate, RecommendationPreferenceSnapshot,
                       create_db_and_tables, get_session,
+                      refresh_recommendation_snapshots, RECOMMENDATION_DATE_TYPE_WORKDAY,
+                      RECOMMENDATION_DATE_TYPE_WEEKEND, RECOMMENDATION_DATE_TYPE_HOLIDAY,
+                      RECOMMENDATION_SNAPSHOT_WINDOW_DAYS,
                       ShiftSchedule, MaintenanceRecord, upsert_shift, get_month_shifts_map, get_month_date_range, normalize_shift_type,
                       get_manager_performance_stats, get_shift_performance_stats,
                       HandoverTodo, HandoverTodoCustomerLink, FormedGameHandoverLink,SelfArrivalRecord,
@@ -414,14 +419,18 @@ def _ajax_or_redirect_error(
     *,
     message: str,
     redirect_url: str,
-    status_code: int = 400
+    status_code: int = 400,
+    extra: Optional[dict] = None
 ):
     if _is_ajax_request(request):
+        payload = {
+            "ok": False,
+            "message": message
+        }
+        if extra:
+            payload.update(extra)
         return JSONResponse(
-            {
-                "ok": False,
-                "message": message
-            },
+            payload,
             status_code=status_code
         )
     return RedirectResponse(url=redirect_url, status_code=303)
@@ -4764,8 +4773,15 @@ RECOMMENDATION_RECENT_DAYS = 7
 RECOMMENDATION_COMPLAINT_PENALTY = 5
 RECOMMENDATION_DORMANT_WINDOW_SIZE = 6
 RECOMMENDATION_DORMANT_PER_WINDOW = 1
-RECOMMENDATION_DEFAULT_LIMIT = 30
+RECOMMENDATION_DEFAULT_LIMIT = 100
 RECOMMENDATION_MAX_LIMIT = 100
+RECOMMENDATION_TIME_BUCKETS = (
+    (0, 9),
+    (9, 13),
+    (13, 17),
+    (17, 20),
+    (20, 24),
+)
 
 FORMED_GAMES_PAGE_SIZE = 40
 LIST_PAGE_SIZE = 40
@@ -5166,7 +5182,13 @@ def _validate_players_and_customer_binding_detailed(
         ).first()
 
         if existing_customer and _normalize_text(existing_customer.nickname) != nm:
-            return False, "该微信号已绑定其他昵称，请核对", [s["idx"]], "wechat_bound_other_nickname"
+            bound_nickname = _normalize_text(existing_customer.nickname) or "未填写昵称"
+            return (
+                False,
+                f"该微信号已绑定组局散客池微信昵称【{bound_nickname}】，请核对",
+                [s["idx"]],
+                "wechat_bound_other_nickname"
+            )
 
     return True, "", [], ""
 
@@ -5699,9 +5721,16 @@ def _game_recommendation_time_snapshot(session: Session, game: GameRecord) -> di
     snapshot["smoke_type"] = get_game_smoke_type(session, game.id)
     return snapshot
 
+def _recommendation_time_bucket_for_dt(played_at: datetime) -> int:
+    hour = int((played_at or datetime.min).hour)
+    for idx, (start_hour, end_hour) in enumerate(RECOMMENDATION_TIME_BUCKETS):
+        if start_hour <= hour < end_hour:
+            return idx
+    return 0
+
 def _game_recommendation_time_bucket(game_or_snapshot) -> int:
     played_at = _game_play_type_played_at(game_or_snapshot)
-    return max(0, min(11, int(played_at.hour // 2)))
+    return _recommendation_time_bucket_for_dt(played_at)
 
 def _game_recommendation_time_stat_keys(game_or_snapshot) -> List[Tuple[str, str, str, str, int]]:
     if _normalize_text(_game_value(game_or_snapshot, "status")) != "formed":
@@ -5802,23 +5831,36 @@ def _recompute_customer_recommendation_time_bucket_stat_key(
     session.add(stat)
 
 def sync_customer_recommendation_time_bucket_stats_for_changed_games(session: Session, *game_versions):
-    affected_keys = set()
-    for game_version in game_versions:
-        if not game_version:
-            continue
-        if isinstance(game_version, GameRecord):
-            game_version = _game_recommendation_time_snapshot(session, game_version)
-        affected_keys.update(_game_recommendation_time_stat_keys(game_version))
-
-    for key in sorted(affected_keys):
-        _recompute_customer_recommendation_time_bucket_stat_key(session, *key)
+    # 智能推荐评分已切换为凌晨/启动补偿生成的偏好快照。
+    # 白天牌局变更不再实时改写推荐统计，避免高频编辑触发重算。
+    return
 
 
 def _recommendation_time_bucket_label(time_bucket: int) -> str:
-    clean_bucket = max(0, min(11, int(time_bucket or 0)))
-    start_hour = clean_bucket * 2
-    end_hour = (start_hour + 2) % 24
+    clean_bucket = max(0, min(len(RECOMMENDATION_TIME_BUCKETS) - 1, int(time_bucket or 0)))
+    start_hour, raw_end_hour = RECOMMENDATION_TIME_BUCKETS[clean_bucket]
+    end_hour = raw_end_hour % 24
     return f"{start_hour:02d}:00-{end_hour:02d}:00"
+
+def _recommendation_date_type_for_date(session: Session, target_date: date) -> str:
+    holiday = session.exec(
+        select(RecommendationHolidayDate).where(
+            RecommendationHolidayDate.holiday_date == target_date,
+            RecommendationHolidayDate.is_active == True,
+        )
+    ).first()
+    if holiday:
+        return RECOMMENDATION_DATE_TYPE_HOLIDAY
+    if target_date.weekday() >= 5:
+        return RECOMMENDATION_DATE_TYPE_WEEKEND
+    return RECOMMENDATION_DATE_TYPE_WORKDAY
+
+def _recommendation_date_type_label(date_type: str) -> str:
+    return {
+        RECOMMENDATION_DATE_TYPE_WORKDAY: "工作日",
+        RECOMMENDATION_DATE_TYPE_WEEKEND: "周末",
+        RECOMMENDATION_DATE_TYPE_HOLIDAY: "法定节假日",
+    }.get(date_type, "工作日")
 
 
 def _recommendation_player_wechats(game: GameRecord) -> List[str]:
@@ -5912,6 +5954,8 @@ def build_game_recommendations(
     play_label = _game_play_type_label(game)
     smoke_type = get_game_smoke_type(session, game.id)
     time_bucket = _game_recommendation_time_bucket(game)
+    played_at = _game_play_type_played_at(game)
+    date_type = _recommendation_date_type_for_date(session, played_at.date())
     current_dt = now or datetime.now()
     today = current_dt.date()
     clean_limit = min(max(1, int(limit or RECOMMENDATION_DEFAULT_LIMIT)), RECOMMENDATION_MAX_LIMIT)
@@ -5969,7 +6013,9 @@ def build_game_recommendations(
         "smoke_type_label": SMOKE_TYPE_LABEL_MAP.get(smoke_type, "有烟局"),
         "time_bucket": time_bucket,
         "time_bucket_label": _recommendation_time_bucket_label(time_bucket),
-        "reservation_time": _game_play_type_played_at(game).strftime("%Y-%m-%d %H:%M"),
+        "date_type": date_type,
+        "date_type_label": _recommendation_date_type_label(date_type),
+        "reservation_time": played_at.strftime("%Y-%m-%d %H:%M"),
         "existing_player_wechats": existing_player_wechat_list,
         "current_players": current_players,
     }
@@ -6109,12 +6155,14 @@ def build_game_recommendations(
 
     play_count_by_wechat = {}
     time_bucket_count_by_wechat = {}
+    date_type_count_by_wechat = {}
+    date_time_bucket_count_by_wechat = {}
     last_played_at_by_wechat = {}
     smoke_history_by_wechat = {}
     stat_rows = session.exec(
-        select(CustomerRecommendationTimeBucketStat).where(
-            CustomerRecommendationTimeBucketStat.wechat_id.in_(candidate_wechat_ids),
-            CustomerRecommendationTimeBucketStat.store_name == store_name,
+        select(RecommendationPreferenceSnapshot).where(
+            RecommendationPreferenceSnapshot.wechat_id.in_(candidate_wechat_ids),
+            RecommendationPreferenceSnapshot.store_name == store_name,
         )
     ).all() if candidate_wechat_ids else []
     for stat in stat_rows:
@@ -6122,10 +6170,22 @@ def build_game_recommendations(
         smoke_history_by_wechat.setdefault(wechat_id, set()).add(_normalize_smoke_type(stat.smoke_type))
         if _normalize_text(stat.play_label) != play_label:
             continue
-        play_count_by_wechat[wechat_id] = play_count_by_wechat.get(wechat_id, 0) + int(stat.play_count or 0)
-        if int(stat.time_bucket or 0) == time_bucket:
+        stat_count = int(stat.play_count or 0)
+        stat_time_bucket = int(stat.time_bucket or 0)
+        stat_date_type = _normalize_text(stat.date_type)
+
+        play_count_by_wechat[wechat_id] = play_count_by_wechat.get(wechat_id, 0) + stat_count
+        if stat_time_bucket == time_bucket:
             time_bucket_count_by_wechat[wechat_id] = (
-                time_bucket_count_by_wechat.get(wechat_id, 0) + int(stat.play_count or 0)
+                time_bucket_count_by_wechat.get(wechat_id, 0) + stat_count
+            )
+        if stat_date_type == date_type:
+            date_type_count_by_wechat[wechat_id] = (
+                date_type_count_by_wechat.get(wechat_id, 0) + stat_count
+            )
+        if stat_date_type == date_type and stat_time_bucket == time_bucket:
+            date_time_bucket_count_by_wechat[wechat_id] = (
+                date_time_bucket_count_by_wechat.get(wechat_id, 0) + stat_count
             )
         last_played_at = last_played_at_by_wechat.get(wechat_id)
         if not last_played_at or stat.last_played_at > last_played_at:
@@ -6160,9 +6220,17 @@ def build_game_recommendations(
             continue
 
         time_bucket_count = time_bucket_count_by_wechat.get(wechat_id, 0)
+        date_type_count = date_type_count_by_wechat.get(wechat_id, 0)
+        date_time_bucket_count = date_time_bucket_count_by_wechat.get(wechat_id, 0)
         complaint_count = complaint_count_by_customer_id.get(customer.id, 0)
         complaint_penalty = complaint_count * RECOMMENDATION_COMPLAINT_PENALTY
-        total_score = play_count + time_bucket_count - complaint_penalty
+        total_score = (
+            date_time_bucket_count
+            + time_bucket_count
+            + date_type_count
+            + play_count
+            - complaint_penalty
+        )
         link = link_by_customer_id.get(customer.id)
         last_visit = getattr(link, "last_visit_at_store", None) if link else None
         last_played_at = last_played_at_by_wechat.get(wechat_id)
@@ -6170,7 +6238,9 @@ def build_game_recommendations(
 
         reason_parts = [
             f"同玩法 {play_count} 次",
+            f"{_recommendation_date_type_label(date_type)} {date_type_count} 次",
             f"当前时间段 {time_bucket_count} 次",
+            f"{_recommendation_date_type_label(date_type)}当前时间段 {date_time_bucket_count} 次",
         ]
         if complaint_count:
             reason_parts.append(f"投诉 {complaint_count} 次，扣 {complaint_penalty} 分")
@@ -6190,6 +6260,8 @@ def build_game_recommendations(
             "score": total_score,
             "play_count": play_count,
             "time_bucket_count": time_bucket_count,
+            "date_type_count": date_type_count,
+            "date_time_bucket_count": date_time_bucket_count,
             "complaint_count": complaint_count,
             "complaint_penalty": complaint_penalty,
             "last_visit_at_store": _recommendation_date_text(last_visit),
@@ -6209,22 +6281,21 @@ def build_game_recommendations(
 
     recommendations.sort(
         key=lambda item: (
-            item["score"],
-            -item["complaint_count"],
+            item["date_time_bucket_count"],
             item["time_bucket_count"],
+            item["date_type_count"],
             item["play_count"],
+            -item["complaint_count"],
+            item["score"],
             item["_sort_last_played_at"],
             item["_sort_last_visit"],
-            item["customer_id"] or 0,
+            -(item["customer_id"] or 0),
         ),
         reverse=True
     )
 
-    mixed_recommendations = _mix_recommendation_recent_unvisited_candidates(
-        recommendations,
-        clean_limit
-    )
-    for rank, item in enumerate(mixed_recommendations, start=1):
+    selected_recommendations = recommendations[:clean_limit]
+    for rank, item in enumerate(selected_recommendations, start=1):
         item["rank"] = rank
         item.pop("_sort_last_played_at", None)
         item.pop("_sort_last_visit", None)
@@ -6232,16 +6303,23 @@ def build_game_recommendations(
     return {
         "ok": True,
         "game": game_payload,
-        "recommendations": mixed_recommendations,
+        "recommendations": selected_recommendations,
         "total": len(recommendations),
         "limit": clean_limit,
         "excluded_counts": excluded_counts,
         "mix_policy": {
+            "enabled": False,
             "window_size": RECOMMENDATION_DORMANT_WINDOW_SIZE,
             "recent_unvisited_per_window": RECOMMENDATION_DORMANT_PER_WINDOW,
             "recent_unvisited_days": RECOMMENDATION_RECENT_DAYS,
         },
-        "message": "" if mixed_recommendations else "暂无可推荐顾客",
+        "sort_policy": {
+            "primary": "date_time_bucket_count_desc",
+            "secondary": "time_bucket_count_desc",
+            "third": "date_type_count_desc",
+            "fourth": "play_count_desc",
+        },
+        "message": "" if selected_recommendations else "暂无可推荐顾客",
     }
 
 
@@ -9442,12 +9520,92 @@ async def enforce_employee_duty_release(request: Request, call_next):
 
     return await call_next(request)
 
+_recommendation_snapshot_refresh_lock = threading.Lock()
+_recommendation_snapshot_scheduler_started = False
+
+
+def _recommendation_snapshot_needs_startup_refresh(session: Session) -> bool:
+    snapshot_count = session.exec(select(func.count(RecommendationPreferenceSnapshot.id))).first() or 0
+    if snapshot_count <= 0:
+        return True
+
+    last_snapshot_at = session.exec(
+        select(func.max(RecommendationPreferenceSnapshot.snapshot_at))
+    ).first()
+    if not last_snapshot_at:
+        return True
+    if isinstance(last_snapshot_at, str):
+        try:
+            last_snapshot_at = datetime.fromisoformat(last_snapshot_at)
+        except ValueError:
+            return True
+    return last_snapshot_at.date() < date.today()
+
+
+def _run_recommendation_snapshot_refresh(reason: str = "scheduled", force_full: bool = False) -> None:
+    if not _recommendation_snapshot_refresh_lock.acquire(blocking=False):
+        print("智能推荐偏好快照正在刷新，跳过本次触发")
+        return
+
+    try:
+        with Session(engine) as session:
+            result = refresh_recommendation_snapshots(
+                session,
+                window_days=RECOMMENDATION_SNAPSHOT_WINDOW_DAYS,
+                force_full=force_full,
+            )
+            session.commit()
+        start_date = result["start_date"].strftime("%Y-%m-%d") if result.get("start_date") else "全量"
+        print(
+            f"智能推荐偏好快照刷新完成（{reason}，范围：{start_date}）："
+            f"扫描牌局 {result['scanned_game_count']}，"
+            f"日快照 {result['daily_snapshot_count']}，"
+            f"汇总快照 {result['preference_snapshot_count']}"
+        )
+    except Exception as exc:
+        print(f"智能推荐偏好快照刷新失败（{reason}）：{exc}")
+    finally:
+        _recommendation_snapshot_refresh_lock.release()
+
+
+def _seconds_until_next_recommendation_snapshot_run(now: Optional[datetime] = None) -> float:
+    now = now or datetime.now()
+    target = datetime.combine(now.date(), time(3, 0))
+    if now >= target:
+        target += timedelta(days=1)
+    return max(1.0, (target - now).total_seconds())
+
+
+def _recommendation_snapshot_scheduler_loop() -> None:
+    while True:
+        threading.Event().wait(_seconds_until_next_recommendation_snapshot_run())
+        _run_recommendation_snapshot_refresh(reason="03:00")
+
+
+def _start_recommendation_snapshot_scheduler() -> None:
+    global _recommendation_snapshot_scheduler_started
+    if _recommendation_snapshot_scheduler_started:
+        return
+    _recommendation_snapshot_scheduler_started = True
+    thread = threading.Thread(
+        target=_recommendation_snapshot_scheduler_loop,
+        name="recommendation-snapshot-scheduler",
+        daemon=True,
+    )
+    thread.start()
+
+
 # 初始化数据库 (第一次运行时会自动建表)
 # 初始化管理员
 # 修改 startup 事件：增加初始化默认包间数据的逻辑
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
+    with Session(engine) as session:
+        needs_recommendation_snapshot_refresh = _recommendation_snapshot_needs_startup_refresh(session)
+    if needs_recommendation_snapshot_refresh:
+        _run_recommendation_snapshot_refresh(reason="startup")
+    _start_recommendation_snapshot_scheduler()
 
     with Session(engine) as session:
         # 初始化默认门店/包间（仅当两张配置表都还是空时）
@@ -16781,7 +16939,7 @@ async def add_game(
     ok, msg, indices, error_type = _validate_players_and_customer_binding_detailed(session, slots)
     if not ok:
         return RedirectResponse(
-            url=f"/?store={store_name}&error={msg}",
+            url=_build_root_redirect_url(store_name, error=msg),
             status_code=303
         )
 
@@ -16789,7 +16947,7 @@ async def add_game(
     ok, msg = _check_brand_blacklist_for_slots(session, slots)
     if not ok:
         return RedirectResponse(
-            url=f"/?store={store_name}&error={msg}",
+            url=_build_root_redirect_url(store_name, error=msg),
             status_code=303
         )
 
@@ -17140,17 +17298,25 @@ async def update_game(
     )
     ok, msg = _validate_players_and_customer_binding(session, slots)
     if not ok:
-        redirect_base = "/formed-games" if game.status == "formed" else "/"
+        redirect_url = _build_formed_redirect_url(
+            store=store_name,
+            source_filter=_normalize_text(game.record_source) or FORMED_SOURCE_NORMAL,
+            error=msg
+        ) if game.status == "formed" else _build_root_redirect_url(store_name, error=msg)
         return RedirectResponse(
-            url=f"{redirect_base}?store={store_name}&error={msg}",
+            url=redirect_url,
             status_code=303
         )
 
     ok, msg = _check_brand_blacklist_for_slots(session, slots)
     if not ok:
-        redirect_base = "/formed-games" if game.status == "formed" else "/"
+        redirect_url = _build_formed_redirect_url(
+            store=store_name,
+            source_filter=_normalize_text(game.record_source) or FORMED_SOURCE_NORMAL,
+            error=msg
+        ) if game.status == "formed" else _build_root_redirect_url(store_name, error=msg)
         return RedirectResponse(
-            url=f"{redirect_base}?store={store_name}&error={msg}",
+            url=redirect_url,
             status_code=303
         )
 
@@ -19909,7 +20075,7 @@ async def update_formed_game(
         player_1_wechat, player_2_wechat, player_3_wechat, player_4_wechat
     )
 
-    ok, msg = _validate_players_and_customer_binding(session, slots)
+    ok, msg, indices, error_type = _validate_players_and_customer_binding_detailed(session, slots)
     if not ok:
         return _ajax_or_redirect_error(
             request,
@@ -19923,7 +20089,11 @@ async def update_formed_game(
                 end_date=end_date,
                 payment_method_filter=payment_method_filter,
                 error=msg
-            )
+            ),
+            extra={
+                "indices": indices,
+                "error_type": error_type,
+            }
         )
 
     ok, msg = _check_brand_blacklist_for_slots(session, slots)
@@ -20265,6 +20435,100 @@ def _build_public_traffic_conversion_map(session: Session, wechat_ids: List[str]
     return result
 
 
+def _parse_public_traffic_intended_store_names(
+        raw_store_names: Optional[List[str]],
+        active_store_names: List[str]
+) -> List[str]:
+    active_store_set = set(active_store_names)
+    result = []
+    seen = set()
+
+    for raw_name in raw_store_names or []:
+        store_name = _normalize_text(raw_name)
+        if not store_name or store_name not in active_store_set or store_name in seen:
+            continue
+        seen.add(store_name)
+        result.append(store_name)
+
+    return result
+
+
+def _decode_public_traffic_intended_store_names(raw_json: Optional[str]) -> List[str]:
+    if not raw_json:
+        return []
+    try:
+        value = json.loads(raw_json)
+    except Exception:
+        return []
+    if not isinstance(value, list):
+        return []
+
+    result = []
+    seen = set()
+    for raw_name in value:
+        store_name = _normalize_text(str(raw_name))
+        if not store_name or store_name in seen:
+            continue
+        seen.add(store_name)
+        result.append(store_name)
+    return result
+
+
+def _public_traffic_intended_store_label(store_names: List[str]) -> str:
+    return "、".join(store_names) if store_names else "-"
+
+
+def _calculate_public_traffic_same_store_conversion_stats(
+        leads: list,
+        conversion_map: dict,
+        target_store_name: str
+) -> dict:
+    target_store_name = _normalize_text(target_store_name)
+    intended_pairs = set()
+    converted_pairs = set()
+    if not target_store_name:
+        return {
+            "intended_store_count": 0,
+            "converted_count": 0,
+            "conversion_rate": 0,
+        }
+
+    for lead in leads:
+        wechat_id = _normalize_text(getattr(lead, "wechat_id", None))
+        if not wechat_id:
+            continue
+
+        intended_store_names = _decode_public_traffic_intended_store_names(
+            getattr(lead, "intended_store_names_json", None)
+        )
+        if not intended_store_names:
+            continue
+
+        conversion = conversion_map.get(wechat_id)
+        converted_store_name = _normalize_text(conversion.get("first_store")) if conversion else ""
+
+        for intended_store_name in intended_store_names:
+            intended_store_name = _normalize_text(intended_store_name)
+            if intended_store_name != target_store_name:
+                continue
+            pair = (wechat_id, intended_store_name)
+            intended_pairs.add(pair)
+            if converted_store_name and converted_store_name == intended_store_name:
+                converted_pairs.add(pair)
+
+    intended_store_count = len(intended_pairs)
+    converted_count = len(converted_pairs)
+    conversion_rate = (
+        round(converted_count * 100 / intended_store_count, 2)
+        if intended_store_count else 0
+    )
+    return {
+        "intended_store_count": intended_store_count,
+        "converted_count": converted_count,
+        "conversion_rate": conversion_rate,
+    }
+
+
 def _customer_is_old_before_contact(
     customer: Optional[Customer],
     links_by_customer_id: dict,
@@ -20410,6 +20674,7 @@ async def read_customers(
         public_start_date: str = "",
         public_end_date: str = "",
         public_source_port: str = "all",
+        public_same_store_rate_store: str = "",
         contact_date_filter: str = "today",
         contact_start_date: str = "",
         contact_end_date: str = "",
@@ -20483,6 +20748,9 @@ async def read_customers(
             if public_source_port in {"all", *PUBLIC_TRAFFIC_SOURCE_PORTS}
             else "all"
         )
+        public_same_store_rate_store = _normalize_text(public_same_store_rate_store)
+        if public_same_store_rate_store not in store_list:
+            public_same_store_rate_store = store if store in store_list else (store_list[0] if store_list else "")
         range_start, range_end = _parse_public_traffic_date_range(
             public_date_filter,
             public_start_date,
@@ -20522,16 +20790,26 @@ async def read_customers(
             round(converted_public_lead_count * 100 / total_public_lead_count, 2)
             if total_public_lead_count else 0
         )
+        same_store_conversion_stats = _calculate_public_traffic_same_store_conversion_stats(
+            all_leads,
+            conversion_map,
+            public_same_store_rate_store
+        )
 
         page_leads = all_leads[list_offset:list_offset + list_limit]
         public_lead_list = []
         for lead in page_leads:
             conversion = conversion_map.get(_normalize_text(lead.wechat_id))
+            intended_store_names = _decode_public_traffic_intended_store_names(
+                getattr(lead, "intended_store_names_json", None)
+            )
             public_lead_list.append({
                 "id": lead.id,
                 "created_at": lead.created_at.strftime("%Y-%m-%d") if lead.created_at else "",
                 "source_port": lead.source_port,
                 "wechat_id": lead.wechat_id,
+                "intended_store_names": intended_store_names,
+                "intended_store_label": _public_traffic_intended_store_label(intended_store_names),
                 "is_converted": bool(conversion),
                 "first_store": conversion["first_store"] if conversion else "",
             })
@@ -20540,12 +20818,16 @@ async def read_customers(
             **common_context,
             "public_date_filter": public_date_filter,
             "public_source_port": public_source_port,
+            "public_same_store_rate_store": public_same_store_rate_store,
             "public_start_date": range_start.strftime("%Y-%m-%d"),
             "public_end_date": range_end.strftime("%Y-%m-%d"),
             "public_lead_list": public_lead_list,
             "total_public_lead_count": total_public_lead_count,
             "converted_public_lead_count": converted_public_lead_count,
             "public_conversion_rate": conversion_rate,
+            "public_same_store_conversion_rate": same_store_conversion_stats["conversion_rate"],
+            "public_same_store_converted_count": same_store_conversion_stats["converted_count"],
+            "public_intended_store_count": same_store_conversion_stats["intended_store_count"],
             "public_loaded_count": list_offset + len(public_lead_list),
             "public_total_record_count": len(all_leads),
             "public_has_more": (list_offset + len(public_lead_list)) < len(all_leads),
@@ -20959,6 +21241,7 @@ async def read_customers(
                 "wechat_id": item["wechat_id"],
                 "is_new": not is_old,
                 "in_group_chat": bool(followup.in_group_chat) if followup else False,
+                "remark": (followup.remark or "") if followup else "",
             })
 
         full_contact_customer_list.sort(key=lambda item: 0 if item["is_new"] else 1)
@@ -21282,6 +21565,7 @@ def _build_public_traffic_url(
     start_date: str = "",
     end_date: str = "",
     source_port: str = "all",
+    same_store_rate_store: str = "",
     success: str = "",
     error: str = "",
 ) -> str:
@@ -21293,6 +21577,8 @@ def _build_public_traffic_url(
         "public_end_date": end_date or "",
         "public_source_port": source_port or "all",
     }
+    if same_store_rate_store:
+        params["public_same_store_rate_store"] = same_store_rate_store
     if success:
         params["success"] = success
     if error:
@@ -22278,11 +22564,13 @@ async def delete_customer_complaint_record(
 async def add_public_traffic_lead(
         source_port: str = Form(...),
         wechat_id: str = Form(...),
+        intended_store_names: Optional[List[str]] = Form(None),
         store: str = Form("牛王庙店"),
         public_date_filter: str = Form("today"),
         public_start_date: str = Form(""),
         public_end_date: str = Form(""),
         public_source_port: str = Form("all"),
+        public_same_store_rate_store: str = Form(""),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -22291,6 +22579,10 @@ async def add_public_traffic_lead(
 
     source_port = _normalize_text(source_port)
     wechat_id = _normalize_text(wechat_id)
+    intended_store_names = _parse_public_traffic_intended_store_names(
+        intended_store_names,
+        get_active_store_name_list(session)
+    )
 
     if source_port not in PUBLIC_TRAFFIC_SOURCE_PORTS:
         return RedirectResponse(
@@ -22300,6 +22592,7 @@ async def add_public_traffic_lead(
                 public_start_date,
                 public_end_date,
                 public_source_port,
+                public_same_store_rate_store,
                 error="引流端口不合法"
             ),
             status_code=303
@@ -22313,6 +22606,7 @@ async def add_public_traffic_lead(
                 public_start_date,
                 public_end_date,
                 public_source_port,
+                public_same_store_rate_store,
                 error="微信号不能为空"
             ),
             status_code=303
@@ -22332,6 +22626,7 @@ async def add_public_traffic_lead(
                 public_start_date,
                 public_end_date,
                 public_source_port,
+                public_same_store_rate_store,
                 error="该端口，该微信号顾客已登记过，请勿重复登记"
             ),
             status_code=303
@@ -22340,6 +22635,7 @@ async def add_public_traffic_lead(
     session.add(PublicTrafficLead(
         source_port=source_port,
         wechat_id=wechat_id,
+        intended_store_names_json=json.dumps(intended_store_names, ensure_ascii=False) if intended_store_names else None,
         created_at=datetime.now(),
         created_by=user.display_name
     ))
@@ -22352,6 +22648,7 @@ async def add_public_traffic_lead(
             public_start_date,
             public_end_date,
             public_source_port,
+            public_same_store_rate_store,
             success="公域流量顾客登记成功"
         ),
         status_code=303
@@ -22363,11 +22660,13 @@ async def update_public_traffic_lead(
         lead_id: int,
         source_port: str = Form(...),
         wechat_id: str = Form(...),
+        intended_store_names: Optional[List[str]] = Form(None),
         store: str = Form("牛王庙店"),
         public_date_filter: str = Form("today"),
         public_start_date: str = Form(""),
         public_end_date: str = Form(""),
         public_source_port: str = Form("all"),
+        public_same_store_rate_store: str = Form(""),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -22383,6 +22682,7 @@ async def update_public_traffic_lead(
                 public_start_date,
                 public_end_date,
                 public_source_port,
+                public_same_store_rate_store,
                 error="公域流量顾客记录不存在"
             ),
             status_code=303
@@ -22390,6 +22690,10 @@ async def update_public_traffic_lead(
 
     source_port = _normalize_text(source_port)
     wechat_id = _normalize_text(wechat_id)
+    intended_store_names = _parse_public_traffic_intended_store_names(
+        intended_store_names,
+        get_active_store_name_list(session)
+    )
 
     if source_port not in PUBLIC_TRAFFIC_SOURCE_PORTS:
         return RedirectResponse(
@@ -22399,6 +22703,7 @@ async def update_public_traffic_lead(
                 public_start_date,
                 public_end_date,
                 public_source_port,
+                public_same_store_rate_store,
                 error="引流端口不合法"
             ),
             status_code=303
@@ -22412,6 +22717,7 @@ async def update_public_traffic_lead(
                 public_start_date,
                 public_end_date,
                 public_source_port,
+                public_same_store_rate_store,
                 error="微信号不能为空"
             ),
             status_code=303
@@ -22432,6 +22738,7 @@ async def update_public_traffic_lead(
                 public_start_date,
                 public_end_date,
                 public_source_port,
+                public_same_store_rate_store,
                 error="该端口，该微信号顾客已登记过，请勿重复登记"
             ),
             status_code=303
@@ -22439,6 +22746,10 @@ async def update_public_traffic_lead(
 
     lead.source_port = source_port
     lead.wechat_id = wechat_id
+    lead.intended_store_names_json = (
+        json.dumps(intended_store_names, ensure_ascii=False)
+        if intended_store_names else None
+    )
     session.add(lead)
     session.commit()
 
@@ -22449,6 +22760,7 @@ async def update_public_traffic_lead(
             public_start_date,
             public_end_date,
             public_source_port,
+            public_same_store_rate_store,
             success="公域流量顾客修改成功"
         ),
         status_code=303
@@ -22463,6 +22775,7 @@ async def delete_public_traffic_lead(
         public_start_date: str = Form(""),
         public_end_date: str = Form(""),
         public_source_port: str = Form("all"),
+        public_same_store_rate_store: str = Form(""),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -22478,6 +22791,7 @@ async def delete_public_traffic_lead(
                 public_start_date,
                 public_end_date,
                 public_source_port,
+                public_same_store_rate_store,
                 error="公域流量顾客记录不存在"
             ),
             status_code=303
@@ -22493,10 +22807,95 @@ async def delete_public_traffic_lead(
             public_start_date,
             public_end_date,
             public_source_port,
+            public_same_store_rate_store,
             success="公域流量顾客已删除"
         ),
         status_code=303
     )
+
+
+def _sync_contact_followup_to_store_link(
+        session: Session,
+        *,
+        wechat_id: str,
+        nickname: str,
+        store_name: str,
+        in_group_chat: bool,
+        active_store_names: set[str],
+        today: date,
+        now: datetime,
+        operator_name: str,
+) -> Tuple[bool, bool]:
+    """
+    Keep the store customer pool checkbox aligned with "我的接触顾客".
+
+    Returns (created_store_link, synced_store_link). We create missing Customer /
+    CustomerStoreLink rows only when the contact row is checked; unchecking only
+    updates an existing store link.
+    """
+    wechat_id = _normalize_text(wechat_id)
+    store_name = _normalize_text(store_name)
+    nickname = _normalize_text(nickname) or "未知昵称"
+    if not wechat_id or store_name not in active_store_names:
+        return False, False
+
+    customer = _find_customer_by_wechat_case_insensitive(session, wechat_id)
+    link = None
+    if customer:
+        link = session.exec(
+            select(CustomerStoreLink).where(
+                CustomerStoreLink.customer_id == customer.id,
+                CustomerStoreLink.store_name == store_name
+            )
+        ).first()
+
+    if not customer:
+        if not in_group_chat:
+            return False, False
+        customer = Customer(
+            nickname=nickname,
+            wechat_id=wechat_id,
+            gender="未知",
+            guarantee_deposit=0.0,
+            last_visit_date=None,
+            created_at=today
+        )
+        session.add(customer)
+        session.flush()
+    else:
+        if not link and not in_group_chat:
+            return False, False
+
+        customer_changed = False
+        if bool(getattr(customer, "is_deleted", False)) and in_group_chat:
+            customer.is_deleted = False
+            customer.deleted_at = None
+            customer.deleted_by = None
+            customer_changed = True
+        if nickname and (not _normalize_text(customer.nickname) or customer.nickname == "未知昵称"):
+            customer.nickname = nickname
+            customer_changed = True
+        if customer_changed:
+            session.add(customer)
+            session.flush()
+
+    created_store_link = False
+    if not link:
+        if not in_group_chat:
+            return False, False
+        link = CustomerStoreLink(
+            customer_id=customer.id,
+            store_name=store_name,
+            created_at=today,
+            last_visit_at_store=None
+        )
+        created_store_link = True
+
+    link.in_group_chat = in_group_chat
+    link.followup_updated_at = now
+    link.followup_updated_by = operator_name
+    session.add(link)
+    return created_store_link, True
 
 
 @app.post("/contact-customers/followup/save")
@@ -22519,7 +22918,6 @@ async def save_contact_customer_followup(
     contact_row_keys = form.getlist("contact_row_key")
     contact_store_names = form.getlist("contact_store_name")
     contact_nicknames = form.getlist("contact_nickname")
-    contact_is_new_values = form.getlist("contact_is_new")
     now = datetime.now()
     today = date.today()
     active_store_names = set(get_active_store_name_list(session))
@@ -22539,60 +22937,30 @@ async def save_contact_customer_followup(
 
         row_key = contact_row_keys[idx] if idx < len(contact_row_keys) else str(idx)
         in_group_chat = form.get(f"in_group_chat_{row_key}") == "1"
+        remark = _normalize_text(form.get(f"remark_{row_key}"))
 
         followup.in_group_chat = in_group_chat
+        followup.remark = remark or None
         followup.updated_at = now
         followup.updated_by = user.display_name
         session.add(followup)
 
         contact_store_name = _normalize_text(contact_store_names[idx] if idx < len(contact_store_names) else "")
         contact_nickname = _normalize_text(contact_nicknames[idx] if idx < len(contact_nicknames) else "") or "未知昵称"
-        is_new_contact = (contact_is_new_values[idx] if idx < len(contact_is_new_values) else "") == "1"
-
-        if is_new_contact and in_group_chat and contact_store_name in active_store_names:
-            customer = _find_customer_by_wechat_case_insensitive(session, wechat_id)
-            if customer:
-                if bool(getattr(customer, "is_deleted", False)):
-                    customer.is_deleted = False
-                    customer.deleted_at = None
-                    customer.deleted_by = None
-                if contact_nickname and (not _normalize_text(customer.nickname) or customer.nickname == "未知昵称"):
-                    customer.nickname = contact_nickname
-                session.add(customer)
-                session.flush()
-            else:
-                customer = Customer(
-                    nickname=contact_nickname,
-                    wechat_id=wechat_id,
-                    gender="未知",
-                    guarantee_deposit=0.0,
-                    last_visit_date=None,
-                    created_at=today
-                )
-                session.add(customer)
-                session.flush()
-
-            link = session.exec(
-                select(CustomerStoreLink).where(
-                    CustomerStoreLink.customer_id == customer.id,
-                    CustomerStoreLink.store_name == contact_store_name
-                )
-            ).first()
-            if not link:
-                link = CustomerStoreLink(
-                    customer_id=customer.id,
-                    store_name=contact_store_name,
-                    created_at=today,
-                    last_visit_at_store=None
-                )
-                session.add(link)
-                session.flush()
-                added_to_store_count += 1
-
-            link.in_group_chat = in_group_chat
-            link.followup_updated_at = now
-            link.followup_updated_by = user.display_name
-            session.add(link)
+        created_store_link, synced_store_link = _sync_contact_followup_to_store_link(
+            session,
+            wechat_id=wechat_id,
+            nickname=contact_nickname,
+            store_name=contact_store_name,
+            in_group_chat=in_group_chat,
+            active_store_names=active_store_names,
+            today=today,
+            now=now,
+            operator_name=user.display_name,
+        )
+        if created_store_link:
+            added_to_store_count += 1
+        if synced_store_link:
             synced_store_link_count += 1
 
     session.commit()

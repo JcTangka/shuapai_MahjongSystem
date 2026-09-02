@@ -351,8 +351,10 @@
                                 <th>顾客</th>
                                 <th>微信号</th>
                                 <th>综合分</th>
+                                <th>日期+时间</th>
                                 <th>玩法</th>
                                 <th>时间轴</th>
+                                <th>日期类型</th>
                                 <th>投诉</th>
                                 <th>最近到店</th>
                                 <th>推荐原因</th>
@@ -498,6 +500,8 @@
                             <div class="modal-section-title">
                                 <i class="bi bi-people me-1 text-primary"></i>参与人信息
                             </div>
+
+                            <div class="alert alert-danger d-none mb-3 py-2" id="playerConflictNotice"></div>
 
                             <div class="row g-3">
                                 {% for i in range(1, 5) %}
@@ -688,7 +692,7 @@
         setRecommendationState('loading');
 
         try {
-            const resp = await fetch(`/api/games/${encodeURIComponent(activeRecommendationGameId)}/recommendations?limit=30`, {
+            const resp = await fetch(`/api/games/${encodeURIComponent(activeRecommendationGameId)}/recommendations?limit=100`, {
                 signal: activeRecommendationController.signal
             });
             const data = await resp.json();
@@ -710,7 +714,7 @@
         document.getElementById('recommendationGameMeta').innerText =
             `${game.reservation_time || '-'} / ${game.stakes || '-'} / ${game.game_type || '-'} / ${game.smoke_type_label || '-'}`;
         document.getElementById('recommendationSummary').innerText =
-            `共 ${data.total || 0} 位候选，当前显示 ${(data.recommendations || []).length} 位；时间轴 ${game.time_bucket_label || '-'}`;
+            `共 ${data.total || 0} 位候选，当前显示 ${(data.recommendations || []).length} 位；${game.date_type_label || '-'} / 时间轴 ${game.time_bucket_label || '-'}`;
 
         const list = data.recommendations || [];
         if (!list.length) {
@@ -751,8 +755,10 @@
                     </td>
                     <td><code>${escapeHtml(item.wechat_id)}</code></td>
                     <td class="fw-bold">${item.score}</td>
+                    <td class="fw-bold text-primary">${item.date_time_bucket_count || 0}</td>
                     <td>${item.play_count}</td>
                     <td>${item.time_bucket_count}</td>
+                    <td>${item.date_type_count || 0}</td>
                     <td>${complaintText}</td>
                     <td>
                         <div>${escapeHtml(item.last_visit_at_store || '-')}</div>
@@ -1085,6 +1091,7 @@ ${blacklistButton}
         document.querySelectorAll('.player-name-input, .player-wechat-input').forEach(el => {
             el.classList.remove('player-invalid-warning');
         });
+        hidePlayerConflictNotice();
     }
 
     function markInvalidPair(index) {
@@ -1106,18 +1113,20 @@ ${blacklistButton}
             const wechat = (document.getElementById(`player_${i}_wechat`).value || '').trim();
 
             if ((name && !wechat) || (!name && wechat)) {
+                const message = `参与人 ${i} 的昵称和微信号必须同时填写`;
                 markInvalidPair(i);
-                highlightIndices([i]);
-                alert(`参与人 ${i} 的昵称和微信号必须同时填写`);
+                highlightIndices([i], message);
+                alert(message);
                 return false;
             }
 
             if (wechat) {
                 if (wechatNameMap[wechat] && wechatNameMap[wechat] !== name) {
                     const conflictIndices = [wechatFirstIndexMap[wechat], i].filter(Boolean);
+                    const message = `同一局中微信号【${wechat}】对应了不同昵称，无法提交`;
                     conflictIndices.forEach(idx => markInvalidPair(idx));
-                    highlightIndices(conflictIndices);
-                    alert(`同一局中微信号【${wechat}】对应了不同昵称，无法提交`);
+                    highlightIndices(conflictIndices, message);
+                    alert(message);
                     return false;
                 }
                 wechatNameMap[wechat] = name;
@@ -1129,14 +1138,64 @@ ${blacklistButton}
         return true;
     }
 
-    function highlightIndices(indices) {
-        (indices || []).forEach(idx => {
+    function normalizePlayerIndices(indices) {
+        const result = [];
+        const seen = new Set();
+        (indices || []).forEach(rawIdx => {
+            const idx = parseInt(rawIdx, 10);
+            if (idx >= 1 && idx <= 4 && !seen.has(idx)) {
+                seen.add(idx);
+                result.push(idx);
+            }
+        });
+        return result;
+    }
+
+    function showPlayerConflictNotice(message, indices) {
+        const notice = document.getElementById('playerConflictNotice');
+        if (!notice || !message) return;
+
+        const conflictLabel = normalizePlayerIndices(indices).map(idx => `#${idx}`).join('、');
+        notice.textContent = conflictLabel
+            ? `${message}（冲突参与人：${conflictLabel}）`
+            : message;
+        notice.classList.remove('d-none');
+    }
+
+    function hidePlayerConflictNotice() {
+        const notice = document.getElementById('playerConflictNotice');
+        if (!notice) return;
+        notice.textContent = '';
+        notice.classList.add('d-none');
+    }
+
+    function focusFirstHighlightedPlayer(indices) {
+        const firstIdx = normalizePlayerIndices(indices)[0];
+        if (!firstIdx) return;
+
+        const firstInput = document.getElementById(`player_${firstIdx}`);
+        if (!firstInput) return;
+
+        const target = firstInput.closest('.col-md-6') || firstInput;
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        window.setTimeout(() => {
+            firstInput.focus({ preventScroll: true });
+        }, 220);
+    }
+
+    function highlightIndices(indices, message) {
+        const cleanIndices = normalizePlayerIndices(indices);
+        showPlayerConflictNotice(message, cleanIndices);
+        cleanIndices.forEach(idx => {
             const el = document.getElementById(`idx_${idx}`);
             if (el) {
                 el.classList.remove('bg-light', 'text-secondary');
                 el.classList.add('bg-danger', 'text-white');
             }
         });
+        if (message) {
+            focusFirstHighlightedPlayer(cleanIndices);
+        }
     }
 
     function resetIndicesColor() {
@@ -1246,7 +1305,7 @@ ${blacklistButton}
 
             const indices = Array.isArray(data.indices) ? data.indices : [];
             indices.forEach(idx => markInvalidPair(idx));
-            highlightIndices(indices);
+            highlightIndices(indices, data.message || '提交前校验未通过');
 
             alert(data.message || '提交前校验未通过');
             return false;
