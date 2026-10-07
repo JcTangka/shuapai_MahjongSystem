@@ -422,104 +422,6 @@
       </div>
     </div>
 
-    <hr class="my-4">
-
-    <div class="fw-bold fs-5 mb-3">自主到店顾客数据</div>
-    <div class="row g-3 mb-4">
-      <div class="col-lg-3 col-md-6">
-        <div class="metric-card">
-          <div class="metric-title">顾客总数</div>
-          <div class="metric-value">
-            {{ stats.self_arrival_customer.total }}<span class="big-number-unit">人</span>
-          </div>
-          <div class="metric-sub">历史累计自主到店用户</div>
-        </div>
-      </div>
-
-      <div class="col-lg-3 col-md-6">
-        <div class="metric-card">
-          <div class="metric-title">新增顾客数</div>
-          <div class="metric-value">
-            {{ stats.self_arrival_customer.new }}<span class="big-number-unit">人</span>
-          </div>
-          <div class="metric-sub">首次自主到店落在当前区间</div>
-        </div>
-      </div>
-
-      <div class="col-lg-3 col-md-6">
-        <div class="metric-card">
-          <div class="metric-title">复购顾客数</div>
-          <div class="metric-value">
-            {{ stats.self_arrival_customer.repurchase }}<span class="big-number-unit">人</span>
-          </div>
-          <div class="metric-sub">当前区间内自主到店次数 ≥ 2</div>
-        </div>
-      </div>
-
-      <div class="col-lg-3 col-md-6">
-        <div class="metric-card">
-          <div class="metric-title">顾客复购率</div>
-          <div class="metric-value">
-            {{ "%.2f"|format(stats.self_arrival_customer.repurchase_rate) }}<span class="big-number-unit">%</span>
-          </div>
-          <div class="metric-sub">复购顾客 / 当前区间到店顾客</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="row g-3">
-      <div class="col-lg-5">
-        <div class="chart-box">
-          <div class="fw-bold mb-3">自主到店顾客结构</div>
-          <canvas id="selfArrivalCustomerFunnelChart" height="220"></canvas>
-        </div>
-      </div>
-      <div class="col-lg-7">
-        <div class="chart-box">
-          <div class="fw-bold mb-3">自主到店顾客关键指标摘要</div>
-
-          <div class="table-responsive">
-            <table class="table align-middle mb-0">
-              <thead class="table-light">
-                <tr>
-                  <th>指标</th>
-                  <th>数值</th>
-                  <th>说明</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>顾客总数</td>
-                  <td>{{ stats.self_arrival_customer.total }}</td>
-                  <td>历史累计自主到店用户，不按时间区间缩小</td>
-                </tr>
-                <tr>
-                  <td>新增顾客数</td>
-                  <td>{{ stats.self_arrival_customer.new }}</td>
-                  <td>首次自主到店日期落在当前所选时间内的用户数</td>
-                </tr>
-                <tr>
-                  <td>复购顾客数</td>
-                  <td>{{ stats.self_arrival_customer.repurchase }}</td>
-                  <td>当前所选时间内自主到店次数大于等于 2 的用户数</td>
-                </tr>
-                <tr>
-                  <td>当前区间到店顾客数</td>
-                  <td>{{ stats.self_arrival_customer.active }}</td>
-                  <td>当前所选时间内自主到店次数大于等于 1 的用户数，作为复购率分母</td>
-                </tr>
-                <tr>
-                  <td>顾客复购率</td>
-                  <td>{{ "%.2f"|format(stats.self_arrival_customer.repurchase_rate) }}%</td>
-                  <td>复购顾客数 / 当前区间到店顾客数</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-        </div>
-      </div>
-    </div>
   </div>
 
   <!-- 三、订单数据 -->
@@ -582,7 +484,6 @@
   const privateOrderTrend = {{ private_order_trend_json | safe }};
   const selfArrivalOrderTrend = {{ self_arrival_order_trend_json | safe }};
   const customerFunnel = {{ customer_funnel_json | safe }};
-  const selfArrivalCustomerFunnel = {{ self_arrival_customer_funnel_json | safe }};
   const compareMode = "{{ compare_mode }}";
 
   // 维度切换时，品牌隐藏门店下拉
@@ -735,27 +636,6 @@
       datasets: [{
         label: "人数",
         data: customerFunnel
-      }]
-    },
-    options: {
-      responsive: true,
-      indexAxis: "y",
-      scales: {
-        x: {
-          beginAtZero: true
-        }
-      }
-    }
-  });
-
-  // 自主到店顾客结构
-  new Chart(document.getElementById("selfArrivalCustomerFunnelChart"), {
-    type: "bar",
-    data: {
-      labels: ["顾客总数", "新增顾客", "复购顾客"],
-      datasets: [{
-        label: "人数",
-        data: selfArrivalCustomerFunnel
       }]
     },
     options: {

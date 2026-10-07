@@ -39,7 +39,7 @@
 {% endblock %}
 
 {% block breadcrumb %}
-<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 顾客管理 <span class="mx-2">/</span> {% if tab == 'public_traffic' %}公域流量池{% elif tab == 'contact_customers' %}我的接触顾客{% elif tab == 'customer_complaints' %}客户异常行为及投诉记录{% elif tab == 'self_arrival_users' %}自主到店用户{% elif tab == 'self_arrival_pending_users' %}自主到店待添加用户{% elif tab == 'old_to_new' %}老带新{% elif tab == 'my_new_customer_pull' %}我的待拉新{% elif tab == 'team_new_customer_pull' %}团队待拉新{% else %}组局散客{% endif %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 顾客管理 <span class="mx-2">/</span> {% if tab == 'public_traffic' %}公域流量池{% elif tab == 'contact_customers' %}我的接触顾客{% elif tab == 'customer_complaints' %}客户异常行为及投诉记录{% elif tab == 'old_to_new' %}老带新{% elif tab == 'my_new_customer_pull' %}我的待拉新{% else %}组局散客{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -58,16 +58,10 @@
                     按接待店长统计周期内接触过的顾客，并维护标签、群聊和备注跟进状态。
                 {% elif tab == 'customer_complaints' %}
                     记录当前门店客户异常行为和投诉事项，并同步进顾客详情档案。
-                {% elif tab == 'self_arrival_users' %}
-                    汇总已组齐牌局中自主到店登记产生的小程序用户，并补录微信资料。
-                {% elif tab == 'self_arrival_pending_users' %}
-                    跟进未添加微信的自主到店用户，补齐微信后自动转入组局散客池。
                 {% elif tab == 'old_to_new' %}
                     统计周期内当前门店的新客中，尚未登记到公域流量池的顾客数量。
                 {% elif tab == 'my_new_customer_pull' %}
                     个人查看目前耍牌万能替身号占位符，并跟进实际拉新。
-                {% elif tab == 'team_new_customer_pull' %}
-                    团队查看目前耍牌万能替身号占位符，并跟进实际拉新。
                 {% else %}
                     维护各门店组局散客资料、门店绑定和同场记录。
                 {% endif %}
@@ -83,7 +77,7 @@
     <button class="btn btn-primary text-white rounded-pill px-4" data-bs-toggle="modal" data-bs-target="#addCustomerComplaintModal">
         <i class="bi bi-plus-circle me-1"></i>新增投诉记录
     </button>
-    {% elif tab in ['contact_customers', 'self_arrival_users', 'self_arrival_pending_users', 'old_to_new', 'my_new_customer_pull', 'team_new_customer_pull'] %}
+    {% elif tab in ['contact_customers', 'old_to_new', 'my_new_customer_pull'] %}
     {% else %}
     <button class="btn btn-primary text-white rounded-pill px-4" data-bs-toggle="modal" data-bs-target="#addCustomerModal">
         <i class="bi bi-person-plus-fill me-1"></i>新增顾客
@@ -98,7 +92,7 @@
 </div>
 {% endif %}
 
-{% if tab in ['my_new_customer_pull', 'team_new_customer_pull'] %}
+{% if tab == 'my_new_customer_pull' %}
 <div class="card border-0 shadow-sm mb-4">
     <div class="card-body">
         <form method="get" action="/customers" class="row g-3 align-items-end">
@@ -124,7 +118,7 @@
                 <label class="form-label fw-bold text-secondary">结束日期</label>
                 <input type="date" class="form-control" name="pull_end_date" value="{{ pull_end_date or '' }}">
             </div>
-            {% if tab == 'my_new_customer_pull' and current_user.role == 'admin' %}
+            {% if current_user.role == 'admin' %}
             <div class="col-lg-3 col-md-6">
                 <label class="form-label fw-bold text-secondary">拉新店长</label>
                 <select class="form-select" name="pull_employee">
@@ -148,7 +142,6 @@
 </div>
 <form action="/new-customer-pull/save" method="post" id="newCustomerPullForm">
     <input type="hidden" name="store" value="{{ current_store }}">
-    <input type="hidden" name="source_tab" value="{{ tab }}">
     <input type="hidden" name="pull_date_filter" value="{{ pull_date_filter or 'today' }}">
     <input type="hidden" name="pull_start_date" value="{{ pull_start_date or '' }}">
     <input type="hidden" name="pull_end_date" value="{{ pull_end_date or '' }}">
@@ -159,7 +152,7 @@
     <div class="card border-0 shadow-sm"><div class="card-body p-0">
         <table class="table table-hover align-middle mb-0 text-center">
             <thead class="table-light"><tr>
-                <th>序号</th><th>拉新店长</th><th>门店</th><th>来源牌局</th><th style="min-width: 140px;">用户昵称</th><th style="min-width: 160px;">用户微信号</th><th style="min-width: 180px;">备注</th><th>门店私域群聊邀请</th><th>是否拉新成功</th>{% if tab == 'my_new_customer_pull' %}<th>是否转入团队待拉新</th>{% endif %}
+                <th>序号</th><th>拉新店长</th><th>门店</th><th>来源牌局</th><th style="min-width: 140px;">用户昵称</th><th style="min-width: 160px;">用户微信号</th><th style="min-width: 180px;">备注</th><th>门店私域群聊邀请</th><th>是否拉新成功</th><th>当前班次时间未通过好友申请</th>
             </tr></thead>
             <tbody>
             {% for item in pull_record_list %}
@@ -170,15 +163,29 @@
                     <td class="small text-muted">{{ item.source_label }}</td>
                     <td><input type="hidden" name="record_id" value="{{ item.id }}"><input type="text" class="form-control form-control-sm pull-status-text" name="customer_nickname_{{ item.id }}" value="{{ item.customer_nickname }}" data-row-id="{{ item.id }}"></td>
                     <td><input type="text" class="form-control form-control-sm pull-status-text" name="customer_wechat_id_{{ item.id }}" value="{{ item.customer_wechat_id }}" data-row-id="{{ item.id }}"></td>
-                    <td><textarea class="form-control form-control-sm" name="remark_{{ item.id }}" rows="1" placeholder="备注顾客情况">{{ item.remark }}</textarea></td>
+                    <td style="min-width: 180px;">
+                        {% set is_custom_remark = item.remark and item.remark != '隐私设置' %}
+                        <select class="form-select form-select-sm pull-remark-choice"
+                                name="remark_choice_{{ item.id }}"
+                                data-row-id="{{ item.id }}">
+                            <option value="" {% if not item.remark %}selected{% endif %}>请选择</option>
+                            <option value="privacy_settings" {% if item.remark == '隐私设置' %}selected{% endif %}>隐私设置</option>
+                            <option value="custom" {% if is_custom_remark %}selected{% endif %}>自定义备注</option>
+                        </select>
+                        <textarea class="form-control form-control-sm mt-2 pull-custom-remark {% if not is_custom_remark %}d-none{% endif %}"
+                                  name="remark_{{ item.id }}"
+                                  data-row-id="{{ item.id }}"
+                                  rows="1"
+                                  placeholder="填写自定义备注"
+                                  {% if is_custom_remark %}required{% endif %}
+                                  {% if not is_custom_remark %}disabled{% endif %}>{{ item.remark if is_custom_remark else '' }}</textarea>
+                    </td>
                     <td><input class="form-check-input pull-status-checkbox" type="checkbox" name="in_group_chat_{{ item.id }}" value="1" data-row-id="{{ item.id }}" {% if item.in_group_chat %}checked{% endif %}></td>
                     <td><span class="badge pull-status-badge {% if item.status_text == '成功' %}bg-success{% else %}bg-warning text-dark{% endif %}" data-row-id="{{ item.id }}">{{ item.status_text }}</span></td>
-                    {% if tab == 'my_new_customer_pull' %}
-                    <td><button type="submit" class="btn btn-sm btn-outline-primary" formaction="/new-customer-pull/transfer/{{ item.id }}">转入团队</button></td>
-                    {% endif %}
+                    <td><input class="form-check-input" type="checkbox" name="friend_request_not_approved_current_shift_{{ item.id }}" value="1" {% if item.friend_request_not_approved_current_shift %}checked{% endif %}></td>
                 </tr>
             {% else %}
-                <tr><td colspan="{% if tab == 'my_new_customer_pull' %}10{% else %}9{% endif %}" class="text-muted py-5"><i class="bi bi-person-plus fs-1 d-block mb-3"></i>当前时间范围暂无待拉新记录。</td></tr>
+                <tr><td colspan="10" class="text-muted py-5"><i class="bi bi-person-plus fs-1 d-block mb-3"></i>当前时间范围暂无待拉新记录。</td></tr>
             {% endfor %}
             </tbody>
         </table>
@@ -825,306 +832,6 @@
         <span id="oldToNewLoadText">已显示 {{ old_to_new_loaded_count or 0 }} / {{ old_to_new_customer_count or 0 }} 条，滚动到底部继续加载</span>
     {% elif old_to_new_customer_count %}
         已显示全部 {{ old_to_new_customer_count or 0 }} 条
-    {% endif %}
-</div>
-
-{% elif tab == 'self_arrival_users' %}
-<div class="card border-0 shadow-sm mb-4">
-    <div class="card-body">
-        <form method="get" action="/customers" class="row g-3 align-items-end">
-            <input type="hidden" name="tab" value="self_arrival_users">
-
-            <div class="col-lg-3 col-md-6">
-                <label class="form-label fw-bold text-secondary">当前门店</label>
-                <select class="form-select" name="store">
-                    {% for store_name in store_list %}
-                    <option value="{{ store_name }}" {% if store_name == current_store %}selected{% endif %}>{{ store_name }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-
-            <div class="col-lg-3 col-md-6">
-                <label class="form-label fw-bold text-secondary">时间范围</label>
-                <select class="form-select" name="self_arrival_date_filter" id="selfArrivalDateFilter" onchange="toggleSelfArrivalCustomDateRange()">
-                    <option value="today" {% if self_arrival_date_filter == 'today' %}selected{% endif %}>今天</option>
-                    <option value="yesterday" {% if self_arrival_date_filter == 'yesterday' %}selected{% endif %}>昨天</option>
-                    <option value="this_week" {% if self_arrival_date_filter == 'this_week' %}selected{% endif %}>本周</option>
-                    <option value="this_month" {% if self_arrival_date_filter == 'this_month' %}selected{% endif %}>本月</option>
-                    <option value="last_month" {% if self_arrival_date_filter == 'last_month' %}selected{% endif %}>上月</option>
-                    <option value="custom" {% if self_arrival_date_filter == 'custom' %}selected{% endif %}>自定义</option>
-                </select>
-            </div>
-
-            <div class="col-lg-3 col-md-6 self-arrival-custom-date d-none">
-                <label class="form-label fw-bold text-secondary">开始日期</label>
-                <input type="date" class="form-control" name="self_arrival_start_date" value="{{ self_arrival_start_date or '' }}">
-            </div>
-
-            <div class="col-lg-3 col-md-6 self-arrival-custom-date d-none">
-                <label class="form-label fw-bold text-secondary">结束日期</label>
-                <input type="date" class="form-control" name="self_arrival_end_date" value="{{ self_arrival_end_date or '' }}">
-            </div>
-
-            <div class="col-lg-3 col-md-6">
-                <button type="submit" class="btn btn-primary rounded-pill px-4 me-2">
-                    <i class="bi bi-search me-1"></i>查询
-                </button>
-                <a href="/customers?store={{ current_store }}&tab=self_arrival_users" class="btn btn-outline-secondary rounded-pill px-4">
-                    <i class="bi bi-arrow-clockwise me-1"></i>重置
-                </a>
-            </div>
-        </form>
-    </div>
-</div>
-
-<div class="row g-3 mb-4">
-    <div class="col-md-4">
-        <div class="card border-0 shadow-sm h-100">
-            <div class="card-body">
-                <div class="text-secondary small mb-1">自主到店用户统计</div>
-                <div class="h3 fw-bold mb-0">{{ self_arrival_user_count or 0 }}</div>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-4">
-        <div class="card border-0 shadow-sm h-100">
-            <div class="card-body">
-                <div class="text-secondary small mb-1">已添加微信</div>
-                <div class="h3 fw-bold text-success mb-0">{{ self_arrival_added_count or 0 }}</div>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-4">
-        <div class="card border-0 shadow-sm h-100">
-            <div class="card-body">
-                <div class="text-secondary small mb-1">未添加微信</div>
-                <div class="h3 fw-bold text-warning mb-0">{{ self_arrival_pending_count or 0 }}</div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<form action="/self-arrival-users/save" method="post" id="selfArrivalUsersForm">
-    <input type="hidden" name="store" value="{{ current_store }}">
-    <input type="hidden" name="source_tab" value="self_arrival_users">
-    <input type="hidden" name="self_arrival_date_filter" value="{{ self_arrival_date_filter or 'today' }}">
-    <input type="hidden" name="self_arrival_start_date" value="{{ self_arrival_start_date or '' }}">
-    <input type="hidden" name="self_arrival_end_date" value="{{ self_arrival_end_date or '' }}">
-
-    {% if self_arrival_user_list %}
-    <div class="text-end mb-3">
-        <button type="submit" class="btn btn-primary rounded-pill px-4">
-            <i class="bi bi-save me-1"></i>批量保存
-        </button>
-    </div>
-    {% endif %}
-
-    <div class="card border-0 shadow-sm">
-        <div class="card-body p-0">
-            <table class="table table-hover align-middle mb-0 text-center">
-                <thead class="table-light">
-                    <tr>
-                        <th>序号</th>
-                        <th>小程序昵称、电话</th>
-                        <th style="min-width: 140px;">微信昵称</th>
-                        <th style="min-width: 160px;">微信号</th>
-                        <th>最后到店时间</th>
-                        <th>本门店次数</th>
-                        <th>添加微信状态</th>
-                        <th>接待店长</th>
-                    </tr>
-                </thead>
-                <tbody id="selfArrivalUserTbody">
-                    {% for item in self_arrival_user_list %}
-                    <tr id="self-arrival-user-row-{{ item.id }}">
-                        <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
-                        <td>
-                            <div class="fw-bold">{{ item.app_nickname or '-' }}</div>
-                            <div class="small text-muted">{{ item.phone or '-' }}</div>
-                        </td>
-                        <td>
-                            <input type="hidden" name="self_arrival_user_id" value="{{ item.id }}">
-                            <input type="text" class="form-control form-control-sm self-arrival-wechat-input"
-                                   name="wechat_nickname_{{ item.id }}"
-                                   value="{{ item.wechat_nickname }}"
-                                   data-row-id="{{ item.id }}">
-                        </td>
-                        <td>
-                            <input type="text" class="form-control form-control-sm self-arrival-wechat-input"
-                                   name="wechat_id_{{ item.id }}"
-                                   value="{{ item.wechat_id }}"
-                                   data-row-id="{{ item.id }}">
-                        </td>
-                        <td>{{ item.last_arrival_at or '-' }}</td>
-                        <td class="fw-bold">{{ item.store_visit_count or 0 }}</td>
-                        <td>
-                            <span class="badge self-arrival-wechat-badge {% if item.has_wechat %}bg-success{% else %}bg-warning text-dark{% endif %}"
-                                  data-row-id="{{ item.id }}">
-                                {% if item.has_wechat %}已添加微信{% else %}未添加微信{% endif %}
-                            </span>
-                        </td>
-                        <td>{{ item.receptionist or '-' }}</td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="8" class="text-muted py-5">
-                            <i class="bi bi-phone-vibrate fs-1 d-block mb-3"></i>
-                            当前门店、当前时间范围暂无自主到店用户。
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-</form>
-
-<div id="selfArrivalUserInfiniteLoader"
-     class="text-center text-muted py-3"
-     data-loaded="{{ self_arrival_loaded_count or 0 }}"
-     data-total="{{ self_arrival_user_count or 0 }}"
-     data-page-size="{{ list_page_size or 40 }}"
-     data-has-more="{{ 'true' if self_arrival_has_more else 'false' }}">
-    {% if self_arrival_has_more %}
-        <span class="spinner-border spinner-border-sm me-2 d-none" id="selfArrivalUserLoadSpinner"></span>
-        <span id="selfArrivalUserLoadText">已显示 {{ self_arrival_loaded_count or 0 }} / {{ self_arrival_user_count or 0 }} 条，滚动到底部继续加载</span>
-    {% elif self_arrival_user_count %}
-        已显示全部 {{ self_arrival_user_count or 0 }} 条
-    {% endif %}
-</div>
-
-{% elif tab == 'self_arrival_pending_users' %}
-<div class="card border-0 shadow-sm mb-4">
-    <div class="card-body">
-        <form method="get" action="/customers" class="row g-3 align-items-end">
-            <input type="hidden" name="tab" value="self_arrival_pending_users">
-
-            <div class="col-lg-3 col-md-6">
-                <label class="form-label fw-bold text-secondary">当前门店</label>
-                <select class="form-select" name="store">
-                    {% for store_name in store_list %}
-                    <option value="{{ store_name }}" {% if store_name == current_store %}selected{% endif %}>{{ store_name }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-
-            {% if current_user.role == 'admin' %}
-            <div class="col-lg-3 col-md-6">
-                <label class="form-label fw-bold text-secondary">店长筛选</label>
-                <select class="form-select" name="self_arrival_pending_employee">
-                    <option value="all" {% if self_arrival_pending_employee == 'all' %}selected{% endif %}>全部店长</option>
-                    {% for employee_name in employee_names %}
-                    <option value="{{ employee_name }}" {% if self_arrival_pending_employee == employee_name %}selected{% endif %}>{{ employee_name }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            {% endif %}
-
-            <div class="col-lg-3 col-md-6">
-                <button type="submit" class="btn btn-primary rounded-pill px-4 me-2">
-                    <i class="bi bi-search me-1"></i>查询
-                </button>
-                <a href="/customers?store={{ current_store }}&tab=self_arrival_pending_users" class="btn btn-outline-secondary rounded-pill px-4">
-                    <i class="bi bi-arrow-clockwise me-1"></i>重置
-                </a>
-            </div>
-        </form>
-    </div>
-</div>
-
-<div class="row g-3 mb-4">
-    <div class="col-md-12">
-        <div class="card border-0 shadow-sm h-100">
-            <div class="card-body">
-                <div class="text-secondary small mb-1">待添加用户</div>
-                <div class="h3 fw-bold text-warning mb-0">{{ self_arrival_pending_count or 0 }}</div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<form action="/self-arrival-users/save" method="post" id="selfArrivalUsersForm">
-    <input type="hidden" name="store" value="{{ current_store }}">
-    <input type="hidden" name="source_tab" value="self_arrival_pending_users">
-    <input type="hidden" name="self_arrival_pending_employee" value="{{ self_arrival_pending_employee or 'all' }}">
-
-    {% if self_arrival_pending_user_list %}
-    <div class="text-end mb-3">
-        <button type="submit" class="btn btn-primary rounded-pill px-4">
-            <i class="bi bi-save me-1"></i>批量保存
-        </button>
-    </div>
-    {% endif %}
-
-    <div class="card border-0 shadow-sm">
-        <div class="card-body p-0">
-            <table class="table table-hover align-middle mb-0 text-center">
-                <thead class="table-light">
-                    <tr>
-                        <th>序号</th>
-                        <th>小程序昵称、电话</th>
-                        <th style="min-width: 140px;">微信昵称</th>
-                        <th style="min-width: 160px;">微信号</th>
-                        <th>最后到店时间</th>
-                        <th>本门店次数</th>
-                        <th>添加微信状态</th>
-                        <th>首次接待店长</th>
-                    </tr>
-                </thead>
-                <tbody id="selfArrivalUserTbody">
-                    {% for item in self_arrival_pending_user_list %}
-                    <tr id="self-arrival-user-row-{{ item.id }}">
-                        <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
-                        <td>
-                            <div class="fw-bold">{{ item.app_nickname or '-' }}</div>
-                            <div class="small text-muted">{{ item.phone or '-' }}</div>
-                        </td>
-                        <td>
-                            <input type="hidden" name="self_arrival_user_id" value="{{ item.id }}">
-                            <input type="text" class="form-control form-control-sm self-arrival-wechat-input"
-                                   name="wechat_nickname_{{ item.id }}"
-                                   value="{{ item.wechat_nickname }}"
-                                   data-row-id="{{ item.id }}">
-                        </td>
-                        <td>
-                            <input type="text" class="form-control form-control-sm self-arrival-wechat-input"
-                                   name="wechat_id_{{ item.id }}"
-                                   value="{{ item.wechat_id }}"
-                                   data-row-id="{{ item.id }}">
-                        </td>
-                        <td>{{ item.last_arrival_at or '-' }}</td>
-                        <td class="fw-bold">{{ item.store_visit_count or 0 }}</td>
-                        <td>
-                            <span class="badge self-arrival-wechat-badge bg-warning text-dark"
-                                  data-row-id="{{ item.id }}">未添加微信</span>
-                        </td>
-                        <td>{{ item.first_receptionist or '-' }}</td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="8" class="text-muted py-5">
-                            <i class="bi bi-person-plus-fill fs-1 d-block mb-3"></i>
-                            当前没有需要添加微信的自主到店用户。
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-</form>
-
-<div id="selfArrivalUserInfiniteLoader"
-     class="text-center text-muted py-3"
-     data-loaded="{{ self_arrival_pending_loaded_count or 0 }}"
-     data-total="{{ self_arrival_pending_count or 0 }}"
-     data-page-size="{{ list_page_size or 40 }}"
-     data-has-more="{{ 'true' if self_arrival_pending_has_more else 'false' }}">
-    {% if self_arrival_pending_has_more %}
-        <span class="spinner-border spinner-border-sm me-2 d-none" id="selfArrivalUserLoadSpinner"></span>
-        <span id="selfArrivalUserLoadText">已显示 {{ self_arrival_pending_loaded_count or 0 }} / {{ self_arrival_pending_count or 0 }} 条，滚动到底部继续加载</span>
-    {% elif self_arrival_pending_count %}
-        已显示全部 {{ self_arrival_pending_count or 0 }} 条
     {% endif %}
 </div>
 
@@ -2577,14 +2284,6 @@
         });
     }
 
-    function toggleSelfArrivalCustomDateRange() {
-        const select = document.getElementById('selfArrivalDateFilter');
-        const isCustom = select && select.value === 'custom';
-        document.querySelectorAll('.self-arrival-custom-date').forEach(el => {
-            el.classList.toggle('d-none', !isCustom);
-        });
-    }
-
     async function loadMorePublicTrafficLeads() {
         const loader = document.getElementById('publicTrafficInfiniteLoader');
         const tbody = document.getElementById('publicTrafficLeadTbody');
@@ -2634,106 +2333,6 @@
             if (entries.some(entry => entry.isIntersecting)) loadMorePublicTrafficLeads();
         }, { rootMargin: '240px 0px', threshold: 0.01 });
         publicTrafficInfiniteObserver.observe(loader);
-    }
-
-    function updateSelfArrivalWechatBadge(rowId) {
-        const nicknameInput = document.querySelector(`input[name="wechat_nickname_${CSS.escape(String(rowId))}"]`);
-        const wechatInput = document.querySelector(`input[name="wechat_id_${CSS.escape(String(rowId))}"]`);
-        const badge = document.querySelector(`.self-arrival-wechat-badge[data-row-id="${CSS.escape(String(rowId))}"]`);
-        if (!badge) return;
-
-        const hasWechat = !!((nicknameInput?.value || '').trim() && (wechatInput?.value || '').trim());
-        badge.textContent = hasWechat ? '已添加微信' : '未添加微信';
-        badge.classList.toggle('bg-success', hasWechat);
-        badge.classList.toggle('bg-warning', !hasWechat);
-        badge.classList.toggle('text-dark', !hasWechat);
-    }
-
-    function setupSelfArrivalWechatStatusSync() {
-        document.querySelectorAll('.self-arrival-wechat-input').forEach(input => {
-            if (input.dataset.syncBound === '1') return;
-            input.dataset.syncBound = '1';
-            input.addEventListener('input', function() {
-                updateSelfArrivalWechatBadge(this.dataset.rowId || '');
-            });
-            updateSelfArrivalWechatBadge(input.dataset.rowId || '');
-        });
-    }
-
-    function setupSelfArrivalUsersFormGuard() {
-        const form = document.getElementById('selfArrivalUsersForm');
-        if (!form || form.dataset.guardBound === '1') return;
-        form.dataset.guardBound = '1';
-        form.addEventListener('submit', function(event) {
-            let hasPartial = false;
-            document.querySelectorAll('input[name="self_arrival_user_id"]').forEach(hidden => {
-                const rowId = hidden.value || '';
-                const nickname = (document.querySelector(`input[name="wechat_nickname_${CSS.escape(rowId)}"]`)?.value || '').trim();
-                const wechat = (document.querySelector(`input[name="wechat_id_${CSS.escape(rowId)}"]`)?.value || '').trim();
-                if (!!nickname !== !!wechat) {
-                    hasPartial = true;
-                }
-            });
-            if (hasPartial) {
-                event.preventDefault();
-                alert('微信昵称和微信号必须同时填写，或同时留空');
-            }
-        });
-    }
-
-    let selfArrivalUserInfiniteObserver = null;
-    let selfArrivalUserLoadingMore = false;
-
-    async function loadMoreSelfArrivalUsers() {
-        const loader = document.getElementById('selfArrivalUserInfiniteLoader');
-        const tbody = document.getElementById('selfArrivalUserTbody');
-        if (!loader || !tbody || selfArrivalUserLoadingMore || loader.dataset.hasMore !== 'true') return;
-
-        selfArrivalUserLoadingMore = true;
-        const spinner = document.getElementById('selfArrivalUserLoadSpinner');
-        const text = document.getElementById('selfArrivalUserLoadText');
-        if (spinner) spinner.classList.remove('d-none');
-        if (text) text.textContent = '正在加载更多...';
-
-        const loaded = parseInt(loader.dataset.loaded || '0', 10) || 0;
-        const pageSize = parseInt(loader.dataset.pageSize || '40', 10) || 40;
-        const url = new URL(window.location.href);
-        url.searchParams.set('list_offset', String(loaded));
-        url.searchParams.set('list_limit', String(pageSize));
-
-        try {
-            const resp = await fetch(url.toString(), { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            if (!resp.ok) throw new Error('加载失败');
-            const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
-            doc.querySelectorAll('tr[id^="self-arrival-user-row-"]').forEach(row => {
-                if (!document.getElementById(row.id)) tbody.appendChild(document.importNode(row, true));
-            });
-            const newLoader = doc.getElementById('selfArrivalUserInfiniteLoader');
-            if (newLoader) {
-                loader.dataset.loaded = newLoader.dataset.loaded || loader.dataset.loaded;
-                loader.dataset.total = newLoader.dataset.total || loader.dataset.total;
-                loader.dataset.hasMore = newLoader.dataset.hasMore || 'false';
-                loader.innerHTML = newLoader.innerHTML;
-            }
-            setupSelfArrivalWechatStatusSync();
-        } catch (err) {
-            console.error(err);
-            loader.innerHTML = '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadMoreSelfArrivalUsers()">加载失败，点击重试</button>';
-            loader.dataset.hasMore = 'true';
-        } finally {
-            selfArrivalUserLoadingMore = false;
-            setupSelfArrivalUserInfiniteScroll();
-        }
-    }
-
-    function setupSelfArrivalUserInfiniteScroll() {
-        const loader = document.getElementById('selfArrivalUserInfiniteLoader');
-        if (selfArrivalUserInfiniteObserver) selfArrivalUserInfiniteObserver.disconnect();
-        if (!loader || loader.dataset.hasMore !== 'true') return;
-        selfArrivalUserInfiniteObserver = new IntersectionObserver(entries => {
-            if (entries.some(entry => entry.isIntersecting)) loadMoreSelfArrivalUsers();
-        }, { rootMargin: '240px 0px', threshold: 0.01 });
-        selfArrivalUserInfiniteObserver.observe(loader);
     }
 
     function setupContactFollowupSync() {
@@ -2892,14 +2491,32 @@
         });
     }
 
+    function togglePullCustomRemark(select) {
+        const rowId = select.dataset.rowId || '';
+        const textarea = document.querySelector(`.pull-custom-remark[data-row-id="${CSS.escape(rowId)}"]`);
+        if (!textarea) return;
+        const isCustom = select.value === 'custom';
+        textarea.classList.toggle('d-none', !isCustom);
+        textarea.disabled = !isCustom;
+        textarea.required = isCustom;
+    }
+
+    function setupPullRemarkChoices() {
+        document.querySelectorAll('.pull-remark-choice').forEach(select => {
+            if (select.dataset.remarkBound === '1') return;
+            select.dataset.remarkBound = '1';
+            select.addEventListener('change', function() {
+                togglePullCustomRemark(this);
+            });
+            togglePullCustomRemark(select);
+        });
+    }
+
     function setupPullDuplicateGuard() {
         const form = document.getElementById('newCustomerPullForm');
         if (!form || form.dataset.duplicateGuardBound === '1') return;
         form.dataset.duplicateGuardBound = '1';
         form.addEventListener('submit', function(event) {
-            const submitter = event.submitter;
-            if (submitter && (submitter.getAttribute('formaction') || '').includes('/transfer/')) return;
-
             const seen = new Set();
             let hasDuplicate = false;
             document.querySelectorAll('tr[id^="pull-record-row-"]').forEach(row => {
@@ -2956,6 +2573,7 @@
                 loader.innerHTML = newLoader.innerHTML;
             }
             setupPullStatusSync();
+            setupPullRemarkChoices();
         } catch (err) {
             console.error(err);
             loader.innerHTML = '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadMorePullRecords()">加载失败，点击重试</button>';
@@ -2982,16 +2600,13 @@
         toggleContactCustomDateRange();
         toggleOldToNewCustomDateRange();
         togglePullCustomDateRange();
-        toggleSelfArrivalCustomDateRange();
         setupPublicTrafficInfiniteScroll();
         setupCustomerComplaintInfiniteScroll();
-        setupSelfArrivalWechatStatusSync();
-        setupSelfArrivalUsersFormGuard();
-        setupSelfArrivalUserInfiniteScroll();
         setupContactFollowupSync();
         setupContactCustomerInfiniteScroll();
         setupOldToNewInfiniteScroll();
         setupPullStatusSync();
+        setupPullRemarkChoices();
         setupPullDuplicateGuard();
         setupPullRecordInfiniteScroll();
     });

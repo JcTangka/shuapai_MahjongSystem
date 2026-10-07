@@ -419,7 +419,7 @@ class NewCustomerPullRecord(SQLModel, table=True):
     in_group_chat: bool = Field(default=False, index=True)
     remark_updated: bool = Field(default=False, index=True)
     remark: Optional[str] = None
-    transferred_to_team: bool = Field(default=False, index=True)
+    friend_request_not_approved_current_shift: bool = Field(default=False, index=True)
 
     created_at: datetime = Field(default_factory=datetime.now, index=True)
     updated_at: datetime = Field(default_factory=datetime.now, index=True)
@@ -1880,7 +1880,7 @@ def migrate_new_customer_pull_record_table():
                 in_group_chat BOOLEAN NOT NULL DEFAULT 0,
                 remark_updated BOOLEAN NOT NULL DEFAULT 0,
                 remark TEXT,
-                transferred_to_team BOOLEAN NOT NULL DEFAULT 0,
+                friend_request_not_approved_current_shift BOOLEAN NOT NULL DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_by TEXT,
@@ -1891,6 +1891,17 @@ def migrate_new_customer_pull_record_table():
         column_names = {col[1] for col in columns}
         if "remark" not in column_names:
             conn.execute(text("ALTER TABLE newcustomerpullrecord ADD COLUMN remark TEXT"))
+        if "friend_request_not_approved_current_shift" not in column_names:
+            conn.execute(text("""
+                ALTER TABLE newcustomerpullrecord
+                ADD COLUMN friend_request_not_approved_current_shift BOOLEAN NOT NULL DEFAULT 0
+            """))
+        if "transferred_to_team" in column_names:
+            conn.execute(text("""
+                UPDATE newcustomerpullrecord
+                SET transferred_to_team = 0
+                WHERE transferred_to_team = 1
+            """))
         conn.execute(text("""
             CREATE UNIQUE INDEX IF NOT EXISTS ix_newcustomerpullrecord_source_slot
             ON newcustomerpullrecord (source_game_id, source_player_index)
@@ -1904,7 +1915,7 @@ def migrate_new_customer_pull_record_table():
             "has_tag",
             "in_group_chat",
             "remark_updated",
-            "transferred_to_team",
+            "friend_request_not_approved_current_shift",
         ]:
             conn.execute(text(f"""
                 CREATE INDEX IF NOT EXISTS ix_newcustomerpullrecord_{col_name}

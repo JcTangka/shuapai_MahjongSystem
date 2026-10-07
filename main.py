@@ -5493,7 +5493,7 @@ def _sync_new_customer_pull_records_for_game(session: Session, game: GameRecord)
             session.add(row)
 
     for row in existing_rows:
-        if row.source_player_index not in active_slots and not row.transferred_to_team:
+        if row.source_player_index not in active_slots:
             session.delete(row)
 
 
@@ -7080,16 +7080,6 @@ def get_brand_store_dashboard_stats(
         g for g in formed_games
         if start_date <= _game_effective_order_dt(g).date() <= end_date
     ]
-    self_arrival_games = [
-        g for g in formed_games
-        if _normalize_text(g.record_source) == FORMED_SOURCE_SELF_ARRIVAL
-    ]
-    self_arrival_customer_stats = _calculate_self_arrival_customer_dashboard_stats(
-        self_arrival_games,
-        start_date,
-        end_date
-    )
-
     # 正常营收单：排除 overflow
     normal_period_games = [
         g for g in period_games
@@ -7281,8 +7271,6 @@ def get_brand_store_dashboard_stats(
             "repurchase_rate": repurchase_rate,
         },
 
-        "self_arrival_customer": self_arrival_customer_stats,
-
         "order": {
             "count": order_count,
             "private": private_order_count,
@@ -7318,11 +7306,6 @@ def get_brand_store_dashboard_stats(
                 converted_new_customer_count,
                 repurchase_customer_count
             ],
-            "self_arrival_customer_funnel": [
-                self_arrival_customer_stats["total"],
-                self_arrival_customer_stats["new"],
-                self_arrival_customer_stats["repurchase"]
-            ]
         }
     }
 
@@ -20613,55 +20596,6 @@ def _customer_complaint_payload(record: CustomerComplaintRecord) -> dict:
     }
 
 
-def _calculate_self_arrival_customer_dashboard_stats(
-        games: List[GameRecord],
-        start_date: date,
-        end_date: date
-) -> dict:
-    grouped: Dict[str, List[GameRecord]] = {}
-    for game in games:
-        key = _self_arrival_user_identity_key(
-            game.self_arrival_app_nickname,
-            game.self_arrival_phone,
-            game.player_1,
-            game.player_1_wechat,
-        )
-        if not key:
-            continue
-        grouped.setdefault(key, []).append(game)
-
-    total_count = len(grouped)
-    new_count = 0
-    active_count = 0
-    repurchase_count = 0
-
-    for key_games in grouped.values():
-        key_games.sort(key=_self_arrival_game_order_dt)
-        first_dt = _self_arrival_game_order_dt(key_games[0])
-        if start_date <= first_dt.date() <= end_date:
-            new_count += 1
-
-        period_count = sum(
-            1
-            for game in key_games
-            if start_date <= _self_arrival_game_order_dt(game).date() <= end_date
-        )
-        if period_count >= 1:
-            active_count += 1
-        if period_count >= 2:
-            repurchase_count += 1
-
-    repurchase_rate = round((repurchase_count / active_count * 100) if active_count else 0, 2)
-
-    return {
-        "total": total_count,
-        "new": new_count,
-        "active": active_count,
-        "repurchase": repurchase_count,
-        "repurchase_rate": repurchase_rate,
-    }
-
-
 @app.get("/customers")
 async def read_customers(
         request: Request,
@@ -20680,10 +20614,6 @@ async def read_customers(
         contact_end_date: str = "",
         contact_store_filter: str = "all",
         contact_employee: str = "all",
-        self_arrival_date_filter: str = "today",
-        self_arrival_start_date: str = "",
-        self_arrival_end_date: str = "",
-        self_arrival_pending_employee: str = "all",
         old_to_new_date_filter: str = "today",
         old_to_new_start_date: str = "",
         old_to_new_end_date: str = "",
@@ -20715,12 +20645,9 @@ async def read_customers(
         "store_customers",
         "public_traffic",
         "contact_customers",
-        "self_arrival_users",
-        "self_arrival_pending_users",
         "old_to_new",
         "customer_complaints",
         "my_new_customer_pull",
-        "team_new_customer_pull",
     } else "store_customers"
     sort_by = sort_by if sort_by in {"default", "last_visit_desc", "store_visit_count_desc"} else "default"
     list_offset = max(0, int(list_offset or 0))
@@ -20857,130 +20784,6 @@ async def read_customers(
             "complaint_loaded_count": list_offset + len(complaint_list),
             "complaint_has_more": (list_offset + len(complaint_list)) < len(complaint_records),
             "today_date": date.today().strftime("%Y-%m-%d"),
-            "list_offset": list_offset,
-            "list_page_size": LIST_PAGE_SIZE,
-        })
-
-    if tab == "self_arrival_users":
-        self_arrival_date_filter = self_arrival_date_filter if self_arrival_date_filter in {
-            "today", "yesterday", "this_week", "this_month", "last_month", "custom"
-        } else "today"
-        range_start, range_end = _parse_contact_customer_date_range(
-            self_arrival_date_filter,
-            self_arrival_start_date,
-            self_arrival_end_date
-        )
-        start_dt = datetime.combine(range_start, time.min)
-        end_dt_exclusive = datetime.combine(range_end + timedelta(days=1), time.min)
-
-        _sync_self_arrival_customers_for_store(session, store)
-        session.commit()
-
-        stmt = (
-            select(SelfArrivalCustomer)
-            .where(
-                SelfArrivalCustomer.store_name == store,
-                SelfArrivalCustomer.last_arrival_at >= start_dt,
-                SelfArrivalCustomer.last_arrival_at < end_dt_exclusive,
-            )
-            .order_by(SelfArrivalCustomer.last_arrival_at.desc(), SelfArrivalCustomer.id.desc())
-        )
-        rows = session.exec(stmt).all()
-
-        total_count = len(rows)
-        added_count = len([
-            row for row in rows
-            if _normalize_text(row.wechat_nickname) and _normalize_text(row.wechat_id)
-        ])
-        pending_count = total_count - added_count
-
-        page_rows = rows[list_offset:list_offset + list_limit]
-        self_arrival_user_list = []
-        for row in page_rows:
-            has_wechat = bool(_normalize_text(row.wechat_nickname) and _normalize_text(row.wechat_id))
-            self_arrival_user_list.append({
-                "id": row.id,
-                "app_nickname": row.app_nickname or "",
-                "phone": row.phone or "",
-                "wechat_nickname": row.wechat_nickname or "",
-                "wechat_id": row.wechat_id or "",
-                "last_arrival_at": row.last_arrival_at.strftime("%Y-%m-%d %H:%M") if row.last_arrival_at else "",
-                "store_visit_count": row.store_visit_count or 0,
-                "receptionist": row.receptionist or "",
-                "has_wechat": has_wechat,
-            })
-
-        return templates.TemplateResponse("customers.html", {
-            **common_context,
-            "self_arrival_date_filter": self_arrival_date_filter,
-            "self_arrival_start_date": range_start.strftime("%Y-%m-%d"),
-            "self_arrival_end_date": range_end.strftime("%Y-%m-%d"),
-            "self_arrival_user_list": self_arrival_user_list,
-            "self_arrival_user_count": total_count,
-            "self_arrival_added_count": added_count,
-            "self_arrival_pending_count": pending_count,
-            "self_arrival_loaded_count": list_offset + len(self_arrival_user_list),
-            "self_arrival_has_more": (list_offset + len(self_arrival_user_list)) < total_count,
-            "list_offset": list_offset,
-            "list_page_size": LIST_PAGE_SIZE,
-        })
-
-    if tab == "self_arrival_pending_users":
-        _sync_self_arrival_customers_for_store(session, store)
-        session.commit()
-
-        employee_names = sorted([
-            _normalize_text(u.display_name)
-            for u in session.exec(select(User).order_by(User.display_name)).all()
-            if _normalize_text(u.display_name)
-        ])
-        rows = session.exec(
-            select(SelfArrivalCustomer).where(SelfArrivalCustomer.store_name == store)
-        ).all()
-        employee_names = sorted(set(employee_names) | {
-            _normalize_text(row.first_receptionist or row.receptionist)
-            for row in rows
-            if _normalize_text(row.first_receptionist or row.receptionist)
-        })
-        self_arrival_pending_employee = _normalize_text(self_arrival_pending_employee) or "all"
-        if user.role != "admin":
-            self_arrival_pending_employee = _normalize_text(user.display_name)
-        elif self_arrival_pending_employee != "all" and self_arrival_pending_employee not in employee_names:
-            self_arrival_pending_employee = "all"
-
-        pending_rows = [
-            row for row in rows
-            if not _self_arrival_customer_has_wechat(row)
-        ]
-        if self_arrival_pending_employee != "all":
-            pending_rows = [
-                row for row in pending_rows
-                if _normalize_text(row.first_receptionist or row.receptionist) == self_arrival_pending_employee
-            ]
-        pending_rows.sort(key=lambda row: (row.last_arrival_at or datetime.min, row.id or 0), reverse=True)
-
-        page_rows = pending_rows[list_offset:list_offset + list_limit]
-        self_arrival_pending_user_list = []
-        for row in page_rows:
-            self_arrival_pending_user_list.append({
-                "id": row.id,
-                "app_nickname": row.app_nickname or "",
-                "phone": row.phone or "",
-                "wechat_nickname": row.wechat_nickname or "",
-                "wechat_id": row.wechat_id or "",
-                "last_arrival_at": row.last_arrival_at.strftime("%Y-%m-%d %H:%M") if row.last_arrival_at else "",
-                "store_visit_count": row.store_visit_count or 0,
-                "first_receptionist": row.first_receptionist or row.receptionist or "",
-            })
-
-        return templates.TemplateResponse("customers.html", {
-            **common_context,
-            "employee_names": employee_names,
-            "self_arrival_pending_employee": self_arrival_pending_employee,
-            "self_arrival_pending_user_list": self_arrival_pending_user_list,
-            "self_arrival_pending_count": len(pending_rows),
-            "self_arrival_pending_loaded_count": list_offset + len(self_arrival_pending_user_list),
-            "self_arrival_pending_has_more": (list_offset + len(self_arrival_pending_user_list)) < len(pending_rows),
             "list_offset": list_offset,
             "list_page_size": LIST_PAGE_SIZE,
         })
@@ -21265,7 +21068,7 @@ async def read_customers(
         })
 
     # 2. 先按关键词查顾客
-    if tab in {"my_new_customer_pull", "team_new_customer_pull"}:
+    if tab == "my_new_customer_pull":
         pull_date_filter = pull_date_filter if pull_date_filter in {
             "today", "yesterday", "last2days", "this_week", "this_month", "last_month", "custom"
         } else "today"
@@ -21282,15 +21085,12 @@ async def read_customers(
             for u in session.exec(select(User).order_by(User.display_name)).all()
             if _normalize_text(u.display_name)
         ])
-        if tab == "my_new_customer_pull":
-            if user.role != "admin":
-                pull_employee = _normalize_text(user.display_name)
-            else:
-                pull_employee = _normalize_text(pull_employee) or "all"
-                if pull_employee != "all" and pull_employee not in employee_names:
-                    pull_employee = "all"
+        if user.role != "admin":
+            pull_employee = _normalize_text(user.display_name)
         else:
-            pull_employee = "all"
+            pull_employee = _normalize_text(pull_employee) or "all"
+            if pull_employee != "all" and pull_employee not in employee_names:
+                pull_employee = "all"
 
         candidate_games = session.exec(
             select(GameRecord).where(
@@ -21310,9 +21110,8 @@ async def read_customers(
         stmt = select(NewCustomerPullRecord).where(
             NewCustomerPullRecord.order_start_time >= start_dt,
             NewCustomerPullRecord.order_start_time < end_dt_exclusive,
-            NewCustomerPullRecord.transferred_to_team == (tab == "team_new_customer_pull"),
         )
-        if tab == "my_new_customer_pull" and pull_employee != "all":
+        if pull_employee != "all":
             stmt = stmt.where(NewCustomerPullRecord.pull_employee == pull_employee)
 
         pull_records = session.exec(stmt).all()
@@ -21341,6 +21140,9 @@ async def read_customers(
                 "customer_wechat_id": row.customer_wechat_id or "",
                 "in_group_chat": bool(row.in_group_chat),
                 "remark": row.remark or "",
+                "friend_request_not_approved_current_shift": bool(
+                    row.friend_request_not_approved_current_shift
+                ),
                 "status_text": "成功" if is_success else "待拉新",
             })
 
@@ -21743,49 +21545,8 @@ def _build_customer_complaints_url(
     return "/customers?" + urlencode(params)
 
 
-def _build_self_arrival_users_url(
-    store: str,
-    date_filter: str = "today",
-    start_date: str = "",
-    end_date: str = "",
-    success: str = "",
-    error: str = "",
-) -> str:
-    params = {
-        "store": store or "牛王庙店",
-        "tab": "self_arrival_users",
-        "self_arrival_date_filter": date_filter or "today",
-        "self_arrival_start_date": start_date or "",
-        "self_arrival_end_date": end_date or "",
-    }
-    if success:
-        params["success"] = success
-    if error:
-        params["error"] = error
-    return "/customers?" + urlencode(params)
-
-
-def _build_self_arrival_pending_users_url(
-    store: str,
-    employee: str = "all",
-    success: str = "",
-    error: str = "",
-) -> str:
-    params = {
-        "store": store or "牛王庙店",
-        "tab": "self_arrival_pending_users",
-        "self_arrival_pending_employee": employee or "all",
-    }
-    if success:
-        params["success"] = success
-    if error:
-        params["error"] = error
-    return "/customers?" + urlencode(params)
-
-
 def _build_new_customer_pull_url(
     store: str,
-    tab: str = "my_new_customer_pull",
     date_filter: str = "today",
     start_date: str = "",
     end_date: str = "",
@@ -21795,7 +21556,7 @@ def _build_new_customer_pull_url(
 ) -> str:
     params = {
         "store": store or "牛王庙店",
-        "tab": tab if tab in {"my_new_customer_pull", "team_new_customer_pull"} else "my_new_customer_pull",
+        "tab": "my_new_customer_pull",
         "pull_date_filter": date_filter or "today",
         "pull_start_date": start_date or "",
         "pull_end_date": end_date or "",
@@ -22250,92 +22011,6 @@ async def save_store_customer_followup(
             success=f"组局散客跟进信息已保存（{saved_count} 条）",
             duplicate_nickname=duplicate_filter,
         ),
-        status_code=303
-    )
-
-
-@app.post("/self-arrival-users/save")
-async def save_self_arrival_users(
-        request: Request,
-        store: str = Form("牛王庙店"),
-        source_tab: str = Form("self_arrival_users"),
-        self_arrival_date_filter: str = Form("today"),
-        self_arrival_start_date: str = Form(""),
-        self_arrival_end_date: str = Form(""),
-        self_arrival_pending_employee: str = Form("all"),
-        session: Session = Depends(get_session),
-        user: Optional[User] = Depends(get_current_user)
-):
-    if not user:
-        return RedirectResponse(url="/login", status_code=303)
-
-    form = await request.form()
-    row_ids = []
-    for raw_id in form.getlist("self_arrival_user_id"):
-        try:
-            row_ids.append(int(raw_id))
-        except Exception:
-            continue
-
-    now = datetime.now()
-    saved_count = 0
-    for row_id in row_ids:
-        row = session.get(SelfArrivalCustomer, row_id)
-        if not row or row.store_name != store:
-            continue
-
-        wechat_nickname = _normalize_text(form.get(f"wechat_nickname_{row_id}"))
-        wechat_id = _normalize_text(form.get(f"wechat_id_{row_id}"))
-        if bool(wechat_nickname) != bool(wechat_id):
-            error_msg = "微信昵称和微信号必须同时填写，或同时留空"
-            if source_tab == "self_arrival_pending_users":
-                target_url = _build_self_arrival_pending_users_url(
-                    store,
-                    self_arrival_pending_employee,
-                    error=error_msg
-                )
-            else:
-                target_url = _build_self_arrival_users_url(
-                    store,
-                    self_arrival_date_filter,
-                    self_arrival_start_date,
-                    self_arrival_end_date,
-                    error=error_msg
-                )
-            return RedirectResponse(
-                url=target_url,
-                status_code=303
-            )
-
-        row.wechat_nickname = wechat_nickname or None
-        row.wechat_id = wechat_id or None
-        row.updated_at = now
-        row.updated_by = user.display_name
-        session.add(row)
-        if _self_arrival_customer_has_wechat(row):
-            _sync_self_arrival_customer_to_store_customer_pool(session, row, user.display_name)
-        saved_count += 1
-
-    session.commit()
-
-    success_msg = f"自主到店用户微信信息已保存（{saved_count} 条）"
-    if source_tab == "self_arrival_pending_users":
-        target_url = _build_self_arrival_pending_users_url(
-            store,
-            self_arrival_pending_employee,
-            success=success_msg
-        )
-    else:
-        target_url = _build_self_arrival_users_url(
-            store,
-            self_arrival_date_filter,
-            self_arrival_start_date,
-            self_arrival_end_date,
-            success=success_msg
-        )
-
-    return RedirectResponse(
-        url=target_url,
         status_code=303
     )
 
@@ -22991,7 +22666,6 @@ async def save_contact_customer_followup(
 async def save_new_customer_pull_records(
         request: Request,
         store: str = Form("牛王庙店"),
-        source_tab: str = Form("my_new_customer_pull"),
         pull_date_filter: str = Form("today"),
         pull_start_date: str = Form(""),
         pull_end_date: str = Form(""),
@@ -23002,7 +22676,6 @@ async def save_new_customer_pull_records(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    source_tab = source_tab if source_tab in {"my_new_customer_pull", "team_new_customer_pull"} else "my_new_customer_pull"
     form = await request.form()
     record_ids = []
     for raw_id in form.getlist("record_id"):
@@ -23023,7 +22696,6 @@ async def save_new_customer_pull_records(
             return RedirectResponse(
                 url=_build_new_customer_pull_url(
                     store,
-                    source_tab,
                     pull_date_filter,
                     pull_start_date,
                     pull_end_date,
@@ -23039,17 +22711,24 @@ async def save_new_customer_pull_records(
         row = session.get(NewCustomerPullRecord, record_id)
         if not row:
             continue
-        if source_tab == "my_new_customer_pull" and user.role != "admin" and row.pull_employee != user.display_name:
-            continue
-        if source_tab == "my_new_customer_pull" and row.transferred_to_team:
-            continue
-        if source_tab == "team_new_customer_pull" and not row.transferred_to_team:
+        if user.role != "admin" and row.pull_employee != user.display_name:
             continue
 
         row.customer_nickname = _normalize_text(form.get(f"customer_nickname_{record_id}")) or ""
         row.customer_wechat_id = _normalize_text(form.get(f"customer_wechat_id_{record_id}")) or ""
         row.in_group_chat = form.get(f"in_group_chat_{record_id}") == "1"
-        row.remark = _normalize_text(form.get(f"remark_{record_id}")) or None
+        remark_choice = _normalize_text(form.get(f"remark_choice_{record_id}"))
+        custom_remark = _normalize_text(form.get(f"remark_{record_id}"))
+        if remark_choice == "privacy_settings":
+            row.remark = "隐私设置"
+        elif remark_choice == "custom":
+            row.remark = custom_remark or None
+        elif custom_remark:
+            # 兼容仍停留在旧页面、尚未刷新的表单提交。
+            row.remark = custom_remark
+        row.friend_request_not_approved_current_shift = (
+            form.get(f"friend_request_not_approved_current_shift_{record_id}") == "1"
+        )
         row.updated_at = now
         row.updated_by = user.display_name
         session.add(row)
@@ -23058,75 +22737,11 @@ async def save_new_customer_pull_records(
     return RedirectResponse(
         url=_build_new_customer_pull_url(
             store,
-            source_tab,
             pull_date_filter,
             pull_start_date,
             pull_end_date,
             pull_employee if user.role == "admin" else _normalize_text(user.display_name),
             success="待拉新记录已保存"
-        ),
-        status_code=303
-    )
-
-
-@app.post("/new-customer-pull/transfer/{record_id}")
-async def transfer_new_customer_pull_record(
-        record_id: int,
-        store: str = Form("牛王庙店"),
-        pull_date_filter: str = Form("today"),
-        pull_start_date: str = Form(""),
-        pull_end_date: str = Form(""),
-        pull_employee: str = Form("all"),
-        session: Session = Depends(get_session),
-        user: Optional[User] = Depends(get_current_user)
-):
-    if not user:
-        return RedirectResponse(url="/login", status_code=303)
-
-    row = session.get(NewCustomerPullRecord, record_id)
-    if not row:
-        return RedirectResponse(
-            url=_build_new_customer_pull_url(
-                store,
-                "my_new_customer_pull",
-                pull_date_filter,
-                pull_start_date,
-                pull_end_date,
-                pull_employee,
-                error="待拉新记录不存在"
-            ),
-            status_code=303
-        )
-
-    if user.role != "admin" and row.pull_employee != user.display_name:
-        return RedirectResponse(
-            url=_build_new_customer_pull_url(
-                store,
-                "my_new_customer_pull",
-                pull_date_filter,
-                pull_start_date,
-                pull_end_date,
-                pull_employee,
-                error="无权转入该记录"
-            ),
-            status_code=303
-        )
-
-    row.transferred_to_team = True
-    row.updated_at = datetime.now()
-    row.updated_by = user.display_name
-    session.add(row)
-    session.commit()
-
-    return RedirectResponse(
-        url=_build_new_customer_pull_url(
-            store,
-            "my_new_customer_pull",
-            pull_date_filter,
-            pull_start_date,
-            pull_end_date,
-            pull_employee if user.role == "admin" else _normalize_text(user.display_name),
-            success="已转入团队待拉新"
         ),
         status_code=303
     )
@@ -24127,7 +23742,6 @@ async def brand_store_data_page(
         "private_order_trend_json": json.dumps(stats["charts"]["private_order_trend"], ensure_ascii=False),
         "self_arrival_order_trend_json": json.dumps(stats["charts"]["self_arrival_order_trend"], ensure_ascii=False),
         "customer_funnel_json": json.dumps(stats["charts"]["customer_funnel"], ensure_ascii=False),
-        "self_arrival_customer_funnel_json": json.dumps(stats["charts"]["self_arrival_customer_funnel"], ensure_ascii=False),
     })
 
 
