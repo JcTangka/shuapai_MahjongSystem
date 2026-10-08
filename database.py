@@ -419,6 +419,9 @@ class NewCustomerPullRecord(SQLModel, table=True):
     in_group_chat: bool = Field(default=False, index=True)
     remark_updated: bool = Field(default=False, index=True)
     remark: Optional[str] = None
+    # 旧版团队待拉新字段已退出业务逻辑，但部分现有数据库仍要求该列 NOT NULL。
+    # 保留 ORM 映射并始终使用默认 False，避免新增待拉新记录时遗漏该列。
+    transferred_to_team: bool = Field(default=False)
     friend_request_not_approved_current_shift: bool = Field(default=False, index=True)
 
     created_at: datetime = Field(default_factory=datetime.now, index=True)
@@ -1880,6 +1883,7 @@ def migrate_new_customer_pull_record_table():
                 in_group_chat BOOLEAN NOT NULL DEFAULT 0,
                 remark_updated BOOLEAN NOT NULL DEFAULT 0,
                 remark TEXT,
+                transferred_to_team BOOLEAN NOT NULL DEFAULT 0,
                 friend_request_not_approved_current_shift BOOLEAN NOT NULL DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1891,6 +1895,11 @@ def migrate_new_customer_pull_record_table():
         column_names = {col[1] for col in columns}
         if "remark" not in column_names:
             conn.execute(text("ALTER TABLE newcustomerpullrecord ADD COLUMN remark TEXT"))
+        if "transferred_to_team" not in column_names:
+            conn.execute(text("""
+                ALTER TABLE newcustomerpullrecord
+                ADD COLUMN transferred_to_team BOOLEAN NOT NULL DEFAULT 0
+            """))
         if "friend_request_not_approved_current_shift" not in column_names:
             conn.execute(text("""
                 ALTER TABLE newcustomerpullrecord
