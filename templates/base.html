@@ -86,6 +86,18 @@
             border-bottom: 1px solid #eee;
             margin-bottom: 20px;
         }
+
+        .deposit-exempt-mark {
+            color: #0f5132 !important;
+            background: #d1e7dd !important;
+            border: 1px solid #75b798 !important;
+            font-weight: 700 !important;
+        }
+
+        .deposit-exempt-inline {
+            color: #08783e !important;
+            font-weight: 700 !important;
+        }
     </style>
 
     {% block head_extra %}{% endblock %}
@@ -117,20 +129,26 @@
 <!--                    </a>-->
 <!--                </li>-->
                 <li class="nav-item">
-                    <a class="nav-link {% if page_name == 'customers' %}active{% endif %}"
+                    <a class="nav-link {% if page_name in ['customers', 'deposit_exempt_customers'] %}active{% endif %}"
                        data-bs-toggle="collapse"
                        href="#customersMenu"
                        role="button"
-                       aria-expanded="{% if page_name == 'customers' %}true{% else %}false{% endif %}"
+                       aria-expanded="{% if page_name in ['customers', 'deposit_exempt_customers'] %}true{% else %}false{% endif %}"
                        aria-controls="customersMenu">
                         <i class="bi bi-people me-2"></i> 顾客管理
                     </a>
-                    <div class="collapse {% if page_name == 'customers' %}show{% endif %}" id="customersMenu">
+                    <div class="collapse {% if page_name in ['customers', 'deposit_exempt_customers'] %}show{% endif %}" id="customersMenu">
                         <ul class="btn-toggle-nav list-unstyled fw-normal pb-1 small">
                             <li>
                                 <a href="/customers?store={{ current_store }}&tab=store_customers"
                                    class="nav-link ms-4 {% if page_name == 'customers' and (tab|default('store_customers')) == 'store_customers' %}active{% endif %}">
                                     <i class="bi bi-shop me-2"></i>组局散客
+                                </a>
+                            </li>
+                            <li>
+                                <a href="/deposit-exempt-customers?store={{ current_store }}"
+                                   class="nav-link ms-4 {% if page_name == 'deposit_exempt_customers' %}active{% endif %}">
+                                    <i class="bi bi-shield-check me-2"></i>免押用户
                                 </a>
                             </li>
                             <li>

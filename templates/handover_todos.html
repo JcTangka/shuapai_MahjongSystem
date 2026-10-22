@@ -823,7 +823,8 @@ function getSelectedCustomers(mode) {
     return Array.from(inputsBox.querySelectorAll('input[name="customer_ids"]')).map(input => ({
         id: Number(input.value),
         nickname: input.dataset.nickname || '',
-        wechat_id: input.dataset.wechatId || ''
+        wechat_id: input.dataset.wechatId || '',
+        is_deposit_exempt: input.dataset.isDepositExempt === 'true'
     }));
 }
 
@@ -834,7 +835,7 @@ function renderCustomerTags(mode) {
     tagsBox.innerHTML = '';
     customers.forEach(cust => {
         const tag = document.createElement('span');
-        tag.className = 'customer-tag';
+        tag.className = `customer-tag${cust.is_deposit_exempt ? ' deposit-exempt-mark' : ''}`;
         tag.innerHTML = `
             <span>${escapeHtml(cust.nickname)}（${escapeHtml(cust.wechat_id || '')}）</span>
             <button type="button" class="customer-tag-remove" onclick="removeCustomer('${mode}', ${cust.id})">×</button>
@@ -894,6 +895,7 @@ function addCustomer(mode, customer) {
     input.value = value;
     input.dataset.nickname = customer.nickname || '';
     input.dataset.wechatId = customer.wechat_id || '';
+    input.dataset.isDepositExempt = customer.is_deposit_exempt ? 'true' : 'false';
     inputsBox.appendChild(input);
 
     renderCustomerTags(mode);
@@ -990,14 +992,15 @@ function renderCustomerSearchResult(mode, customerList) {
         const payload = encodeURIComponent(JSON.stringify({
             id: c.id,
             nickname: c.nickname || '',
-            wechat_id: c.wechat_id || ''
+            wechat_id: c.wechat_id || '',
+            is_deposit_exempt: Boolean(c.is_deposit_exempt)
         }));
 
         return `
-            <div class="customer-search-item ${selected ? 'active-selected' : ''}"
+            <div class="customer-search-item ${selected ? 'active-selected' : ''} ${c.is_deposit_exempt ? 'deposit-exempt-mark' : ''}"
                  ${selected ? '' : `onclick="addCustomerByPayload('${mode}', '${payload}')"`}>
                 <div class="customer-search-name">
-                    ${escapeHtml(c.nickname || '未命名')}
+                    ${escapeHtml(c.nickname || '未命名')}${c.is_deposit_exempt ? ' · 免押' : ''}
                     ${selected ? '<span class="badge text-bg-secondary ms-2">已选择</span>' : '<span class="badge text-bg-success ms-2">添加</span>'}
                 </div>
                 <div class="customer-search-meta">微信号：${escapeHtml(c.wechat_id || '')}</div>
@@ -1098,6 +1101,7 @@ function openEditModal(todo) {
             input.value = cid;
             input.dataset.nickname = c.nickname || '';
             input.dataset.wechatId = c.wechat_id || '';
+            input.dataset.isDepositExempt = c.is_deposit_exempt ? 'true' : 'false';
             inputsBox.appendChild(input);
         });
     } else {
@@ -1112,6 +1116,7 @@ function openEditModal(todo) {
             input.value = cid;
             input.dataset.nickname = `顾客#${cid}`;
             input.dataset.wechatId = '';
+            input.dataset.isDepositExempt = 'false';
             inputsBox.appendChild(input);
         });
     }

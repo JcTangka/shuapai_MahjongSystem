@@ -51,13 +51,14 @@
 
 <div class="row g-3" id="brandBlacklistList">
     {% for item in record_list %}
+    {% set item_is_exempt = ((item.wechat_id or '')|lower) in deposit_exempt_wechat_keys %}
     <div class="col-12" id="brand-blacklist-row-{{ item.id }}">
         <div class="card shadow-sm border-0 {% if item.is_active %}border-start border-4 border-danger{% else %}opacity-75{% endif %}">
             <div class="card-body">
                 <div class="d-flex justify-content-between flex-wrap gap-3">
-                    <div>
+                    <div class="{% if item_is_exempt %}deposit-exempt-mark rounded p-2{% endif %}">
                         <div class="d-flex align-items-center gap-2 mb-2">
-                            <span class="fw-bold fs-5">{{ item.nickname }}</span>
+                            <span class="fw-bold fs-5">{{ item.nickname }}{% if item_is_exempt %} · 免押{% endif %}</span>
                             <span class="badge {% if item.is_active %}bg-danger{% else %}bg-secondary{% endif %}">
                                 {% if item.is_active %}生效中{% else %}已撤销{% endif %}
                             </span>

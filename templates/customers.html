@@ -156,13 +156,14 @@
             </tr></thead>
             <tbody>
             {% for item in pull_record_list %}
+                {% set is_exempt = ((item.customer_wechat_id or '')|lower) in deposit_exempt_wechat_keys %}
                 <tr id="pull-record-row-{{ item.id }}">
                     <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
                     <td>{{ item.pull_employee }}</td>
                     <td>{{ item.store_name }}</td>
                     <td class="small text-muted">{{ item.source_label }}</td>
-                    <td><input type="hidden" name="record_id" value="{{ item.id }}"><input type="text" class="form-control form-control-sm pull-status-text" name="customer_nickname_{{ item.id }}" value="{{ item.customer_nickname }}" data-row-id="{{ item.id }}"></td>
-                    <td><input type="text" class="form-control form-control-sm pull-status-text" name="customer_wechat_id_{{ item.id }}" value="{{ item.customer_wechat_id }}" data-row-id="{{ item.id }}"></td>
+                    <td><input type="hidden" name="record_id" value="{{ item.id }}"><input type="text" class="form-control form-control-sm pull-status-text {% if is_exempt %}deposit-exempt-mark{% endif %}" name="customer_nickname_{{ item.id }}" value="{{ item.customer_nickname }}" data-row-id="{{ item.id }}"></td>
+                    <td><input type="text" class="form-control form-control-sm pull-status-text {% if is_exempt %}deposit-exempt-mark{% endif %}" name="customer_wechat_id_{{ item.id }}" value="{{ item.customer_wechat_id }}" data-row-id="{{ item.id }}"></td>
                     <td style="min-width: 180px;">
                         {% set is_custom_remark = item.remark and item.remark != '隐私设置' %}
                         <select class="form-select form-select-sm pull-remark-choice"
@@ -282,9 +283,9 @@
                 <tr id="customer-row-{{ cust.id }}">
                     <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
 
-                    <td>
-                        <div class="fw-bold">{{ cust.nickname }}</div>
-                        <div class="small text-muted text-truncate" style="max-width: 120px; margin: auto;">
+                    <td class="{% if cust.is_deposit_exempt %}deposit-exempt-mark{% endif %}">
+                        <div class="fw-bold">{{ cust.nickname }}{% if cust.is_deposit_exempt %} <span class="badge bg-success">免押</span>{% endif %}</div>
+                        <div class="small {% if cust.is_deposit_exempt %}deposit-exempt-inline{% else %}text-muted{% endif %} text-truncate" style="max-width: 120px; margin: auto;">
                             {{ cust.wechat_id }}
                         </div>
                     </td>
@@ -456,15 +457,17 @@
             </thead>
             <tbody id="customerComplaintTbody">
                 {% for item in complaint_record_list %}
+                {% set complained_is_exempt = ((item.complained_wechat_id or '')|lower) in deposit_exempt_wechat_keys %}
+                {% set complainant_is_exempt = ((item.complainant_wechat_id or '')|lower) in deposit_exempt_wechat_keys %}
                 <tr id="customer-complaint-row-{{ item.id }}">
                     <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
-                    <td>
-                        <div class="fw-bold">{{ item.complained_nickname }}</div>
-                        <div class="small text-muted">{{ item.complained_wechat_id }}</div>
+                    <td class="{% if complained_is_exempt %}deposit-exempt-mark{% endif %}">
+                        <div class="fw-bold">{{ item.complained_nickname }}{% if complained_is_exempt %} · 免押{% endif %}</div>
+                        <div class="small">{{ item.complained_wechat_id }}</div>
                     </td>
-                    <td>
-                        <div class="fw-bold">{{ item.complainant_nickname }}</div>
-                        <div class="small text-muted">{{ item.complainant_wechat_id }}</div>
+                    <td class="{% if complainant_is_exempt %}deposit-exempt-mark{% endif %}">
+                        <div class="fw-bold">{{ item.complainant_nickname }}{% if complainant_is_exempt %} · 免押{% endif %}</div>
+                        <div class="small">{{ item.complainant_wechat_id }}</div>
                     </td>
                     <td class="text-start">
                         <div class="text-truncate"
@@ -647,6 +650,7 @@
             </thead>
             <tbody id="publicTrafficLeadTbody">
                 {% for lead in public_lead_list %}
+                {% set lead_is_exempt = ((lead.wechat_id or '')|lower) in deposit_exempt_wechat_keys %}
                 <tr id="public-lead-row-{{ lead.id }}">
                     <td class="text-secondary">{{ lead.created_at }}</td>
                     <td>
@@ -654,7 +658,7 @@
                             {{ lead.source_port }}
                         </span>
                     </td>
-                    <td class="fw-bold">{{ lead.wechat_id }}</td>
+                    <td class="fw-bold {% if lead_is_exempt %}deposit-exempt-mark{% endif %}">{{ lead.wechat_id }}{% if lead_is_exempt %} · 免押{% endif %}</td>
                     <td>{{ lead.intended_store_label }}</td>
                     <td>
                         {% if lead.is_converted %}
@@ -802,10 +806,11 @@
             </thead>
             <tbody id="oldToNewCustomerTbody">
                 {% for item in old_to_new_customer_list %}
+                {% set item_is_exempt = ((item.wechat_id or '')|lower) in deposit_exempt_wechat_keys %}
                 <tr id="old-to-new-row-{{ (list_offset or 0) + loop.index }}">
                     <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
-                    <td class="fw-bold">{{ item.nickname }}</td>
-                    <td>{{ item.wechat_id }}</td>
+                    <td class="fw-bold {% if item_is_exempt %}deposit-exempt-mark{% endif %}">{{ item.nickname }}{% if item_is_exempt %} · 免押{% endif %}</td>
+                    <td class="{% if item_is_exempt %}deposit-exempt-mark{% endif %}">{{ item.wechat_id }}</td>
                     <td>{{ item.visit_date }}</td>
                 </tr>
                 {% else %}
@@ -950,18 +955,19 @@
                 <tbody>
                     {% for item in contact_customer_list %}
                     {% set row_index = (list_offset or 0) + loop.index0 %}
+                    {% set item_is_exempt = ((item.wechat_id or '')|lower) in deposit_exempt_wechat_keys %}
                     <tr id="contact-customer-row-{{ list_offset + loop.index }}">
                         <td class="text-secondary fw-bold">{{ (list_offset or 0) + loop.index }}</td>
                         <td>{{ item.employee_name }}</td>
-                        <td>
-                            <div class="fw-bold">{{ item.nickname }}</div>
+                        <td class="{% if item_is_exempt %}deposit-exempt-mark{% endif %}">
+                            <div class="fw-bold">{{ item.nickname }}{% if item_is_exempt %} · 免押{% endif %}</div>
                             {% if item.is_new %}
                                 <span class="badge bg-success bg-opacity-10 text-success border border-success border-opacity-25">新客</span>
                             {% else %}
                                 <span class="badge bg-secondary bg-opacity-10 text-secondary border border-secondary border-opacity-25">老客</span>
                             {% endif %}
                         </td>
-                        <td class="fw-bold">{{ item.wechat_id }}</td>
+                        <td class="fw-bold {% if item_is_exempt %}deposit-exempt-mark{% endif %}">{{ item.wechat_id }}</td>
                         <td>{{ item.store_name or '-' }}</td>
                         <td>
                             <textarea class="form-control form-control-sm" name="remark_{{ row_index }}" rows="1" placeholder="填写备注">{{ item.remark }}</textarea>
@@ -1588,11 +1594,11 @@
                 }
 
                 suggestBox.innerHTML = data.map(item => `
-                    <div class="customer-suggest-item"
+                    <div class="customer-suggest-item ${item.is_deposit_exempt ? 'deposit-exempt-mark' : ''}"
                          data-id="${escapeHtml(item.id)}"
                          data-nickname="${escapeHtml(item.nickname || '')}"
                          data-wechat="${escapeHtml(item.wechat_id || '')}">
-                        <div class="customer-suggest-name">${escapeHtml(item.nickname || '-')}</div>
+                        <div class="customer-suggest-name">${escapeHtml(item.nickname || '-')}${item.is_deposit_exempt ? ' · 免押' : ''}</div>
                         <div class="customer-suggest-meta">微信号：${escapeHtml(item.wechat_id || '-')}</div>
                     </div>
                 `).join('');
@@ -1680,6 +1686,8 @@
             document.getElementById('detail_nickname').value = info.nickname;
             document.getElementById('detail_wechat').value = info.wechat_id;
             document.getElementById('detail_gender').value = info.gender;
+            document.getElementById('detail_nickname').classList.toggle('deposit-exempt-mark', !!info.is_deposit_exempt);
+            document.getElementById('detail_wechat').classList.toggle('deposit-exempt-mark', !!info.is_deposit_exempt);
 
             document.getElementById('detail_last_visit').innerText = info.last_visit_date || "暂无记录";
 
@@ -1790,8 +1798,8 @@
                 ? `<button type="button" class="btn btn-sm btn-outline-danger border-0" title="快速拉黑" data-target-wechat="${escapeHtml(partnerWechat)}" data-target-name="${escapeHtml(p.partner_name)}" onclick="quickAddBlacklistFromButton(this)"><i class="bi bi-person-fill-slash"></i></button>`
                 : '<span class="text-muted small">无微信号</span>';
             playTbody.innerHTML += `
-                <tr>
-                    <td>${escapeHtml(p.partner_name)}</td>
+                <tr class="${p.is_deposit_exempt ? 'deposit-exempt-mark' : ''}">
+                    <td>${escapeHtml(p.partner_name)}${p.is_deposit_exempt ? ' · 免押' : ''}</td>
                     <td class="fw-bold">${p.count}</td>
                     <td>${actionCell}</td>
                 </tr>
@@ -1810,8 +1818,8 @@
 
         list.forEach(item => {
             tbody.innerHTML += `
-                <tr>
-                    <td>${escapeHtml(item.target_name)}</td>
+                <tr class="${item.is_deposit_exempt ? 'deposit-exempt-mark' : ''}">
+                    <td>${escapeHtml(item.target_name)}${item.is_deposit_exempt ? ' · 免押' : ''}</td>
                     <td class="small text-muted">${escapeHtml(item.target_wechat)}</td>
                     <td class="text-danger small">${escapeHtml(item.reason)}</td>
                     <td>

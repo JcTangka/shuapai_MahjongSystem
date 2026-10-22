@@ -15,13 +15,14 @@ import string
 import threading
 from sqlmodel import Session, select
 from sqlalchemy import func, or_, and_, delete, text  # 用于搜索逻辑；text 用于团队硬删除时兼容清理工资结算表
+from sqlalchemy.exc import IntegrityError
 from datetime import date, datetime,timedelta,time
 from typing import Optional, List, Tuple, Dict
 import itertools
 
 #  导入数据库模型
 from database import (GameRecord, GamePaymentItem, Store, Room, User,
-                      Customer, CustomerStoreLink, CustomerComplaintRecord,
+                      Customer, CustomerStoreLink, CustomerDepositExemption, CustomerComplaintRecord,
                       Blacklist, BrandBlacklistEntry, PlayFrequency, CustomerPlayTypeStat,
                       GameSmokeSetting, CustomerRecommendationBlock, CustomerRecommendationTimeBucketStat,
                       RecommendationHolidayDate, RecommendationPreferenceSnapshot,
@@ -32,7 +33,8 @@ from database import (GameRecord, GamePaymentItem, Store, Room, User,
                       ShiftSchedule, MaintenanceRecord, upsert_shift, get_month_shifts_map, get_month_date_range, normalize_shift_type,
                       get_manager_performance_stats, get_shift_performance_stats,
                       HandoverTodo, HandoverTodoCustomerLink, FormedGameHandoverLink,SelfArrivalRecord,
-                      PublicTrafficLead, ContactCustomerFollowup, SelfArrivalCustomer, NewCustomerPullRecord,
+                      PublicTrafficLead, ContactCustomerFollowup, CancelledGameContactSnapshot,
+                      SelfArrivalCustomer, NewCustomerPullRecord,
                       EmployeeDutySession, DailyStoreWorkItem,
                       CommonIssue, CommonIssueReasonSolution,
                         # V3 员工管理 / 请假 / 考勤 / 工资流水 / 团队管理
@@ -5008,6 +5010,51 @@ def _build_formed_redirect_url(
 def _normalize_text(v: Optional[str]) -> str:
     return (v or "").strip()
 
+
+def _deposit_exempt_customer_ids(session: Session) -> set[int]:
+    return set(session.exec(
+        select(CustomerDepositExemption.customer_id).where(
+            CustomerDepositExemption.is_active == True
+        )
+    ).all())
+
+
+def _deposit_exempt_wechat_keys(session: Session) -> set[str]:
+    customer_ids = _deposit_exempt_customer_ids(session)
+    if not customer_ids:
+        return set()
+    values = session.exec(
+        select(Customer.wechat_id).where(
+            Customer.id.in_(customer_ids),
+            Customer.is_deleted == False,
+        )
+    ).all()
+    return {
+        _normalize_text(value).casefold()
+        for value in values
+        if _normalize_text(value)
+    }
+
+
+def _deposit_exempt_player_indices_by_game(
+        games: List[GameRecord],
+        exempt_wechat_keys: set[str],
+) -> Dict[int, List[int]]:
+    result: Dict[int, List[int]] = {}
+    if not exempt_wechat_keys:
+        return result
+    for game in games:
+        indices = [
+            index
+            for index in range(1, 5)
+            if _normalize_text(getattr(game, f"player_{index}_wechat", "")).casefold()
+            in exempt_wechat_keys
+        ]
+        if game.id is not None and indices:
+            result[game.id] = indices
+    return result
+
+
 def _daterange(start_date: date, end_date: date):
     cur = start_date
     while cur <= end_date:
@@ -5107,6 +5154,17 @@ def _is_pull_placeholder_player(name: Optional[str], wechat: Optional[str]) -> b
     return (
         _normalize_text(name) == PLACEHOLDER_PLAYER_NAME
         and _normalize_text(wechat) == PLACEHOLDER_PLAYER_WECHAT
+    )
+
+
+def _is_concrete_pull_player(name: Optional[str], wechat: Optional[str]) -> bool:
+    clean_name = _normalize_text(name)
+    clean_wechat = _normalize_text(wechat)
+    return bool(
+        clean_name
+        and clean_wechat
+        and clean_name != PLACEHOLDER_PLAYER_NAME
+        and clean_wechat != PLACEHOLDER_PLAYER_WECHAT
     )
 
 
@@ -5447,6 +5505,50 @@ def _new_customer_pull_duplicate_key(
     return (clean_nickname, clean_wechat)
 
 
+def _new_customer_pull_replacement_conflict_message(
+    session: Session,
+    game_id: Optional[int],
+    slots: List[dict],
+) -> str:
+    """
+    用具体顾客替换万能替身号时，待拉新中已经填写的昵称/微信号必须与之相符。
+    待拉新中仍为空的字段不参与冲突判断。
+    """
+    if not game_id:
+        return ""
+
+    existing_rows = session.exec(
+        select(NewCustomerPullRecord).where(NewCustomerPullRecord.source_game_id == game_id)
+    ).all()
+    existing_by_slot = {row.source_player_index: row for row in existing_rows}
+
+    for slot in slots:
+        idx = int(slot.get("idx") or 0)
+        row = existing_by_slot.get(idx)
+        if not row:
+            continue
+
+        name = _normalize_text(slot.get("name"))
+        wechat = _normalize_text(slot.get("wechat"))
+        if not _is_concrete_pull_player(name, wechat):
+            continue
+
+        expected_name = _normalize_text(row.customer_nickname)
+        expected_wechat = _normalize_text(row.customer_wechat_id)
+        mismatch_fields = []
+        if expected_name and expected_name != name:
+            mismatch_fields.append("用户昵称")
+        if expected_wechat and expected_wechat != wechat:
+            mismatch_fields.append("微信号")
+        if mismatch_fields:
+            return (
+                f"第{idx}位替身号对应的待拉新记录与本次填写的具体用户资料不一致："
+                f"{'、'.join(mismatch_fields)}不匹配。请核对后再保存。"
+            )
+
+    return ""
+
+
 def _sync_new_customer_pull_records_for_game(session: Session, game: GameRecord):
     if not game or not game.id:
         return
@@ -5456,24 +5558,31 @@ def _sync_new_customer_pull_records_for_game(session: Session, game: GameRecord)
     ).all()
     existing_by_slot = {row.source_player_index: row for row in existing_rows}
 
-    order_dt = _parse_order_start_dt(game.order_start_time)
+    order_dt = _parse_order_start_dt(game.order_start_time) or _game_reservation_dt(game)
     source = _normalize_text(game.record_source) or FORMED_SOURCE_NORMAL
     is_valid_source = (
         _normalize_text(game.status) == "formed"
         and source in FORMED_SOURCE_OPTIONS
-        and order_dt is not None
     )
 
-    active_slots = set()
+    removable_slots = set()
     if is_valid_source:
         for idx in range(1, 5):
-            if not _is_pull_placeholder_player(
-                getattr(game, f"player_{idx}", None),
-                getattr(game, f"player_{idx}_wechat", None),
-            ):
+            player_name = getattr(game, f"player_{idx}", None)
+            player_wechat = getattr(game, f"player_{idx}_wechat", None)
+            if not _is_pull_placeholder_player(player_name, player_wechat):
+                if _is_concrete_pull_player(player_name, player_wechat):
+                    row = existing_by_slot.get(idx)
+                    if row:
+                        conflict_message = _new_customer_pull_replacement_conflict_message(
+                            session,
+                            game.id,
+                            [{"idx": idx, "name": player_name, "wechat": player_wechat}],
+                        )
+                        if not conflict_message:
+                            removable_slots.add(idx)
                 continue
 
-            active_slots.add(idx)
             row = existing_by_slot.get(idx)
             if not row:
                 row = NewCustomerPullRecord(
@@ -5493,13 +5602,8 @@ def _sync_new_customer_pull_records_for_game(session: Session, game: GameRecord)
             session.add(row)
 
     for row in existing_rows:
-        if row.source_player_index not in active_slots:
+        if not is_valid_source or row.source_player_index in removable_slots:
             session.delete(row)
-
-
-def _sync_new_customer_pull_records_for_games(session: Session, games: List[GameRecord]):
-    for game in games:
-        _sync_new_customer_pull_records_for_game(session, game)
 
 def _game_reservation_dt(game: GameRecord) -> datetime:
     """
@@ -5517,6 +5621,48 @@ def _game_reservation_dt(game: GameRecord) -> datetime:
         pass
 
     return datetime.combine(game.record_date, datetime.min.time())
+
+
+def _snapshot_cancelled_unformed_game_contacts(
+    session: Session,
+    game: GameRecord,
+    cancelled_by: Optional[str],
+) -> int:
+    """撤销未组齐牌局前保存有效接触顾客；万能替身号不写入。"""
+    if not game or not game.id or _normalize_text(game.status) != "unformed":
+        return 0
+
+    employee_name = _normalize_text(game.who_did)
+    store_name = _normalize_text(game.store_name)
+    if not employee_name or not store_name:
+        return 0
+
+    reservation_dt = _game_reservation_dt(game)
+    cancelled_at = datetime.now()
+    snapshot_count = 0
+    for idx in range(1, 5):
+        nickname = _normalize_text(getattr(game, f"player_{idx}", None))
+        wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+        if not nickname or not wechat_id:
+            continue
+        if _is_pull_placeholder_player(nickname, wechat_id):
+            continue
+
+        session.add(CancelledGameContactSnapshot(
+            source_game_id=game.id,
+            source_player_index=idx,
+            employee_name=employee_name,
+            store_name=store_name,
+            nickname=nickname,
+            wechat_id=wechat_id,
+            reservation_time=reservation_dt,
+            cancelled_at=cancelled_at,
+            cancelled_by=_normalize_text(cancelled_by) or None,
+        ))
+        snapshot_count += 1
+
+    return snapshot_count
+
 
 def _game_snapshot_for_play_type_stats(game: GameRecord) -> dict:
     return {
@@ -6191,6 +6337,7 @@ def build_game_recommendations(
         if not last_played_at or stat.last_played_at > last_played_at:
             last_played_at_by_wechat[wechat_id] = stat.last_played_at
 
+    exempt_customer_ids = _deposit_exempt_customer_ids(session)
     recommendations = []
     for wechat_id, customer in customer_by_wechat.items():
         if wechat_id in existing_player_wechats:
@@ -6256,6 +6403,7 @@ def build_game_recommendations(
             "customer_id": customer.id,
             "nickname": customer.nickname or "",
             "wechat_id": wechat_id,
+            "is_deposit_exempt": customer.id in exempt_customer_ids,
             "gender": customer.gender or "",
             "score": total_score,
             "play_count": play_count,
@@ -7481,11 +7629,13 @@ def get_customer_options_by_store(session: Session, store_name: str) -> List[dic
         select(Customer).where(Customer.id.in_(unique_ids)).order_by(Customer.id)
     ).all()
 
+    exempt_customer_ids = _deposit_exempt_customer_ids(session)
     return [
         {
             "id": c.id,
             "nickname": c.nickname,
-            "wechat_id": c.wechat_id
+            "wechat_id": c.wechat_id,
+            "is_deposit_exempt": c.id in exempt_customer_ids,
         }
         for c in customers
     ]
@@ -7603,6 +7753,7 @@ def build_handover_cards(session: Session, todos: List[HandoverTodo]) -> List[di
     # 2. 批量查顾客
     customer_ids = sorted(list(set([l.customer_id for l in links])))
     customer_map = {}
+    exempt_customer_ids = _deposit_exempt_customer_ids(session)
     if customer_ids:
         customer_rows = session.exec(
             select(Customer).where(Customer.id.in_(customer_ids))
@@ -7629,7 +7780,8 @@ def build_handover_cards(session: Session, todos: List[HandoverTodo]) -> List[di
             todo_customer_detail_map.setdefault(link.todo_id, []).append({
                 "id": cust.id,
                 "nickname": cust.nickname or "",
-                "wechat_id": cust.wechat_id or ""
+                "wechat_id": cust.wechat_id or "",
+                "is_deposit_exempt": cust.id in exempt_customer_ids,
             })
 
     # 4. 组装卡片
@@ -7752,30 +7904,29 @@ def get_game_noted_players_snapshot(session: Session, game: GameRecord) -> List[
     """
     result = []
 
-    if game.status != "unformed":
-        for idx in range(1, 5):
-            nickname = _normalize_text(getattr(game, f"player_{idx}", None))
-            wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
-            note = _normalize_text(getattr(game, f"player_{idx}_note", None))
+    for idx in range(1, 5):
+        nickname = _normalize_text(getattr(game, f"player_{idx}", None))
+        wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+        note = _normalize_text(getattr(game, f"player_{idx}_note", None))
 
-            if not note:
-                continue
+        if not note:
+            continue
 
-            customer_id = None
-            if wechat_id:
-                cust = session.exec(
-                    select(Customer).where(Customer.wechat_id == wechat_id)
-                ).first()
-                if cust:
-                    customer_id = cust.id
+        customer_id = None
+        if wechat_id:
+            cust = session.exec(
+                select(Customer).where(Customer.wechat_id == wechat_id)
+            ).first()
+            if cust:
+                customer_id = cust.id
 
-            result.append({
-                "slot": idx,
-                "nickname": nickname,
-                "wechat_id": wechat_id,
-                "note": note,
-                "customer_id": customer_id
-            })
+        result.append({
+            "slot": idx,
+            "nickname": nickname,
+            "wechat_id": wechat_id,
+            "note": note,
+            "customer_id": customer_id
+        })
 
     table_note = _normalize_text(game.table_note)
     if table_note:
@@ -7794,7 +7945,7 @@ def build_formed_game_handover_summary(game: GameRecord) -> str:
     """
     事件概述固定模板：
     已组齐牌局备注同步（时间+#月序号）
-    未组齐牌局整桌备注同步（时间+#月序号）
+    未组齐牌局备注同步（时间+#月序号）
 
     时间优先取订单开始时间；没有则回退到预约时间展示。
     """
@@ -7808,7 +7959,7 @@ def build_formed_game_handover_summary(game: GameRecord) -> str:
         time_text = game.start_time or ""
 
     if game.status == "unformed":
-        return f"未组齐牌局整桌备注同步（{time_text} #{game.serial_number}）"
+        return f"未组齐牌局备注同步（{time_text} #{game.serial_number}）"
 
     return f"已组齐牌局备注同步（{time_text} #{game.serial_number}）"
 
@@ -7819,7 +7970,7 @@ def build_formed_game_handover_detail(game: GameRecord, noted_players: List[dict
     lines = []
 
     if game.status == "unformed":
-        lines.append("【来源】未组齐牌局整桌备注自动同步")
+        lines.append("【来源】未组齐牌局备注自动同步")
     else:
         lines.append("【来源】已组齐牌局备注自动同步")
     lines.append(f"门店：{game.store_name or ''}")
@@ -7989,7 +8140,7 @@ def sync_formed_game_note_to_handover(
     牌局同步备注 -> 待办联动核心逻辑
 
     规则：
-    1. 已组齐看 player_1_note ~ player_4_note + table_note；未组齐看 table_note
+    1. 未组齐、已组齐均看 player_1_note ~ player_4_note + table_note
     2. 有备注：
        - 无关联待办则新建
        - 有关联待办则更新
@@ -15895,6 +16046,7 @@ async def read_root(
             results.sort(key=_unformed_sort_key, reverse=True)
 
     game_smoke_type_map = get_game_smoke_type_map(session, [g.id for g in results if g.id])
+    exempt_wechat_keys = _deposit_exempt_wechat_keys(session)
 
     return templates.TemplateResponse("index.html", {
         "request": request,
@@ -15904,6 +16056,9 @@ async def read_root(
         "room_list": current_store_rooms,  # 新增：传给前端当前门店的包间
         "game_list": results,
         "game_smoke_type_map": game_smoke_type_map,
+        "deposit_exempt_player_indices_by_game": _deposit_exempt_player_indices_by_game(
+            results, exempt_wechat_keys
+        ),
         "smoke_type_label_map": SMOKE_TYPE_LABEL_MAP,
         "today_date": date.today(),
         "focus_game_id": focus_game_id,
@@ -16753,6 +16908,7 @@ async def customer_search(
         )
     )
 
+    exempt_customer_ids = _deposit_exempt_customer_ids(session)
     items = []
     for cust in matched_customers[:limit]:
         items.append({
@@ -16760,7 +16916,8 @@ async def customer_search(
             "nickname": cust.nickname or "",
             "wechat_id": cust.wechat_id or "",
             "gender": cust.gender or "",
-            "guarantee_deposit": cust.guarantee_deposit or 0
+            "guarantee_deposit": cust.guarantee_deposit or 0,
+            "is_deposit_exempt": cust.id in exempt_customer_ids,
         })
 
     return JSONResponse(items)
@@ -16886,6 +17043,9 @@ async def add_game(
         player_1_wechat: str = Form(""), player_2_wechat: str = Form(""),
         player_3_wechat: str = Form(""), player_4_wechat: str = Form(""),
 
+        player_1_note: str = Form(""), player_2_note: str = Form(""),
+        player_3_note: str = Form(""), player_4_note: str = Form(""),
+
         tags: str = Form(""),
         table_note: str = Form(""),
         smoke_type: str = Form(SMOKE_TYPE_SMOKING),
@@ -16986,6 +17146,11 @@ async def add_game(
         player_3_wechat=_normalize_text(player_3_wechat),
         player_4_wechat=_normalize_text(player_4_wechat),
 
+        player_1_note=(_normalize_text(player_1_note) or None) if _normalize_text(player_1) and _normalize_text(player_1_wechat) else None,
+        player_2_note=(_normalize_text(player_2_note) or None) if _normalize_text(player_2) and _normalize_text(player_2_wechat) else None,
+        player_3_note=(_normalize_text(player_3_note) or None) if _normalize_text(player_3) and _normalize_text(player_3_wechat) else None,
+        player_4_note=(_normalize_text(player_4_note) or None) if _normalize_text(player_4) and _normalize_text(player_4_wechat) else None,
+
         # 未组齐区特殊备注来源：tags
         tags=_normalize_text(tags),
         table_note=_normalize_text(table_note) or None,
@@ -17055,6 +17220,7 @@ async def update_game_status(
 
     old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
     old_recommendation_time_snapshot = _game_recommendation_time_snapshot(session, game)
+    old_noted_players_snapshot = get_game_noted_players_snapshot(session, game)
 
     # ===== 1) 组齐 =====
     if action == "confirm":
@@ -17131,6 +17297,20 @@ async def update_game_status(
                 status_code=303
             )
 
+        slots = _normalize_player_slots(
+            game.player_1, game.player_2, game.player_3, game.player_4,
+            game.player_1_wechat, game.player_2_wechat,
+            game.player_3_wechat, game.player_4_wechat,
+        )
+        conflict_message = _new_customer_pull_replacement_conflict_message(
+            session, game.id, slots
+        )
+        if conflict_message:
+            return RedirectResponse(
+                url="/?" + urlencode({"store": store, "error": conflict_message}),
+                status_code=303,
+            )
+
         game.status = "formed"
 
         # V2：谁点击“组齐”，who_did 就覆盖为谁
@@ -17141,6 +17321,12 @@ async def update_game_status(
 
         session.add(game)
         session.flush()
+        sync_formed_game_note_to_handover(
+            session=session,
+            game=game,
+            operator=user,
+            old_noted_players_snapshot=old_noted_players_snapshot,
+        )
         _sync_new_customer_pull_records_for_game(session, game)
         sync_customer_play_type_stats_for_changed_games(session, game)
         sync_customer_recommendation_time_bucket_stats_for_changed_games(session, old_recommendation_time_snapshot, game)
@@ -17166,6 +17352,12 @@ async def update_game_status(
 
         session.add(game)
         session.flush()
+        sync_formed_game_note_to_handover(
+            session=session,
+            game=game,
+            operator=user,
+            old_noted_players_snapshot=old_noted_players_snapshot,
+        )
         _sync_new_customer_pull_records_for_game(session, game)
         sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot, game)
         sync_customer_recommendation_time_bucket_stats_for_changed_games(session, old_recommendation_time_snapshot, game)
@@ -17210,6 +17402,13 @@ async def update_game_status(
                     status_code=303
                 )
 
+        if game.status == "unformed":
+            _snapshot_cancelled_unformed_game_contacts(
+                session=session,
+                game=game,
+                cancelled_by=user.display_name,
+            )
+
         pull_rows = session.exec(
             select(NewCustomerPullRecord).where(NewCustomerPullRecord.source_game_id == game.id)
         ).all()
@@ -17243,6 +17442,9 @@ async def update_game(
 
         player_1_wechat: str = Form(""), player_2_wechat: str = Form(""),
         player_3_wechat: str = Form(""), player_4_wechat: str = Form(""),
+
+        player_1_note: str = Form(""), player_2_note: str = Form(""),
+        player_3_note: str = Form(""), player_4_note: str = Form(""),
 
         tags: str = Form(""),
         table_note: str = Form(""),
@@ -17303,6 +17505,24 @@ async def update_game(
             status_code=303
         )
 
+    conflict_message = _new_customer_pull_replacement_conflict_message(
+        session, game.id, slots
+    )
+    if conflict_message:
+        redirect_url = _build_formed_redirect_url(
+            store=store_name,
+            source_filter=_normalize_text(game.record_source) or FORMED_SOURCE_NORMAL,
+            error=conflict_message,
+        ) if game.status == "formed" else _build_root_redirect_url(
+            store_name, error=conflict_message
+        )
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    p1_changed = _player_changed(game.player_1, game.player_1_wechat, player_1, player_1_wechat)
+    p2_changed = _player_changed(game.player_2, game.player_2_wechat, player_2, player_2_wechat)
+    p3_changed = _player_changed(game.player_3, game.player_3_wechat, player_3, player_3_wechat)
+    p4_changed = _player_changed(game.player_4, game.player_4_wechat, player_4, player_4_wechat)
+
     # 3. 解析预约时间
     new_record_date, new_start_time_str = _parse_reservation_datetime_local(start_time_full)
 
@@ -17358,6 +17578,11 @@ async def update_game(
     game.player_2_wechat = _normalize_text(player_2_wechat)
     game.player_3_wechat = _normalize_text(player_3_wechat)
     game.player_4_wechat = _normalize_text(player_4_wechat)
+
+    game.player_1_note = None if p1_changed or not (_normalize_text(player_1) and _normalize_text(player_1_wechat)) else (_normalize_text(player_1_note) or None)
+    game.player_2_note = None if p2_changed or not (_normalize_text(player_2) and _normalize_text(player_2_wechat)) else (_normalize_text(player_2_note) or None)
+    game.player_3_note = None if p3_changed or not (_normalize_text(player_3) and _normalize_text(player_3_wechat)) else (_normalize_text(player_3_note) or None)
+    game.player_4_note = None if p4_changed or not (_normalize_text(player_4) and _normalize_text(player_4_wechat)) else (_normalize_text(player_4_note) or None)
 
     game.tags = _normalize_text(tags)
     game.table_note = _normalize_text(table_note) or None
@@ -17759,6 +17984,7 @@ async def formed_games(
         for g in page_game_list
         if g.id
     }
+    exempt_wechat_keys = _deposit_exempt_wechat_keys(session)
 
     return templates.TemplateResponse("formed_games.html", {
         "request": request,
@@ -17767,6 +17993,9 @@ async def formed_games(
         "store_list": store_list,
         "room_list": current_store_rooms,
         "game_list": page_game_list,
+        "deposit_exempt_player_indices_by_game": _deposit_exempt_player_indices_by_game(
+            page_game_list, exempt_wechat_keys
+        ),
         "current_user": user,
 
         "source_filter": source_filter,
@@ -18594,6 +18823,25 @@ async def update_self_arrival_game(
                 status_code=303
             )
 
+    conflict_message = _new_customer_pull_replacement_conflict_message(
+        session, game.id, slots
+    )
+    if conflict_message:
+        return _ajax_or_redirect_error(
+            request,
+            message=conflict_message,
+            redirect_url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_SELF_ARRIVAL,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=conflict_message,
+            ),
+        )
+
     if payment_method != "代客收款" and _has_any_system_receipt(session, game):
         return RedirectResponse(
             url=_build_formed_redirect_url(
@@ -19305,6 +19553,25 @@ async def update_overflow_game(
                 error=msg
             ),
             status_code=303
+        )
+
+    conflict_message = _new_customer_pull_replacement_conflict_message(
+        session, game.id, slots
+    )
+    if conflict_message:
+        return _ajax_or_redirect_error(
+            request,
+            message=conflict_message,
+            redirect_url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_OVERFLOW,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=conflict_message,
+            ),
         )
 
     p1_changed = _player_changed(game.player_1, game.player_1_wechat, player_1, player_1_wechat)
@@ -20096,6 +20363,25 @@ async def update_formed_game(
             )
         )
 
+    conflict_message = _new_customer_pull_replacement_conflict_message(
+        session, game.id, slots
+    )
+    if conflict_message:
+        return _ajax_or_redirect_error(
+            request,
+            message=conflict_message,
+            redirect_url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_NORMAL,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=conflict_message,
+            ),
+        )
+
     new_record_date, new_start_time_str = _parse_reservation_datetime_local(start_time_full)
     final_stakes = _normalize_text(stakes_custom) if stakes_select == "其他" else _normalize_text(stakes_select)
     final_payment_method = _normalize_text(payment_method) or None
@@ -20294,6 +20580,7 @@ async def get_game_detail(
             return f"{secs // 3600}小时前"
         return f"{secs // 86400}天前"
 
+    exempt_wechat_keys = _deposit_exempt_wechat_keys(session)
     players = []
     for idx in range(1, 5):
         name = getattr(game, f"player_{idx}", None)
@@ -20304,7 +20591,8 @@ async def get_game_detail(
                 "index": idx,
                 "name": name or "",
                 "wechat": wechat or "",
-                "note": note or ""
+                "note": note or "",
+                "is_deposit_exempt": _normalize_text(wechat).casefold() in exempt_wechat_keys,
             })
 
     payment_breakdown = _load_single_payment_breakdown(session, game)
@@ -20360,6 +20648,267 @@ async def get_game_detail(
 
         "players": players
     })
+
+
+class DepositExemptAddRequest(BaseModel):
+    store_name: str
+    customer_ids: List[int]
+
+
+@app.get("/deposit-exempt-customers")
+async def deposit_exempt_customers_page(
+        request: Request,
+        store: str = "牛王庙店",
+        filter_store: str = "all",
+        success: str = "",
+        error: str = "",
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user),
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    store_list = get_active_store_name_list(session)
+    if store not in store_list and store_list:
+        store = store_list[0]
+    if filter_store not in {"all", *store_list}:
+        filter_store = "all"
+
+    exemptions = session.exec(
+        select(CustomerDepositExemption).where(
+            CustomerDepositExemption.is_active == True
+        ).order_by(
+            CustomerDepositExemption.created_at.desc(),
+            CustomerDepositExemption.id.desc(),
+        )
+    ).all()
+    customer_ids = [row.customer_id for row in exemptions]
+    customers = session.exec(
+        select(Customer).where(
+            Customer.id.in_(customer_ids),
+            Customer.is_deleted == False,
+        )
+    ).all() if customer_ids else []
+    customer_map = {customer.id: customer for customer in customers}
+
+    links = session.exec(
+        select(CustomerStoreLink).where(CustomerStoreLink.customer_id.in_(customer_ids))
+    ).all() if customer_ids else []
+    stores_by_customer_id: Dict[int, List[str]] = {}
+    for link in links:
+        names = stores_by_customer_id.setdefault(link.customer_id, [])
+        if link.store_name and link.store_name not in names:
+            names.append(link.store_name)
+
+    exemption_list = []
+    for exemption in exemptions:
+        customer = customer_map.get(exemption.customer_id)
+        if not customer:
+            continue
+        customer_store_names = stores_by_customer_id.get(customer.id, [])
+        if filter_store != "all" and filter_store not in customer_store_names:
+            continue
+        exemption_list.append({
+            "customer_id": customer.id,
+            "nickname": customer.nickname or "",
+            "wechat_id": customer.wechat_id or "",
+            "store_names": customer_store_names,
+            "created_at": exemption.created_at,
+            "created_by": exemption.created_by or "",
+        })
+
+    return templates.TemplateResponse("deposit_exempt_customers.html", {
+        "request": request,
+        "page_name": "deposit_exempt_customers",
+        "current_store": store,
+        "filter_store": filter_store,
+        "store_list": store_list,
+        "current_user": user,
+        "exemption_list": exemption_list,
+        "success": success,
+        "error": error,
+    })
+
+
+@app.get("/api/deposit-exempt/customer-options")
+async def deposit_exempt_customer_options(
+        store_name: str,
+        keyword: str = "",
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user),
+):
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录")
+
+    store_name = _normalize_text(store_name)
+    if store_name not in get_active_store_name_list(session):
+        raise HTTPException(status_code=400, detail="所选门店不存在或未启用")
+
+    customer_ids = sorted(set(session.exec(
+        select(CustomerStoreLink.customer_id).where(
+            CustomerStoreLink.store_name == store_name
+        )
+    ).all()))
+    if not customer_ids:
+        return JSONResponse([])
+
+    customers = session.exec(
+        select(Customer).where(
+            Customer.id.in_(customer_ids),
+            Customer.is_deleted == False,
+        ).order_by(Customer.id)
+    ).all()
+    keyword = _normalize_text(keyword).casefold()
+    if keyword:
+        customers = [
+            customer for customer in customers
+            if keyword in str(customer.id)
+            or keyword in _normalize_text(customer.nickname).casefold()
+            or keyword in _normalize_text(customer.wechat_id).casefold()
+        ]
+        customers.sort(key=lambda customer: (
+            0 if str(customer.id) == keyword else 1,
+            0 if _normalize_text(customer.wechat_id).casefold() == keyword else 1,
+            customer.id,
+        ))
+
+    exempt_ids = _deposit_exempt_customer_ids(session)
+    return JSONResponse([{
+        "id": customer.id,
+        "nickname": customer.nickname or "",
+        "wechat_id": customer.wechat_id or "",
+        "is_deposit_exempt": customer.id in exempt_ids,
+    } for customer in customers])
+
+
+@app.post("/api/deposit-exempt/add")
+async def add_deposit_exempt_customers(
+        payload: DepositExemptAddRequest,
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user),
+):
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录")
+
+    store_name = _normalize_text(payload.store_name)
+    if store_name not in get_active_store_name_list(session):
+        return JSONResponse({"ok": False, "message": "所选门店不存在或未启用"}, status_code=400)
+
+    customer_ids = list(dict.fromkeys(
+        int(customer_id) for customer_id in payload.customer_ids if customer_id is not None
+    ))
+    if not customer_ids:
+        return JSONResponse({"ok": False, "message": "请至少选择一位顾客"}, status_code=400)
+
+    valid_store_customer_ids = set(session.exec(
+        select(CustomerStoreLink.customer_id).where(
+            CustomerStoreLink.store_name == store_name,
+            CustomerStoreLink.customer_id.in_(customer_ids),
+        )
+    ).all())
+    customers = session.exec(
+        select(Customer).where(
+            Customer.id.in_(customer_ids),
+            Customer.is_deleted == False,
+        )
+    ).all()
+    customer_map = {customer.id: customer for customer in customers}
+    invalid_ids = [
+        customer_id for customer_id in customer_ids
+        if customer_id not in valid_store_customer_ids or customer_id not in customer_map
+    ]
+    if invalid_ids:
+        return JSONResponse({
+            "ok": False,
+            "message": f"以下顾客不属于所选门店或已失效：{', '.join(map(str, invalid_ids))}",
+        }, status_code=400)
+
+    existing_rows = session.exec(
+        select(CustomerDepositExemption).where(
+            CustomerDepositExemption.customer_id.in_(customer_ids)
+        )
+    ).all()
+    existing_by_customer_id = {row.customer_id: row for row in existing_rows}
+    duplicate_ids = [
+        customer_id for customer_id in customer_ids
+        if customer_id in existing_by_customer_id
+        and existing_by_customer_id[customer_id].is_active
+    ]
+    if duplicate_ids:
+        duplicates = [{
+            "id": customer_id,
+            "nickname": customer_map[customer_id].nickname or "",
+            "wechat_id": customer_map[customer_id].wechat_id or "",
+        } for customer_id in duplicate_ids]
+        return JSONResponse({
+            "ok": False,
+            "duplicate": True,
+            "message": "存在已经添加过的免押用户，本次未添加任何顾客",
+            "duplicates": duplicates,
+        }, status_code=409)
+
+    now = datetime.now()
+    for customer_id in customer_ids:
+        row = existing_by_customer_id.get(customer_id)
+        if row:
+            row.is_active = True
+            row.added_from_store = store_name
+            row.updated_at = now
+            row.revoked_at = None
+            row.revoked_by = None
+        else:
+            row = CustomerDepositExemption(
+                customer_id=customer_id,
+                added_from_store=store_name,
+                is_active=True,
+                created_at=now,
+            )
+        row.created_by = user.display_name
+        session.add(row)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        return JSONResponse({
+            "ok": False,
+            "duplicate": True,
+            "message": "免押用户状态已被其他操作更新，请刷新后重试",
+            "duplicates": [],
+        }, status_code=409)
+
+    return JSONResponse({
+        "ok": True,
+        "message": f"成功添加 {len(customer_ids)} 位免押用户",
+        "added_count": len(customer_ids),
+    })
+
+
+@app.post("/api/deposit-exempt/cancel/{customer_id}")
+async def cancel_deposit_exempt_customer(
+        customer_id: int,
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user),
+):
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录")
+
+    row = session.exec(
+        select(CustomerDepositExemption).where(
+            CustomerDepositExemption.customer_id == customer_id,
+            CustomerDepositExemption.is_active == True,
+        )
+    ).first()
+    if not row:
+        return JSONResponse({"ok": False, "message": "该顾客当前不是免押用户"}, status_code=404)
+
+    now = datetime.now()
+    row.is_active = False
+    row.updated_at = now
+    row.revoked_at = now
+    row.revoked_by = user.display_name
+    session.add(row)
+    session.commit()
+    return JSONResponse({"ok": True, "message": "已取消该顾客的免押资格"})
 
 
 # === 顾客管理页面接口 (GET) ===
@@ -20664,6 +21213,7 @@ async def read_customers(
         "error": error,
         "duplicate_nickname": duplicate_nickname,
         "source_ports": PUBLIC_TRAFFIC_SOURCE_PORTS,
+        "deposit_exempt_wechat_keys": sorted(_deposit_exempt_wechat_keys(session)),
     }
 
     if tab == "public_traffic":
@@ -20997,6 +21547,41 @@ async def read_customers(
                         "first_contact_dt": reservation_dt,
                     }
 
+        snapshot_start_dt = datetime.combine(range_start, time.min)
+        snapshot_end_dt = datetime.combine(range_end + timedelta(days=1), time.min)
+        cancelled_contact_snapshots = session.exec(
+            select(CancelledGameContactSnapshot).where(
+                CancelledGameContactSnapshot.reservation_time >= snapshot_start_dt,
+                CancelledGameContactSnapshot.reservation_time < snapshot_end_dt,
+            )
+        ).all()
+        for snapshot in cancelled_contact_snapshots:
+            employee_name = _normalize_text(snapshot.employee_name)
+            source_store_name = _normalize_text(snapshot.store_name)
+            nickname = _normalize_text(snapshot.nickname)
+            wechat_id = _normalize_text(snapshot.wechat_id)
+            reservation_dt = snapshot.reservation_time
+
+            if not employee_name or not source_store_name or not nickname or not wechat_id:
+                continue
+            if _is_pull_placeholder_player(nickname, wechat_id):
+                continue
+            if contact_employee != "all" and employee_name != contact_employee:
+                continue
+            if contact_store_filter != "all" and source_store_name != contact_store_filter:
+                continue
+
+            key = (employee_name, source_store_name, wechat_id)
+            existing = contact_map.get(key)
+            if not existing or reservation_dt < existing["first_contact_dt"]:
+                contact_map[key] = {
+                    "employee_name": employee_name,
+                    "store_name": source_store_name,
+                    "nickname": nickname,
+                    "wechat_id": wechat_id,
+                    "first_contact_dt": reservation_dt,
+                }
+
         contact_items = sorted(
             contact_map.values(),
             key=lambda item: (item["employee_name"], item["store_name"], item["first_contact_dt"], item["wechat_id"])
@@ -21092,24 +21677,9 @@ async def read_customers(
             if pull_employee != "all" and pull_employee not in employee_names:
                 pull_employee = "all"
 
-        candidate_games = session.exec(
-            select(GameRecord).where(
-                GameRecord.status == "formed",
-                GameRecord.order_start_time.is_not(None),
-            )
-        ).all()
-        sync_games = []
-        for game in candidate_games:
-            order_dt = _parse_order_start_dt(game.order_start_time)
-            if order_dt and start_dt <= order_dt < end_dt_exclusive:
-                sync_games.append(game)
-        _sync_new_customer_pull_records_for_games(session, sync_games)
-        if sync_games:
-            session.commit()
-
         stmt = select(NewCustomerPullRecord).where(
-            NewCustomerPullRecord.order_start_time >= start_dt,
-            NewCustomerPullRecord.order_start_time < end_dt_exclusive,
+            NewCustomerPullRecord.created_at >= start_dt,
+            NewCustomerPullRecord.created_at < end_dt_exclusive,
         )
         if pull_employee != "all":
             stmt = stmt.where(NewCustomerPullRecord.pull_employee == pull_employee)
@@ -21117,7 +21687,7 @@ async def read_customers(
         pull_records = session.exec(stmt).all()
         pull_records.sort(key=lambda row: (
             1 if _new_customer_pull_is_success(row) else 0,
-            -int(row.order_start_time.timestamp()) if row.order_start_time else 0,
+            -int(row.created_at.timestamp()) if row.created_at else 0,
             row.id or 0,
         ))
 
@@ -21171,6 +21741,7 @@ async def read_customers(
         ))
 
     customers = session.exec(query).all()
+    exempt_customer_ids = _deposit_exempt_customer_ids(session)
 
     # 3. 数据组装
     customer_data_list = []
@@ -21212,6 +21783,7 @@ async def read_customers(
             "current_store_visit_count": visit_count,
             "current_store_link_id": current_store_link.id if current_store_link else None,
             "in_group_chat": bool(current_store_link.in_group_chat) if current_store_link else False,
+            "is_deposit_exempt": cust.id in exempt_customer_ids,
         })
 
     if duplicate_nickname:
@@ -22759,6 +23331,7 @@ async def get_customer_details(
     cust = session.get(Customer, customer_id)
     if not cust:
         return {"error": "顾客不存在"}
+    exempt_customer_ids = _deposit_exempt_customer_ids(session)
 
     # 1. 当前已绑定门店（以 CustomerStoreLink 为准）
     link_rows = session.exec(
@@ -22799,7 +23372,8 @@ async def get_customer_details(
                 "id": record.id,
                 "target_name": target.nickname,
                 "target_wechat": target.wechat_id,
-                "reason": record.reason
+                "reason": record.reason,
+                "is_deposit_exempt": target.id in exempt_customer_ids,
             })
 
     # 4. 同场次记录
@@ -22821,7 +23395,8 @@ async def get_customer_details(
                 "partner_id": partner.id,
                 "partner_name": partner.nickname,
                 "partner_wechat": partner.wechat_id,
-                "count": record.count
+                "count": record.count,
+                "is_deposit_exempt": partner.id in exempt_customer_ids,
             })
 
     # 5. 人情维护记录（未删除）
@@ -22874,6 +23449,7 @@ async def get_customer_details(
             "nickname": cust.nickname,
             "wechat_id": cust.wechat_id,
             "gender": cust.gender,
+            "is_deposit_exempt": cust.id in exempt_customer_ids,
             "last_visit_date": str(cust.last_visit_date) if cust.last_visit_date else "",
             "created_at": str(cust.created_at) if cust.created_at else ""
         },
@@ -23505,6 +24081,7 @@ async def brand_blacklist_page(
         "page_name": "brand_blacklist",
         "current_user": user,
         "record_list": page_records,
+        "deposit_exempt_wechat_keys": sorted(_deposit_exempt_wechat_keys(session)),
         "keyword": keyword,
         "status_filter": status_filter,
         "list_offset": list_offset,
@@ -24179,6 +24756,7 @@ async def maintenance_records_page(
         store_customer_ids_map.setdefault(link.store_name, set()).add(link.customer_id)
 
     all_customers = session.exec(select(Customer)).all()
+    exempt_customer_ids = _deposit_exempt_customer_ids(session)
     customer_map = {}
     customer_dict = {c.id: c for c in all_customers}
     for s_name, cust_ids in store_customer_ids_map.items():
@@ -24189,7 +24767,8 @@ async def maintenance_records_page(
                 customer_map[s_name].append({
                     "id": cust.id,
                     "nickname": cust.nickname,
-                    "wechat_id": cust.wechat_id
+                    "wechat_id": cust.wechat_id,
+                    "is_deposit_exempt": cust.id in exempt_customer_ids,
                 })
 
     # 月份范围
@@ -24214,6 +24793,7 @@ async def maintenance_records_page(
             "id": rec.id,
             "record_date": rec.record_date,
             "customer_name": cust.nickname if cust else "未知顾客",
+            "is_deposit_exempt": bool(cust and cust.id in exempt_customer_ids),
             "gift_name": rec.gift_name,
             "amount": rec.amount
         })
@@ -25411,6 +25991,7 @@ async def api_handover_customer_search(
         )
 
     customers = session.exec(stmt).all()
+    exempt_customer_ids = _deposit_exempt_customer_ids(session)
 
     # 排序：完全匹配优先，昵称短优先，最新优先
     customers.sort(
@@ -25427,7 +26008,8 @@ async def api_handover_customer_search(
             "nickname": c.nickname or "",
             "wechat_id": c.wechat_id or "",
             "gender": c.gender or "",
-            "guarantee_deposit": c.guarantee_deposit or 0
+            "guarantee_deposit": c.guarantee_deposit or 0,
+            "is_deposit_exempt": c.id in exempt_customer_ids,
         }
         for c in customers[:limit]
     ])

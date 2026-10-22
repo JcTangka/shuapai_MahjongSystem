@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+
+{% block title %}免押用户 - 耍牌系统{% endblock %}
+
+{% block breadcrumb %}
+<i class="bi bi-house-door"></i> 首页 <span class="mx-2">/</span> 顾客管理 <span class="mx-2">/</span> 免押用户
+{% endblock %}
+
+{% block head_extra %}
+<style>
+    .exempt-card { border: 0; border-radius: 14px; box-shadow: 0 4px 16px rgba(15, 23, 42, .08); }
+    .customer-option-list { max-height: 360px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 10px; }
+    .customer-option { display: flex; gap: 12px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #f0f2f5; cursor: pointer; }
+    .customer-option:last-child { border-bottom: 0; }
+    .customer-option:hover { background: #f6fff9; }
+    .customer-option-meta { color: #6c757d; font-size: .85rem; }
+    .exempt-user-identity { display: inline-block; padding: 5px 10px; border-radius: 8px; }
+</style>
+{% endblock %}
+
+{% block content %}
+{% if success %}<div class="alert alert-success">{{ success }}</div>{% endif %}
+{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+
+<div class="d-flex justify-content-between align-items-center flex-wrap gap-3 mb-3">
+    <div>
+        <h3 class="mb-1"><i class="bi bi-shield-check text-success me-2"></i>免押用户</h3>
+        <div class="text-muted small">免押资格按顾客全局生效，同一顾客跨门店出现时仍会保持绿色标记。</div>
+    </div>
+    <button class="btn btn-success" data-bs-toggle="modal" data-bs-target="#addDepositExemptModal">
+        <i class="bi bi-person-plus me-1"></i>添加免押用户
+    </button>
+</div>
+
+<div class="card exempt-card mb-3">
+    <div class="card-body">
+        <form method="get" action="/deposit-exempt-customers" class="row g-2 align-items-end">
+            <input type="hidden" name="store" value="{{ current_store }}">
+            <div class="col-md-4 col-lg-3">
+                <label class="form-label fw-bold">顾客所属门店</label>
+                <select class="form-select" name="filter_store" onchange="this.form.submit()">
+                    <option value="all" {% if filter_store == 'all' %}selected{% endif %}>所有门店</option>
+                    {% for store_name in store_list %}
+                    <option value="{{ store_name }}" {% if filter_store == store_name %}selected{% endif %}>{{ store_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card exempt-card">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th style="width: 80px;">序号</th>
+                    <th>免押用户昵称/微信号</th>
+                    <th>顾客所属门店（所有门店）</th>
+                    <th style="width: 150px;">操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in exemption_list %}
+                <tr id="exempt-row-{{ item.customer_id }}">
+                    <td>{{ loop.index }}</td>
+                    <td>
+                        <div class="exempt-user-identity deposit-exempt-mark">
+                            <div>{{ item.nickname or '-' }} <span class="badge bg-success ms-1">免押</span></div>
+                            <div class="small">{{ item.wechat_id or '-' }} · ID {{ item.customer_id }}</div>
+                        </div>
+                    </td>
+                    <td>
+                        {% for store_name in item.store_names %}
+                        <span class="badge bg-light text-dark border me-1 mb-1">{{ store_name }}</span>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endfor %}
+                    </td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-danger"
+                                data-customer-id="{{ item.customer_id }}"
+                                data-nickname="{{ (item.nickname or item.wechat_id)|forceescape }}"
+                                onclick="cancelDepositExempt(this)">
+                            <i class="bi bi-x-circle me-1"></i>取消免押
+                        </button>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" class="text-muted py-5"><i class="bi bi-inbox fs-2 d-block mb-2"></i>当前筛选范围暂无免押用户</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="modal fade" id="addDepositExemptModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header bg-success text-white">
+                <h5 class="modal-title"><i class="bi bi-person-plus me-2"></i>添加免押用户</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-3">
+                    <div class="col-md-5">
+                        <label class="form-label fw-bold">选择门店</label>
+                        <select class="form-select" id="exemptStoreSelect">
+                            {% for store_name in store_list %}
+                            <option value="{{ store_name }}" {% if store_name == current_store %}selected{% endif %}>{{ store_name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-7">
+                        <label class="form-label fw-bold">查找顾客</label>
+                        <input type="search" class="form-control" id="exemptCustomerSearch"
+                               placeholder="输入顾客ID、昵称或微信号快速索引" autocomplete="off">
+                    </div>
+                </div>
+                <div class="d-flex justify-content-between align-items-center mt-3 mb-2">
+                    <span class="small text-muted">可单选或多选；未搜索时显示该门店全部顾客</span>
+                    <span class="badge bg-success" id="exemptSelectedCount">已选 0 人</span>
+                </div>
+                <div class="customer-option-list" id="exemptCustomerOptions">
+                    <div class="text-muted text-center py-4">正在加载顾客...</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-success" id="confirmAddExemptButton" onclick="submitDepositExempt()">
+                    确定添加
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let exemptOptions = [];
+    let selectedExemptCustomerIds = new Set();
+    let exemptSearchTimer = null;
+
+    function escapeExemptHtml(value) {
+        const div = document.createElement('div');
+        div.textContent = value == null ? '' : String(value);
+        return div.innerHTML;
+    }
+
+    function updateExemptSelectedCount() {
+        document.getElementById('exemptSelectedCount').textContent = `已选 ${selectedExemptCustomerIds.size} 人`;
+    }
+
+    function renderExemptOptions() {
+        const box = document.getElementById('exemptCustomerOptions');
+        if (!exemptOptions.length) {
+            box.innerHTML = '<div class="text-muted text-center py-4">该门店暂无匹配顾客</div>';
+            return;
+        }
+        box.innerHTML = exemptOptions.map(item => `
+            <label class="customer-option ${item.is_deposit_exempt ? 'deposit-exempt-mark' : ''}">
+                <input class="form-check-input flex-shrink-0" type="checkbox" value="${item.id}"
+                       ${selectedExemptCustomerIds.has(item.id) ? 'checked' : ''}
+                       onchange="toggleExemptCustomer(${item.id}, this.checked)">
+                <span class="flex-grow-1">
+                    <span class="fw-bold">${escapeExemptHtml(item.nickname || '-')}</span>
+                    ${item.is_deposit_exempt ? '<span class="badge bg-success ms-1">已免押</span>' : ''}
+                    <span class="customer-option-meta d-block">微信号：${escapeExemptHtml(item.wechat_id || '-')} · 顾客ID：${item.id}</span>
+                </span>
+            </label>
+        `).join('');
+    }
+
+    function toggleExemptCustomer(customerId, checked) {
+        if (checked) selectedExemptCustomerIds.add(customerId);
+        else selectedExemptCustomerIds.delete(customerId);
+        updateExemptSelectedCount();
+    }
+
+    async function loadExemptOptions() {
+        const storeName = document.getElementById('exemptStoreSelect').value;
+        const keyword = document.getElementById('exemptCustomerSearch').value.trim();
+        const box = document.getElementById('exemptCustomerOptions');
+        box.innerHTML = '<div class="text-muted text-center py-4">正在加载顾客...</div>';
+        try {
+            const response = await fetch(`/api/deposit-exempt/customer-options?store_name=${encodeURIComponent(storeName)}&keyword=${encodeURIComponent(keyword)}`);
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || data.message || '加载失败');
+            exemptOptions = Array.isArray(data) ? data : [];
+            renderExemptOptions();
+        } catch (error) {
+            box.innerHTML = `<div class="text-danger text-center py-4">${escapeExemptHtml(error.message)}</div>`;
+        }
+    }
+
+    async function submitDepositExempt() {
+        if (!selectedExemptCustomerIds.size) {
+            alert('请至少选择一位顾客');
+            return;
+        }
+        const button = document.getElementById('confirmAddExemptButton');
+        button.disabled = true;
+        try {
+            const response = await fetch('/api/deposit-exempt/add', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    store_name: document.getElementById('exemptStoreSelect').value,
+                    customer_ids: Array.from(selectedExemptCustomerIds),
+                }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                if (data.duplicate && Array.isArray(data.duplicates)) {
+                    const names = data.duplicates.map(item => `${item.nickname || '-'}（${item.wechat_id || '-'}，ID ${item.id}）`).join('\n');
+                    alert(`${data.message}\n\n重复顾客：\n${names}`);
+                    return;
+                }
+                throw new Error(data.message || data.detail || '添加失败');
+            }
+            window.location.href = `/deposit-exempt-customers?store=${encodeURIComponent(document.getElementById('exemptStoreSelect').value)}&success=${encodeURIComponent(data.message)}`;
+        } catch (error) {
+            alert(error.message || '添加失败，请稍后重试');
+        } finally {
+            button.disabled = false;
+        }
+    }
+
+    async function cancelDepositExempt(button) {
+        const customerId = Number(button.dataset.customerId || 0);
+        const nickname = button.dataset.nickname || '-';
+        if (!confirm(`确定取消“${nickname || '-'}”的免押资格吗？`)) return;
+        try {
+            const response = await fetch(`/api/deposit-exempt/cancel/${customerId}`, {method: 'POST'});
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.message || data.detail || '取消失败');
+            window.location.reload();
+        } catch (error) {
+            alert(error.message || '取消失败，请稍后重试');
+        }
+    }
+
+    document.getElementById('exemptStoreSelect').addEventListener('change', () => {
+        selectedExemptCustomerIds.clear();
+        document.getElementById('exemptCustomerSearch').value = '';
+        updateExemptSelectedCount();
+        loadExemptOptions();
+    });
+    document.getElementById('exemptCustomerSearch').addEventListener('input', () => {
+        clearTimeout(exemptSearchTimer);
+        exemptSearchTimer = setTimeout(loadExemptOptions, 180);
+    });
+    document.getElementById('addDepositExemptModal').addEventListener('shown.bs.modal', loadExemptOptions);
+</script>
+{% endblock %}

@@ -667,11 +667,12 @@
                     </td>
                     <td>
                         <div class="player-cell-wrap">
+                            {% set exempt_indices = deposit_exempt_player_indices_by_game.get(game.id, []) %}
                             <div class="d-flex justify-content-center gap-1 flex-wrap">
-                                {% if game.player_1 %}<span class="badge bg-light text-dark border">{{ game.player_1 }}</span>{% endif %}
-                                {% if game.player_2 %}<span class="badge bg-light text-dark border">{{ game.player_2 }}</span>{% endif %}
-                                {% if game.player_3 %}<span class="badge bg-light text-dark border">{{ game.player_3 }}</span>{% endif %}
-                                {% if game.player_4 %}<span class="badge bg-light text-dark border">{{ game.player_4 }}</span>{% endif %}
+                                {% if game.player_1 %}<span class="badge bg-light text-dark border {% if 1 in exempt_indices %}deposit-exempt-mark{% endif %}">{{ game.player_1 }}{% if 1 in exempt_indices %} · 免押{% endif %}</span>{% endif %}
+                                {% if game.player_2 %}<span class="badge bg-light text-dark border {% if 2 in exempt_indices %}deposit-exempt-mark{% endif %}">{{ game.player_2 }}{% if 2 in exempt_indices %} · 免押{% endif %}</span>{% endif %}
+                                {% if game.player_3 %}<span class="badge bg-light text-dark border {% if 3 in exempt_indices %}deposit-exempt-mark{% endif %}">{{ game.player_3 }}{% if 3 in exempt_indices %} · 免押{% endif %}</span>{% endif %}
+                                {% if game.player_4 %}<span class="badge bg-light text-dark border {% if 4 in exempt_indices %}deposit-exempt-mark{% endif %}">{{ game.player_4 }}{% if 4 in exempt_indices %} · 免押{% endif %}</span>{% endif %}
                             </div>
 
                             {% set ns = namespace(note_count=0) %}
@@ -846,7 +847,10 @@
                         {% endif %}
                     </td>
                     <td>
-                        <div class="fw-bold text-dark">{{ game.self_arrival_app_nickname or game.player_1 or '-' }}</div>
+                        {% set exempt_indices = deposit_exempt_player_indices_by_game.get(game.id, []) %}
+                        <div class="fw-bold text-dark {% if 1 in exempt_indices %}deposit-exempt-inline{% endif %}">
+                            {{ game.self_arrival_app_nickname or game.player_1 or '-' }}{% if 1 in exempt_indices %} · 免押{% endif %}
+                        </div>
                         <div class="small text-muted">
                             {% if game.self_arrival_app_nickname or game.self_arrival_phone %}
                                 小程序：{{ game.self_arrival_app_nickname or '-' }} / {{ game.self_arrival_phone or '-' }}<br>
@@ -1038,11 +1042,12 @@
                     </td>
                     <td>
                         <div class="player-cell-wrap">
+                            {% set exempt_indices = deposit_exempt_player_indices_by_game.get(game.id, []) %}
                             <div class="d-flex justify-content-center gap-1 flex-wrap">
-                                {% if game.player_1 %}<span class="badge bg-light text-dark border">{{ game.player_1 }}</span>{% endif %}
-                                {% if game.player_2 %}<span class="badge bg-light text-dark border">{{ game.player_2 }}</span>{% endif %}
-                                {% if game.player_3 %}<span class="badge bg-light text-dark border">{{ game.player_3 }}</span>{% endif %}
-                                {% if game.player_4 %}<span class="badge bg-light text-dark border">{{ game.player_4 }}</span>{% endif %}
+                                {% if game.player_1 %}<span class="badge bg-light text-dark border {% if 1 in exempt_indices %}deposit-exempt-mark{% endif %}">{{ game.player_1 }}{% if 1 in exempt_indices %} · 免押{% endif %}</span>{% endif %}
+                                {% if game.player_2 %}<span class="badge bg-light text-dark border {% if 2 in exempt_indices %}deposit-exempt-mark{% endif %}">{{ game.player_2 }}{% if 2 in exempt_indices %} · 免押{% endif %}</span>{% endif %}
+                                {% if game.player_3 %}<span class="badge bg-light text-dark border {% if 3 in exempt_indices %}deposit-exempt-mark{% endif %}">{{ game.player_3 }}{% if 3 in exempt_indices %} · 免押{% endif %}</span>{% endif %}
+                                {% if game.player_4 %}<span class="badge bg-light text-dark border {% if 4 in exempt_indices %}deposit-exempt-mark{% endif %}">{{ game.player_4 }}{% if 4 in exempt_indices %} · 免押{% endif %}</span>{% endif %}
                             </div>
 
                             {% set ns = namespace(note_count=0) %}
@@ -1546,6 +1551,7 @@
                                                 id="overflow_add_stakes_select"
                                                 onchange="toggleOverflowCustomStakes('add')">
                                             <option value="" selected>暂不填写</option>
+                                            <option value="0.5-8">0.5-8</option>
                                             <option value="1-16">1-16</option>
                                             <option value="2-32">2-32</option>
                                             <option value="5-40">5-40</option>
@@ -1574,6 +1580,7 @@
                                             <option value="幺鸡47">幺鸡47</option>
                                             <option value="素鸡">素鸡</option>
                                             <option value="两门">两门</option>
+                                            <option value="素8鸡">素8鸡</option>
                                         </select>
                                     </div>
 
@@ -1753,6 +1760,7 @@
                                     <div class="col-md-6">
                                         <label class="form-label fw-bold">分数大小 </label>
                                         <select class="form-select" name="stakes_select" id="overflow_edit_stakes_select" onchange="toggleOverflowCustomStakes('edit')" >
+                                            <option value="0.5-8">0.5-8</option>
                                             <option value="1-16">1-16</option>
                                             <option value="2-32">2-32</option>
                                             <option value="5-40">5-40</option>
@@ -1772,6 +1780,7 @@
                                             <option value="幺鸡47">幺鸡47</option>
                                             <option value="素鸡">素鸡</option>
                                             <option value="两门">两门</option>
+                                            <option value="素8鸡">素8鸡</option>
                                         </select>
                                     </div>
                                     <div class="col-md-6">
@@ -1976,6 +1985,7 @@
                         <div class="col-md-4">
                             <label class="form-label fw-bold">分数大小</label>
                             <select class="form-select" name="stakes_select" id="edit_stakes_select" onchange="toggleEditCustomStakes()">
+                                <option value="0.5-8">0.5-8</option>
                                 <option value="1-16">1-16</option>
                                 <option value="2-32">2-32</option>
                                 <option value="5-40">5-40</option>
@@ -1997,6 +2007,7 @@
                                 <option value="幺鸡47">幺鸡47</option>
                                 <option value="素鸡">素鸡</option>
                                 <option value="两门">两门</option>
+                                <option value="素8鸡">素8鸡</option>
                             </select>
                         </div>
 
@@ -2359,6 +2370,89 @@
             input.required = false;
             input.value = '';
         }
+    }
+
+    const FORMED_STAKES_OPTIONS_BY_GAME_TYPE = {
+        '换三': ['0.5-8', '1-16', '2-32', '5-40', '5-80'],
+        '定缺': ['0.5-8', '1-16', '2-32', '5-40', '5-80'],
+        '两门': ['0.5-8', '1-16', '2-32', '5-40', '5-80'],
+        '素鸡': ['0.5-16', '1-32', '2-64'],
+        '幺鸡47': ['0.125', '0.25', '0.5', '1'],
+        '素8鸡': ['0.5-32', '1-64'],
+    };
+
+    function rebuildFormedStakesOptions({
+        gameTypeId,
+        stakesSelectId,
+        customStakesId,
+        selectedStakes = '',
+        allowEmpty = false,
+        toggleCustom,
+    }) {
+        const gameTypeSelect = document.getElementById(gameTypeId);
+        const stakesSelect = document.getElementById(stakesSelectId);
+        const customInput = document.getElementById(customStakesId);
+        if (!gameTypeSelect || !stakesSelect || !customInput) return;
+
+        const gameType = gameTypeSelect.value || '换三';
+        const options = FORMED_STAKES_OPTIONS_BY_GAME_TYPE[gameType]
+            || FORMED_STAKES_OPTIONS_BY_GAME_TYPE['换三'];
+        const normalizedStakes = (selectedStakes || '').trim();
+        const shouldUseCustom = normalizedStakes
+            && !options.includes(normalizedStakes)
+            && normalizedStakes !== '其他';
+
+        stakesSelect.innerHTML = '';
+        if (allowEmpty) {
+            const emptyOption = document.createElement('option');
+            emptyOption.value = '';
+            emptyOption.textContent = '暂不填写';
+            stakesSelect.appendChild(emptyOption);
+        }
+        options.concat(['其他']).forEach((value) => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = value;
+            stakesSelect.appendChild(option);
+        });
+
+        if (shouldUseCustom) {
+            stakesSelect.value = '其他';
+            customInput.value = normalizedStakes;
+        } else if (normalizedStakes && options.includes(normalizedStakes)) {
+            stakesSelect.value = normalizedStakes;
+            customInput.value = '';
+        } else if (normalizedStakes === '其他') {
+            stakesSelect.value = '其他';
+        } else if (allowEmpty) {
+            stakesSelect.value = '';
+            customInput.value = '';
+        } else {
+            stakesSelect.value = options[0] || '其他';
+            customInput.value = '';
+        }
+
+        toggleCustom();
+    }
+
+    function bindFormedGameTypeStakes(config) {
+        const gameTypeSelect = document.getElementById(config.gameTypeId);
+        if (!gameTypeSelect) return;
+        gameTypeSelect.dataset.previousValue = gameTypeSelect.value || '';
+        gameTypeSelect.addEventListener('change', function () {
+            const previousGameType = this.dataset.previousValue || '';
+            const currentGameType = this.value || '';
+            const sameStakesGroup = ['换三', '定缺'];
+            const shouldKeepStakes = sameStakesGroup.includes(previousGameType)
+                && sameStakesGroup.includes(currentGameType);
+            this.dataset.previousValue = currentGameType;
+            if (shouldKeepStakes) return;
+
+            rebuildFormedStakesOptions({
+                ...config,
+                selectedStakes: '',
+            });
+        });
     }
 
     function toggleSelfArrivalRoomFee(mode) {
@@ -2899,21 +2993,20 @@
 
         document.getElementById('edit_room_name').value = btn.dataset.room || '';
         document.getElementById('edit_game_type').value = btn.dataset.gametype || '';
+        document.getElementById('edit_game_type').dataset.previousValue = document.getElementById('edit_game_type').value;
         document.getElementById('edit_tags').value = btn.dataset.tags || '';
         document.getElementById('edit_payment_method').value = btn.dataset.payment || '';
         document.getElementById('edit_room_fee').value = btn.dataset.fee || 0;
         document.getElementById('edit_table_note').value = btn.dataset.tableNote || '';
 
         const stakeVal = btn.dataset.stakes || '';
-        const defaultOptions = ['1-16', '2-32', '5-40', '5-80'];
-        if (defaultOptions.includes(stakeVal)) {
-            document.getElementById('edit_stakes_select').value = stakeVal;
-            document.getElementById('edit_stakes_custom').value = '';
-        } else {
-            document.getElementById('edit_stakes_select').value = '其他';
-            document.getElementById('edit_stakes_custom').value = stakeVal;
-        }
-        toggleEditCustomStakes();
+        rebuildFormedStakesOptions({
+            gameTypeId: 'edit_game_type',
+            stakesSelectId: 'edit_stakes_select',
+            customStakesId: 'edit_stakes_custom',
+            selectedStakes: stakeVal,
+            toggleCustom: toggleEditCustomStakes,
+        });
 
         for (let i = 1; i <= 4; i++) {
             document.getElementById(`edit_player_${i}`).value = btn.getAttribute(`data-p${i}`) || '';
@@ -2953,12 +3046,17 @@
         const feeEl = document.getElementById('overflow_add_room_fee');
         if (feeEl) feeEl.value = 0;
 
-        const stakesEl = document.getElementById('overflow_add_stakes_select');
         const gameTypeEl = document.getElementById('overflow_add_game_type');
-        if (stakesEl) stakesEl.value = '';
         if (gameTypeEl) gameTypeEl.value = '';
-
-        toggleOverflowCustomStakes('add');
+        if (gameTypeEl) gameTypeEl.dataset.previousValue = '';
+        rebuildFormedStakesOptions({
+            gameTypeId: 'overflow_add_game_type',
+            stakesSelectId: 'overflow_add_stakes_select',
+            customStakesId: 'overflow_add_stakes_custom',
+            selectedStakes: '',
+            allowEmpty: true,
+            toggleCustom: () => toggleOverflowCustomStakes('add'),
+        });
         clearOverflowPlayerWarningStyle('add');
         const modalBody = document.querySelector('#overflowAddModal .modal-body');
         if (modalBody) modalBody.scrollTop = 0;
@@ -2976,20 +3074,19 @@
         document.getElementById('overflow_edit_external_store_name').value = btn.dataset.externalStore || '';
         document.getElementById('overflow_edit_room_name').value = btn.dataset.room || '';
         document.getElementById('overflow_edit_game_type').value = btn.dataset.gametype || '';
+        document.getElementById('overflow_edit_game_type').dataset.previousValue = document.getElementById('overflow_edit_game_type').value;
         document.getElementById('overflow_edit_tags').value = btn.dataset.tags || '';
         document.getElementById('overflow_edit_room_fee').value = btn.dataset.fee || 0;
         document.getElementById('overflow_edit_table_note').value = btn.dataset.tableNote || '';
 
         const stakeVal = btn.dataset.stakes || '';
-        const defaultOptions = ['1-16', '2-32', '5-40', '5-80'];
-        if (defaultOptions.includes(stakeVal)) {
-            document.getElementById('overflow_edit_stakes_select').value = stakeVal;
-            document.getElementById('overflow_edit_stakes_custom').value = '';
-        } else {
-            document.getElementById('overflow_edit_stakes_select').value = '其他';
-            document.getElementById('overflow_edit_stakes_custom').value = stakeVal;
-        }
-        toggleOverflowCustomStakes('edit');
+        rebuildFormedStakesOptions({
+            gameTypeId: 'overflow_edit_game_type',
+            stakesSelectId: 'overflow_edit_stakes_select',
+            customStakesId: 'overflow_edit_stakes_custom',
+            selectedStakes: stakeVal,
+            toggleCustom: () => toggleOverflowCustomStakes('edit'),
+        });
 
         for (let i = 1; i <= 4; i++) {
             document.getElementById(`overflow_edit_player_${i}`).value = btn.getAttribute(`data-p${i}`) || '';
@@ -3138,9 +3235,9 @@
             }
 
             suggestBox.innerHTML = data.map(item => `
-                <div class="customer-suggest-item"
+                <div class="customer-suggest-item ${item.is_deposit_exempt ? 'deposit-exempt-mark' : ''}"
                      onclick="selectFormedCustomer(${wrapperIdx}, ${JSON.stringify(item.nickname).replace(/"/g, '&quot;')}, ${JSON.stringify(item.wechat_id || '').replace(/"/g, '&quot;')})">
-                    <div class="customer-suggest-name">${item.nickname || '-'}</div>
+                    <div class="customer-suggest-name">${item.nickname || '-'}${item.is_deposit_exempt ? ' · 免押' : ''}</div>
                     <div class="customer-suggest-meta">微信号：${item.wechat_id || '-'}</div>
                 </div>
             `).join('');
@@ -3214,9 +3311,9 @@
             }
 
             suggestBox.innerHTML = data.map(item => `
-                <div class="customer-suggest-item"
+                <div class="customer-suggest-item ${item.is_deposit_exempt ? 'deposit-exempt-mark' : ''}"
                      onclick="selectOverflowCustomer('${mode}', ${wrapperIdx}, ${JSON.stringify(item.nickname).replace(/"/g, '&quot;')}, ${JSON.stringify(item.wechat_id || '').replace(/"/g, '&quot;')})">
-                    <div class="customer-suggest-name">${item.nickname || '-'}</div>
+                    <div class="customer-suggest-name">${item.nickname || '-'}${item.is_deposit_exempt ? ' · 免押' : ''}</div>
                     <div class="customer-suggest-meta">微信号：${item.wechat_id || '-'}</div>
                 </div>
             `).join('');
@@ -3483,8 +3580,8 @@
 
             const playersHtml = (data.players || []).length > 0
                 ? data.players.map(p => `
-                    <div class="border rounded-3 p-3 bg-light mb-2">
-                        <div class="fw-bold mb-1">参与人 ${p.index}</div>
+                    <div class="border rounded-3 p-3 bg-light mb-2 ${p.is_deposit_exempt ? 'deposit-exempt-mark' : ''}">
+                        <div class="fw-bold mb-1">参与人 ${p.index}${p.is_deposit_exempt ? ' · 免押' : ''}</div>
                         <div class="small text-muted">昵称</div>
                         <div class="detail-value mb-2">${p.name || '-'}</div>
                         <div class="small text-muted">微信号</div>
@@ -3736,6 +3833,35 @@
         toggleSelfArrivalRoomFee('edit');
         toggleOverflowCustomStakes('add');
         toggleOverflowCustomStakes('edit');
+        rebuildFormedStakesOptions({
+            gameTypeId: 'overflow_add_game_type',
+            stakesSelectId: 'overflow_add_stakes_select',
+            customStakesId: 'overflow_add_stakes_custom',
+            selectedStakes: '',
+            allowEmpty: true,
+            toggleCustom: () => toggleOverflowCustomStakes('add'),
+        });
+        bindFormedGameTypeStakes({
+            gameTypeId: 'edit_game_type',
+            stakesSelectId: 'edit_stakes_select',
+            customStakesId: 'edit_stakes_custom',
+            allowEmpty: false,
+            toggleCustom: toggleEditCustomStakes,
+        });
+        bindFormedGameTypeStakes({
+            gameTypeId: 'overflow_add_game_type',
+            stakesSelectId: 'overflow_add_stakes_select',
+            customStakesId: 'overflow_add_stakes_custom',
+            allowEmpty: true,
+            toggleCustom: () => toggleOverflowCustomStakes('add'),
+        });
+        bindFormedGameTypeStakes({
+            gameTypeId: 'overflow_edit_game_type',
+            stakesSelectId: 'overflow_edit_stakes_select',
+            customStakesId: 'overflow_edit_stakes_custom',
+            allowEmpty: false,
+            toggleCustom: () => toggleOverflowCustomStakes('edit'),
+        });
         ['self_arrival_add', 'self_arrival_edit', 'overflow_add', 'overflow_edit', 'edit'].forEach(bindOrderEndAuto);
         maybeAutoOrderEnd('self_arrival_add');
         maybeAutoOrderEnd('overflow_add');

@@ -184,8 +184,8 @@
                         <span class="fw-bold">{{ row.record_date }}</span>
                     </td>
 
-                    <td>
-                        <div class="fw-bold">{{ row.customer_name }}</div>
+                    <td class="{% if row.is_deposit_exempt %}deposit-exempt-mark{% endif %}">
+                        <div class="fw-bold">{{ row.customer_name }}{% if row.is_deposit_exempt %} · 免押{% endif %}</div>
                     </td>
 
                     <td>
@@ -443,10 +443,10 @@
 
     customers.forEach(cust => {
       const item = document.createElement("div");
-      item.className = "customer-search-item";
+      item.className = `customer-search-item${cust.is_deposit_exempt ? ' deposit-exempt-mark' : ''}`;
       const nameEl = document.createElement("div");
       nameEl.className = "fw-bold";
-      nameEl.textContent = cust.nickname || "";
+      nameEl.textContent = `${cust.nickname || ""}${cust.is_deposit_exempt ? ' · 免押' : ''}`;
       const wechatEl = document.createElement("div");
       wechatEl.className = "wechat";
       wechatEl.textContent = cust.wechat_id || "";

@@ -315,6 +315,24 @@ class CustomerStoreLink(SQLModel, table=True):
     followup_updated_by: Optional[str] = Field(default=None, index=True)
 
 
+class CustomerDepositExemption(SQLModel, table=True):
+    """顾客级免押状态；跨门店全局生效。"""
+    __tablename__ = "customerdepositexemption"
+    __table_args__ = (
+        UniqueConstraint("customer_id", name="uq_customerdepositexemption_customer_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    customer_id: int = Field(foreign_key="customer.id", index=True)
+    added_from_store: Optional[str] = Field(default=None, index=True)
+    is_active: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    created_by: Optional[str] = Field(default=None, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
+    revoked_by: Optional[str] = Field(default=None, index=True)
+
+
 class CustomerComplaintRecord(SQLModel, table=True):
     """
     客户异常行为及投诉记录。
@@ -359,6 +377,24 @@ class ContactCustomerFollowup(SQLModel, table=True):
     remark: Optional[str] = Field(default=None)
     updated_at: datetime = Field(default_factory=datetime.now, index=True)
     updated_by: Optional[str] = Field(default=None, index=True)
+
+
+class CancelledGameContactSnapshot(SQLModel, table=True):
+    """未组齐牌局撤销前的接触顾客快照，仅用于“我的接触顾客”。"""
+    __tablename__ = "cancelledgamecontactsnapshot"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    source_game_id: int = Field(index=True)
+    source_player_index: int = Field(index=True)
+
+    employee_name: str = Field(index=True)
+    store_name: str = Field(index=True)
+    nickname: str
+    wechat_id: str = Field(index=True)
+    reservation_time: datetime = Field(index=True)
+
+    cancelled_at: datetime = Field(default_factory=datetime.now, index=True)
+    cancelled_by: Optional[str] = Field(default=None, index=True)
 
 
 class SelfArrivalCustomer(SQLModel, table=True):
@@ -1598,8 +1634,10 @@ def create_db_and_tables():
     migrate_user_password_reset_fields()
     migrate_customer_soft_delete_fields()
     migrate_customer_store_link_table()
+    migrate_customer_deposit_exemption_table()
     migrate_customer_complaint_record_table()
     migrate_contact_customer_followup_table()
+    migrate_cancelled_game_contact_snapshot_table()
     migrate_self_arrival_customer_table()
     migrate_new_customer_pull_record_table()
     migrate_game_record_table()
@@ -1647,6 +1685,38 @@ def migrate_customer_soft_delete_fields():
 
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customer_is_deleted ON customer(is_deleted)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customer_deleted_at ON customer(deleted_at)"))
+
+
+def migrate_customer_deposit_exemption_table():
+    """创建顾客级免押表，并为旧数据库补齐索引。"""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS customerdepositexemption (
+                id INTEGER PRIMARY KEY,
+                customer_id INTEGER NOT NULL,
+                added_from_store TEXT,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                revoked_at DATETIME,
+                revoked_by TEXT,
+                CONSTRAINT uq_customerdepositexemption_customer_id UNIQUE (customer_id),
+                FOREIGN KEY(customer_id) REFERENCES customer (id)
+            )
+        """))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ix_customerdepositexemption_customer_id
+            ON customerdepositexemption (customer_id)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_customerdepositexemption_is_active
+            ON customerdepositexemption (is_active)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_customerdepositexemption_added_from_store
+            ON customerdepositexemption (added_from_store)
+        """))
 
 
 def migrate_customer_complaint_record_table():
@@ -1807,6 +1877,39 @@ def migrate_contact_customer_followup_table():
             CREATE INDEX IF NOT EXISTS ix_contactcustomerfollowup_updated_at
             ON contactcustomerfollowup (updated_at)
         """))
+
+
+def migrate_cancelled_game_contact_snapshot_table():
+    """创建未组齐牌局撤销前的接触顾客快照表；不回填历史撤销数据。"""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cancelledgamecontactsnapshot (
+                id INTEGER PRIMARY KEY,
+                source_game_id INTEGER NOT NULL,
+                source_player_index INTEGER NOT NULL,
+                employee_name TEXT NOT NULL,
+                store_name TEXT NOT NULL,
+                nickname TEXT NOT NULL,
+                wechat_id TEXT NOT NULL,
+                reservation_time DATETIME NOT NULL,
+                cancelled_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                cancelled_by TEXT
+            )
+        """))
+        for col_name in [
+            "source_game_id",
+            "source_player_index",
+            "employee_name",
+            "store_name",
+            "wechat_id",
+            "reservation_time",
+            "cancelled_at",
+            "cancelled_by",
+        ]:
+            conn.execute(text(f"""
+                CREATE INDEX IF NOT EXISTS ix_cancelledgamecontactsnapshot_{col_name}
+                ON cancelledgamecontactsnapshot ({col_name})
+            """))
 
 
 def migrate_self_arrival_customer_table():

@@ -186,6 +186,7 @@
 
                     <td>
                         {% set players = [game.player_1, game.player_2, game.player_3, game.player_4] %}
+                        {% set exempt_indices = deposit_exempt_player_indices_by_game.get(game.id, []) %}
                         {% set ns = namespace(count=0) %}
                         {% for p in players %}
                             {% if p %}{% set ns.count = ns.count + 1 %}{% endif %}
@@ -194,10 +195,28 @@
                         <div class="d-flex justify-content-center gap-1 flex-wrap player-badge-wrap">
                             {% for p in players %}
                                 {% if p %}
-                                <span class="badge bg-light text-dark border">{{ p }}</span>
+                                <span class="badge bg-light text-dark border {% if loop.index in exempt_indices %}deposit-exempt-mark{% endif %}">
+                                    {{ p }}{% if loop.index in exempt_indices %}<span class="ms-1">免押</span>{% endif %}
+                                </span>
                                 {% endif %}
                             {% endfor %}
                         </div>
+
+                        {% set note_ns = namespace(count=0) %}
+                        {% if game.player_1_note %}{% set note_ns.count = note_ns.count + 1 %}{% endif %}
+                        {% if game.player_2_note %}{% set note_ns.count = note_ns.count + 1 %}{% endif %}
+                        {% if game.player_3_note %}{% set note_ns.count = note_ns.count + 1 %}{% endif %}
+                        {% if game.player_4_note %}{% set note_ns.count = note_ns.count + 1 %}{% endif %}
+                        {% if note_ns.count > 0 %}
+                            <div class="small mt-1">
+                                <span class="badge bg-warning text-dark"
+                                      data-bs-toggle="tooltip"
+                                      data-bs-html="true"
+                                      title="{% if game.player_1_note and game.player_1 %}{{ game.player_1 }}：{{ game.player_1_note }}<br>{% endif %}{% if game.player_2_note and game.player_2 %}{{ game.player_2 }}：{{ game.player_2_note }}<br>{% endif %}{% if game.player_3_note and game.player_3 %}{{ game.player_3 }}：{{ game.player_3_note }}<br>{% endif %}{% if game.player_4_note and game.player_4 %}{{ game.player_4 }}：{{ game.player_4_note }}{% endif %}">
+                                    {{ note_ns.count }}人备注
+                                </span>
+                            </div>
+                        {% endif %}
 
                         {% if 4 - ns.count > 0 %}
                             <div class="small text-danger mt-1">缺 {{ 4 - ns.count }} 人</div>
@@ -273,15 +292,19 @@
 
                                     data-p1="{{ game.player_1 or '' }}"
                                     data-p1-wx="{{ game.player_1_wechat or '' }}"
+                                    data-p1-note="{{ game.player_1_note or '' }}"
 
                                     data-p2="{{ game.player_2 or '' }}"
                                     data-p2-wx="{{ game.player_2_wechat or '' }}"
+                                    data-p2-note="{{ game.player_2_note or '' }}"
 
                                     data-p3="{{ game.player_3 or '' }}"
                                     data-p3-wx="{{ game.player_3_wechat or '' }}"
+                                    data-p3-note="{{ game.player_3_note or '' }}"
 
                                     data-p4="{{ game.player_4 or '' }}"
-                                    data-p4-wx="{{ game.player_4_wechat or '' }}">
+                                    data-p4-wx="{{ game.player_4_wechat or '' }}"
+                                    data-p4-note="{{ game.player_4_note or '' }}">
                                 <i class="bi bi-pencil-square"></i> 编辑
                             </button>
 
@@ -525,13 +548,22 @@
                                             </div>
                                         </div>
 
-                                        <div>
+                                        <div class="mb-2">
                                             <label class="form-label small text-muted">微信号</label>
                                             <input type="text"
                                                    class="form-control player-wechat-input"
                                                    name="player_{{ i }}_wechat"
                                                    id="player_{{ i }}_wechat"
                                                    placeholder="必须和昵称成对填写">
+                                        </div>
+
+                                        <div>
+                                            <label class="form-label small text-muted">顾客备注</label>
+                                            <textarea class="form-control"
+                                                      rows="2"
+                                                      name="player_{{ i }}_note"
+                                                      id="player_{{ i }}_note"
+                                                      placeholder="填写后同步到待办及信息同步区"></textarea>
                                         </div>
                                     </div>
                                 </div>
@@ -747,10 +779,10 @@
                             </button>`;
 
             return `
-                <tr>
+                <tr class="${item.is_deposit_exempt ? 'deposit-exempt-mark' : ''}">
                     <td class="fw-bold text-primary">#${item.rank}</td>
                     <td class="text-start">
-                        <div class="fw-bold">${escapeHtml(item.nickname)}</div>
+                        <div class="fw-bold">${escapeHtml(item.nickname)}${item.is_deposit_exempt ? ' · 免押' : ''}</div>
                         <div class="small text-muted">${escapeHtml(item.gender || '-')}</div>
                     </td>
                     <td><code>${escapeHtml(item.wechat_id)}</code></td>
@@ -1041,6 +1073,7 @@ ${blacklistButton}
         document.getElementById('smokeTypeInput').value = 'smoking';
 
         rebuildStakesOptions();
+        document.getElementById('gameTypeInput').dataset.previousValue = document.getElementById('gameTypeInput').value;
         clearPlayerWarningStyle();
         resetIndicesColor();
         hideAllSuggestBoxes();
@@ -1068,6 +1101,7 @@ ${blacklistButton}
 
         document.getElementById('startTimeInput').value = startTimeFull;
         document.getElementById('gameTypeInput').value = btn.dataset.gametype || '';
+        document.getElementById('gameTypeInput').dataset.previousValue = document.getElementById('gameTypeInput').value;
         document.getElementById('smokeTypeInput').value = btn.dataset.smokeType || 'smoking';
         document.getElementById('tagsInput').value = btn.dataset.tags || '';
         document.getElementById('tableNoteInput').value = btn.dataset.tableNote || '';
@@ -1080,6 +1114,7 @@ ${blacklistButton}
         for (let i = 1; i <= 4; i++) {
             document.getElementById(`player_${i}`).value = btn.dataset[`p${i}`] || '';
             document.getElementById(`player_${i}_wechat`).value = btn.dataset[`p${i}Wx`] || btn.getAttribute(`data-p${i}-wx`) || '';
+            document.getElementById(`player_${i}_note`).value = btn.dataset[`p${i}Note`] || btn.getAttribute(`data-p${i}-note`) || '';
         }
 
         clearPlayerWarningStyle();
@@ -1111,9 +1146,18 @@ ${blacklistButton}
         for (let i = 1; i <= 4; i++) {
             const name = (document.getElementById(`player_${i}`).value || '').trim();
             const wechat = (document.getElementById(`player_${i}_wechat`).value || '').trim();
+            const note = (document.getElementById(`player_${i}_note`).value || '').trim();
 
             if ((name && !wechat) || (!name && wechat)) {
                 const message = `参与人 ${i} 的昵称和微信号必须同时填写`;
+                markInvalidPair(i);
+                highlightIndices([i], message);
+                alert(message);
+                return false;
+            }
+
+            if (note && (!name || !wechat)) {
+                const message = `参与人 ${i} 填写顾客备注前必须先填写完整昵称和微信号`;
                 markInvalidPair(i);
                 highlightIndices([i], message);
                 alert(message);
@@ -1236,9 +1280,9 @@ ${blacklistButton}
             }
 
             suggestBox.innerHTML = data.map(item => `
-                <div class="customer-suggest-item"
+                <div class="customer-suggest-item ${item.is_deposit_exempt ? 'deposit-exempt-mark' : ''}"
                      onclick="selectCustomer(${wrapperIdx}, ${JSON.stringify(item.nickname).replace(/"/g, '&quot;')}, ${JSON.stringify(item.wechat_id || '').replace(/"/g, '&quot;')})">
-                    <div class="customer-suggest-name">${item.nickname || '-'}</div>
+                    <div class="customer-suggest-name">${item.nickname || '-'}${item.is_deposit_exempt ? ' · 免押' : ''}</div>
                     <div class="customer-suggest-meta">微信号：${item.wechat_id || '-'}</div>
                 </div>
             `).join('');
@@ -1251,8 +1295,16 @@ ${blacklistButton}
     }
 
     function selectCustomer(index, nickname, wechat) {
-        document.getElementById(`player_${index}`).value = nickname || '';
-        document.getElementById(`player_${index}_wechat`).value = wechat || '';
+        const nameInput = document.getElementById(`player_${index}`);
+        const wechatInput = document.getElementById(`player_${index}_wechat`);
+        const noteInput = document.getElementById(`player_${index}_note`);
+        const nextName = nickname || '';
+        const nextWechat = wechat || '';
+        const identityChanged = (nameInput.value || '').trim() !== nextName.trim()
+            || (wechatInput.value || '').trim() !== nextWechat.trim();
+        nameInput.value = nextName;
+        wechatInput.value = nextWechat;
+        if (identityChanged && noteInput) noteInput.value = '';
         const suggestBox = document.getElementById(`suggest_list_${index}`);
         suggestBox.style.display = 'none';
         suggestBox.innerHTML = '';
@@ -1388,7 +1440,17 @@ ${blacklistButton}
 
         const gameTypeInput = document.getElementById('gameTypeInput');
         if (gameTypeInput) {
+            gameTypeInput.dataset.previousValue = gameTypeInput.value;
             gameTypeInput.addEventListener('change', function () {
+                const previousGameType = this.dataset.previousValue || '';
+                const currentGameType = this.value || '';
+                const sameStakesGroup = ['换三', '定缺'];
+                const shouldKeepStakes = sameStakesGroup.includes(previousGameType)
+                    && sameStakesGroup.includes(currentGameType);
+
+                this.dataset.previousValue = currentGameType;
+                if (shouldKeepStakes) return;
+
                 document.getElementById('stakesCustomInput').value = '';
                 rebuildStakesOptions();
             });
