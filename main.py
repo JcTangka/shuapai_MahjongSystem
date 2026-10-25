@@ -26430,6 +26430,27 @@ async def api_handover_customer_search(
 
 
 # ===== 设置门店/包间路由 =====
+def _build_stores_rooms_settings_url(
+        tab: str,
+        *,
+        keyword: str = "",
+        store_filter: str = "",
+        success: str = "",
+        error: str = ""
+) -> str:
+    """构建门店/包间设置页回跳地址，并保留当前筛选条件。"""
+    params = {"tab": tab}
+    if _normalize_text(keyword):
+        params["keyword"] = _normalize_text(keyword)
+    if tab == "rooms" and _normalize_text(store_filter):
+        params["store_filter"] = _normalize_text(store_filter)
+    if success:
+        params["success"] = success
+    if error:
+        params["error"] = error
+    return "/settings/stores-rooms?" + urlencode(params)
+
+
 @app.get("/settings/stores-rooms")
 async def stores_rooms_settings_page(
         request: Request,
@@ -26567,6 +26588,7 @@ async def update_store(
         sort_order: int = Form(0),
         remark: str = Form(""),
         is_active: Optional[str] = Form(None),
+        return_keyword: str = Form(""),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -26577,7 +26599,12 @@ async def update_store(
 
     store = session.get(Store, store_id)
     if not store:
-        return RedirectResponse(url="/settings/stores-rooms?tab=stores&error=门店不存在", status_code=303)
+        return RedirectResponse(
+            url=_build_stores_rooms_settings_url(
+                "stores", keyword=return_keyword, error="门店不存在"
+            ),
+            status_code=303
+        )
 
     # 本版先不允许改 name，只允许改附属信息
     store.short_name = short_name.strip() or None
@@ -26591,7 +26618,12 @@ async def update_store(
     session.add(store)
     session.commit()
 
-    return RedirectResponse(url="/settings/stores-rooms?tab=stores&success=门店更新成功", status_code=303)
+    return RedirectResponse(
+        url=_build_stores_rooms_settings_url(
+            "stores", keyword=return_keyword, success="门店更新成功"
+        ),
+        status_code=303
+    )
 
 # ==== 门店启用/停用 ====
 @app.get("/settings/store/toggle/{store_id}")
@@ -26698,6 +26730,8 @@ async def update_room(
         room_price: str = Form("0"),
         sort_order: int = Form(0),
         is_active: Optional[str] = Form(None),
+        return_keyword: str = Form(""),
+        return_store_filter: str = Form(""),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -26708,15 +26742,39 @@ async def update_room(
 
     room = session.get(Room, room_id)
     if not room:
-        return RedirectResponse(url="/settings/stores-rooms?tab=rooms&error=包间不存在", status_code=303)
+        return RedirectResponse(
+            url=_build_stores_rooms_settings_url(
+                "rooms",
+                keyword=return_keyword,
+                store_filter=return_store_filter,
+                error="包间不存在"
+            ),
+            status_code=303
+        )
 
     store = session.get(Store, store_id)
     if not store:
-        return RedirectResponse(url="/settings/stores-rooms?tab=rooms&error=所属门店不存在", status_code=303)
+        return RedirectResponse(
+            url=_build_stores_rooms_settings_url(
+                "rooms",
+                keyword=return_keyword,
+                store_filter=return_store_filter,
+                error="所属门店不存在"
+            ),
+            status_code=303
+        )
 
     name = name.strip()
     if not name:
-        return RedirectResponse(url="/settings/stores-rooms?tab=rooms&error=包间名称不能为空", status_code=303)
+        return RedirectResponse(
+            url=_build_stores_rooms_settings_url(
+                "rooms",
+                keyword=return_keyword,
+                store_filter=return_store_filter,
+                error="包间名称不能为空"
+            ),
+            status_code=303
+        )
 
     duplicate = session.exec(
         select(Room).where(
@@ -26726,13 +26784,26 @@ async def update_room(
         )
     ).first()
     if duplicate:
-        return RedirectResponse(url="/settings/stores-rooms?tab=rooms&error=同门店下包间名称已存在", status_code=303)
+        return RedirectResponse(
+            url=_build_stores_rooms_settings_url(
+                "rooms",
+                keyword=return_keyword,
+                store_filter=return_store_filter,
+                error="同门店下包间名称已存在"
+            ),
+            status_code=303
+        )
 
     try:
         parsed_room_price = _parse_room_price(room_price)
     except ValueError as exc:
         return RedirectResponse(
-            url="/settings/stores-rooms?" + urlencode({"tab": "rooms", "error": str(exc)}),
+            url=_build_stores_rooms_settings_url(
+                "rooms",
+                keyword=return_keyword,
+                store_filter=return_store_filter,
+                error=str(exc)
+            ),
             status_code=303
         )
 
@@ -26748,7 +26819,15 @@ async def update_room(
     session.add(room)
     session.commit()
 
-    return RedirectResponse(url="/settings/stores-rooms?tab=rooms&success=包间更新成功", status_code=303)
+    return RedirectResponse(
+        url=_build_stores_rooms_settings_url(
+            "rooms",
+            keyword=return_keyword,
+            store_filter=return_store_filter,
+            success="包间更新成功"
+        ),
+        status_code=303
+    )
 
 
 # ==== 批量填写包间定价 ====
