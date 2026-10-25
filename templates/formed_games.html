@@ -169,7 +169,7 @@
 }
 
 .self-arrival-room-fee-wrap {
-    display: none;
+    display: block;
 }
 
 .self-arrival-room-fee-wrap.show {
@@ -1230,7 +1230,8 @@
                             <select class="form-select" name="room_name" id="self_arrival_add_room_name" required>
                                 <option value="">请选择包间</option>
                                 {% for room in room_list %}
-                                <option value="{{ room.name if room.name is defined else room }}">
+                                <option value="{{ room.name if room.name is defined else room }}"
+                                        data-room-price="{{ room_price_map.get(room.name if room.name is defined else room, 0) }}">
                                     {{ room.name if room.name is defined else room }}
                                 </option>
                                 {% endfor %}
@@ -1291,6 +1292,7 @@
                         <div class="col-md-6 self-arrival-room-fee-wrap" id="self_arrival_add_room_fee_wrap">
                             <label class="form-label fw-bold">费用 <span class="text-danger">*</span></label>
                             <input type="number" step="0.1" min="0" class="form-control" name="room_fee" id="self_arrival_add_room_fee" value="0">
+                            <div class="small mt-1 d-none" id="self_arrival_add_room_price_hint" style="color:#d97878;"></div>
                             <div class="self-arrival-note mt-1">仅“代客收款”需要填写费用并进入结算流程。</div>
                         </div>
 
@@ -1348,7 +1350,8 @@
                             <select class="form-select" name="room_name" id="self_arrival_edit_room_name" required>
                                 <option value="">请选择包间</option>
                                 {% for room in room_list %}
-                                <option value="{{ room.name if room.name is defined else room }}">
+                                <option value="{{ room.name if room.name is defined else room }}"
+                                        data-room-price="{{ room_price_map.get(room.name if room.name is defined else room, 0) }}">
                                     {{ room.name if room.name is defined else room }}
                                 </option>
                                 {% endfor %}
@@ -1417,6 +1420,7 @@
                         <div class="col-md-6 self-arrival-room-fee-wrap" id="self_arrival_edit_room_fee_wrap">
                             <label class="form-label fw-bold">费用 <span class="text-danger">*</span></label>
                             <input type="number" step="0.1" min="0" class="form-control" name="room_fee" id="self_arrival_edit_room_fee" value="0">
+                            <div class="small mt-1 d-none" id="self_arrival_edit_room_price_hint" style="color:#d97878;"></div>
                             <div class="self-arrival-note mt-1">若该单已有微信/支付宝收款记录，则后端将限制改成非“代客收款”。</div>
                         </div>
 
@@ -1975,7 +1979,8 @@
                             <select class="form-select" name="room_name" id="edit_room_name" required>
                                 <option value="">请选择包间</option>
                                 {% for room in room_list %}
-                                <option value="{{ room.name if room.name is defined else room }}">
+                                <option value="{{ room.name if room.name is defined else room }}"
+                                        data-room-price="{{ room_price_map.get(room.name if room.name is defined else room, 0) }}">
                                     {{ room.name if room.name is defined else room }}
                                 </option>
                                 {% endfor %}
@@ -2014,6 +2019,7 @@
                         <div class="col-md-4">
                             <label class="form-label fw-bold">费用</label>
                             <input type="number" step="0.1" min="0" class="form-control" name="room_fee" id="edit_room_fee" value="0">
+                            <div class="small mt-1 d-none" id="edit_room_price_hint" style="color:#d97878;"></div>
                         </div>
 
                         <div class="col-md-4">
@@ -2465,11 +2471,48 @@
         if (paymentSelect.value === '代客收款') {
             feeWrap.classList.add('show');
             feeInput.required = true;
+            feeInput.readOnly = false;
         } else {
             feeWrap.classList.remove('show');
             feeInput.required = false;
             feeInput.value = 0;
+            feeInput.readOnly = true;
         }
+    }
+
+    function selectedRoomPresetPrice(selectId) {
+        const select = document.getElementById(selectId);
+        const option = select?.selectedOptions?.[0];
+        if (!select?.value || !option) return null;
+        const price = Number(option.dataset.roomPrice);
+        return Number.isFinite(price) ? price : null;
+    }
+
+    function updateSelectedRoomPriceHint(selectId, hintId) {
+        const hint = document.getElementById(hintId);
+        if (!hint) return;
+        const presetPrice = selectedRoomPresetPrice(selectId);
+        if (presetPrice === null) {
+            hint.textContent = '';
+            hint.classList.add('d-none');
+            return;
+        }
+        hint.textContent = `包间定价：¥${presetPrice.toFixed(2)}（仅供提示，请再次填写费用）`;
+        hint.classList.remove('d-none');
+    }
+
+    function validateSelectedRoomPriceRemark(selectId, feeId, tableNoteId) {
+        const presetPrice = selectedRoomPresetPrice(selectId);
+        if (presetPrice === null) return true;
+        const actualFee = Number(document.getElementById(feeId)?.value || 0);
+        const tableNote = (document.getElementById(tableNoteId)?.value || '').trim();
+        if (Number.isFinite(actualFee)
+            && Math.round(actualFee * 100) !== Math.round(presetPrice * 100)
+            && !tableNote) {
+            alert(`实际填写费用（¥${actualFee.toFixed(2)}）与包间预设定价（¥${presetPrice.toFixed(2)}）不一致，请填写整桌备注后再保存`);
+            return false;
+        }
+        return true;
     }
 
     function normalizeToDatetimeLocal(dateStr, timeStr) {
@@ -2654,6 +2697,13 @@
         }
         if (mode === 'edit' && paymentMethod === '代客收款' && fee === 0 && !tableNote) {
             alert('下单方式为“代客收款”且费用为 0 时，必须填写整桌备注');
+            return false;
+        }
+        if (!validateSelectedRoomPriceRemark(
+            `self_arrival_${mode}_room_name`,
+            `self_arrival_${mode}_room_fee`,
+            `self_arrival_${mode}_table_note`
+        )) {
             return false;
         }
 
@@ -2916,6 +2966,9 @@
             alert('支付方式为“代客收款”且费用为 0 时，必须填写整桌备注');
             return false;
         }
+        if (!validateSelectedRoomPriceRemark('edit_room_name', 'edit_room_fee', 'edit_table_note')) {
+            return false;
+        }
 
         const serverOk = await validateFormedPlayersViaServer();
         if (!serverOk) return false;
@@ -2998,6 +3051,7 @@
         document.getElementById('edit_payment_method').value = btn.dataset.payment || '';
         document.getElementById('edit_room_fee').value = btn.dataset.fee || 0;
         document.getElementById('edit_table_note').value = btn.dataset.tableNote || '';
+        updateSelectedRoomPriceHint('edit_room_name', 'edit_room_price_hint');
 
         const stakeVal = btn.dataset.stakes || '';
         rebuildFormedStakesOptions({
@@ -3031,6 +3085,7 @@
         document.getElementById('self_arrival_edit_note_added').value = btn.dataset.noteAdded || '否';
         document.getElementById('self_arrival_edit_table_note').value = btn.dataset.tableNote || '';
         toggleSelfArrivalRoomFee('edit');
+        updateSelectedRoomPriceHint('self_arrival_edit_room_name', 'self_arrival_edit_room_price_hint');
     }
 
     function resetOverflowAddModal() {
@@ -3831,6 +3886,16 @@
         toggleExportCustomDateRange();
         toggleSelfArrivalRoomFee('add');
         toggleSelfArrivalRoomFee('edit');
+        [
+            ['self_arrival_add_room_name', 'self_arrival_add_room_price_hint'],
+            ['self_arrival_edit_room_name', 'self_arrival_edit_room_price_hint'],
+            ['edit_room_name', 'edit_room_price_hint'],
+        ].forEach(([selectId, hintId]) => {
+            const select = document.getElementById(selectId);
+            if (!select) return;
+            select.addEventListener('change', () => updateSelectedRoomPriceHint(selectId, hintId));
+            updateSelectedRoomPriceHint(selectId, hintId);
+        });
         toggleOverflowCustomStakes('add');
         toggleOverflowCustomStakes('edit');
         rebuildFormedStakesOptions({

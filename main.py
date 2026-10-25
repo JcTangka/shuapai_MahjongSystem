@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 import calendar
 import json
+import math
 import secrets
 import string
 import threading
@@ -7522,6 +7523,31 @@ def check_room_belongs_to_store(session: Session, store_name: str, room_name: st
     ).first()
     return room is not None
 
+
+def _room_price_mismatch_note_error(
+        room: Optional[Room],
+        actual_room_fee,
+        table_note: Optional[str]
+) -> Optional[str]:
+    """包间实填费用与预设定价不一致时，必须填写整桌备注。"""
+    if not room:
+        return None
+
+    preset_price = _safe_float(getattr(room, "room_price", 0.0))
+    actual_price = _safe_float(actual_room_fee)
+    if not math.isfinite(preset_price) or not math.isfinite(actual_price):
+        return "包间费用必须是有效数字"
+
+    preset_cents = int(round(preset_price * 100))
+    actual_cents = int(round(actual_price * 100))
+    if preset_cents == actual_cents or _normalize_text(table_note):
+        return None
+
+    return (
+        f"实际填写费用（¥{actual_price:.2f}）与包间预设定价（¥{preset_price:.2f}）不一致，"
+        "请填写整桌备注后再保存"
+    )
+
 def check_customer_belongs_to_store(session: Session, customer_id: int, store_name: str) -> bool:
     link = session.exec(
         select(CustomerStoreLink).where(
@@ -7633,6 +7659,39 @@ def get_active_room_list_by_store(session: Session, store_name: str) -> List[str
             Room.store_name == store_name
         ).order_by(Room.sort_order, Room.id)
     ).all()
+
+
+def get_active_room_price_map_by_store(session: Session, store_name: str) -> dict[str, float]:
+    """读取当前门店启用包间的预设定价，以包间名称为键。"""
+    store_obj = session.exec(
+        select(Store).where(Store.name == store_name)
+    ).first()
+
+    if store_obj:
+        rooms = session.exec(
+            select(Room).where(
+                Room.store_id == store_obj.id,
+                Room.is_active == True
+            ).order_by(Room.sort_order, Room.id)
+        ).all()
+        if rooms:
+            return {
+                room.name: float(room.room_price or 0)
+                for room in rooms
+                if room.name
+            }
+
+    rooms = session.exec(
+        select(Room).where(
+            Room.store_name == store_name,
+            Room.is_active == True
+        ).order_by(Room.sort_order, Room.id)
+    ).all()
+    return {
+        room.name: float(room.room_price or 0)
+        for room in rooms
+        if room.name
+    }
 
 
 # ===================== 待办及信息同步 =====================
@@ -9511,7 +9570,6 @@ def _run_store_duty_store_release_checks(
     blocking_items = []
     warning_items = []
     warning_reason_set = {
-        "订单开始时间为空",
         "包间未指定",
         "支付方式未指定",
         "下单方式未指定",
@@ -9527,7 +9585,12 @@ def _run_store_duty_store_release_checks(
         has_followup_note = _game_has_any_followup_note(game)
 
         for reason in reasons:
-            if reason in warning_reason_set:
+            if reason == "订单开始时间为空":
+                if _normalize_text(game.table_note):
+                    game_warning_reasons.append(reason)
+                else:
+                    game_blocking_reasons.append("订单开始时间与整桌备注均为空")
+            elif reason in warning_reason_set:
                 game_warning_reasons.append(reason)
             elif reason == "费用为0且支付状态未收齐":
                 if has_followup_note:
@@ -16218,6 +16281,7 @@ async def read_root(
 
     # B. 当前门店下包间：优先走 store_id 逻辑
     current_store_rooms = get_active_room_list_by_store(session, store)
+    current_store_room_prices = get_active_room_price_map_by_store(session, store)
 
     # C. 查询未组齐牌局 (逻辑不变)
     statement = select(GameRecord).where(
@@ -16261,6 +16325,7 @@ async def read_root(
         "current_store": store,
         "store_list": store_list,  # 新增：传给前端所有门店
         "room_list": current_store_rooms,  # 新增：传给前端当前门店的包间
+        "room_price_map": current_store_room_prices,
         "game_list": results,
         "game_smoke_type_map": game_smoke_type_map,
         "deposit_exempt_player_indices_by_game": _deposit_exempt_player_indices_by_game(
@@ -17306,6 +17371,7 @@ async def add_game(
 
     # 6. room_name 若传了值，才校验其是否属于该门店；空值允许通过
     room_name = _normalize_text(room_name)
+    room_obj = None
     if room_name:
         room_obj = session.exec(
             select(Room).where(
@@ -17329,6 +17395,13 @@ async def add_game(
                 url=f"/?store={store_name}&error=所选包间不存在或不属于当前门店",
                 status_code=303
             )
+
+    pricing_note_error = _room_price_mismatch_note_error(room_obj, room_fee, table_note)
+    if pricing_note_error:
+        return RedirectResponse(
+            url=_build_root_redirect_url(store_name, error=pricing_note_error),
+            status_code=303
+        )
 
     # 7. 创建未组齐记录
     now = datetime.now()
@@ -17495,6 +17568,12 @@ async def update_game_status(
             )
 
         room_fee = _safe_float(game.room_fee)
+        pricing_note_error = _room_price_mismatch_note_error(room_obj, room_fee, game.table_note)
+        if pricing_note_error:
+            return RedirectResponse(
+                url="/?" + urlencode({"store": store, "error": pricing_note_error}),
+                status_code=303
+            )
         if payment_method == "代客收款" and room_fee <= 0:
             return RedirectResponse(
                 url="/?" + urlencode({
@@ -17738,6 +17817,7 @@ async def update_game(
 
     # 5. room_name 若传了值，才校验归属；空值允许
     room_name = _normalize_text(room_name)
+    room_obj = None
     if room_name:
         room_obj = session.exec(
             select(Room).where(
@@ -17761,6 +17841,15 @@ async def update_game(
                 url=f"{redirect_base}?store={store_name}&error=所选包间不存在或不属于当前门店",
                 status_code=303
             )
+
+    pricing_note_error = _room_price_mismatch_note_error(room_obj, room_fee, table_note)
+    if pricing_note_error:
+        redirect_url = _build_formed_redirect_url(
+            store=store_name,
+            source_filter=_normalize_text(game.record_source) or FORMED_SOURCE_NORMAL,
+            error=pricing_note_error,
+        ) if game.status == "formed" else _build_root_redirect_url(store_name, error=pricing_note_error)
+        return RedirectResponse(url=redirect_url, status_code=303)
 
     # 6. V2：如果预约时间月份变了，则月序号要按新月份重新计算
     old_month_key = (game.record_date.year, game.record_date.month) if game.record_date else None
@@ -18044,6 +18133,7 @@ async def formed_games(
     store = resolve_store_from_request(request, session, store)
 
     current_store_rooms = get_active_room_list_by_store(session, store)
+    current_store_room_prices = get_active_room_price_map_by_store(session, store)
 
     statement = select(GameRecord).where(
         GameRecord.store_name == store,
@@ -18198,6 +18288,7 @@ async def formed_games(
         "current_store": store,
         "store_list": store_list,
         "room_list": current_store_rooms,
+        "room_price_map": current_store_room_prices,
         "game_list": page_game_list,
         "deposit_exempt_player_indices_by_game": _deposit_exempt_player_indices_by_game(
             page_game_list, exempt_wechat_keys
@@ -18647,6 +18738,7 @@ async def add_self_arrival_game(
             )
 
     final_room_fee = room_fee or 0.0
+    final_table_note = _normalize_text(table_note) or None
     if payment_method == "代客收款":
         if final_room_fee < 0:
             return RedirectResponse(
@@ -18664,6 +18756,22 @@ async def add_self_arrival_game(
             )
     else:
         final_room_fee = 0.0
+
+    pricing_note_error = _room_price_mismatch_note_error(room_obj, final_room_fee, final_table_note)
+    if pricing_note_error:
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_SELF_ARRIVAL,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=pricing_note_error,
+            ),
+            status_code=303,
+        )
     final_note_added = "是" if _normalize_text(note_added) == "是" else "否"
 
     new_serial = _get_monthly_serial_number(session, store_name, order_date)
@@ -18694,7 +18802,7 @@ async def add_self_arrival_game(
         player_2_note=None,
         player_3_note=None,
         player_4_note=None,
-        table_note=_normalize_text(table_note) or None,
+        table_note=final_table_note,
 
         room_name=room_name,
         payment_method=payment_method,
@@ -19096,6 +19204,22 @@ async def update_self_arrival_game(
             )
     else:
         final_room_fee = 0.0
+
+    pricing_note_error = _room_price_mismatch_note_error(room_obj, final_room_fee, final_table_note)
+    if pricing_note_error:
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_SELF_ARRIVAL,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=pricing_note_error,
+            ),
+            status_code=303,
+        )
     final_note_added = "是" if _normalize_text(note_added) == "是" else "否"
 
     old_month_key = (game.record_date.year, game.record_date.month) if game.record_date else None
@@ -20625,6 +20749,23 @@ async def update_formed_game(
                 payment_method_filter=payment_method_filter,
                 error=msg
             )
+        )
+
+    pricing_note_error = _room_price_mismatch_note_error(room_obj, final_room_fee, final_table_note)
+    if pricing_note_error:
+        return _ajax_or_redirect_error(
+            request,
+            message=pricing_note_error,
+            redirect_url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_NORMAL,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=pricing_note_error,
+            ),
         )
 
     p1_changed = _player_changed(game.player_1, game.player_1_wechat, player_1, player_1_wechat)
@@ -26341,10 +26482,13 @@ async def stores_rooms_settings_page(
         room_stmt.order_by(Room.sort_order, Room.id)
     ).all()
 
-    # 给包间补一个展示用门店名
+    # 给包间补一个展示用门店名；批量定价必须加载全部包间，不能受当前列表筛选影响。
+    all_rooms = session.exec(
+        select(Room).order_by(Room.store_name, Room.sort_order, Room.id)
+    ).all()
     room_store_name_map = {}
     store_id_map = {s.id: s.name for s in session.exec(select(Store)).all()}
-    for r in rooms:
+    for r in all_rooms:
         room_store_name_map[r.id] = store_id_map.get(r.store_id) or r.store_name or "-"
 
     return templates.TemplateResponse("settings_stores_rooms.html", {
@@ -26363,6 +26507,7 @@ async def stores_rooms_settings_page(
         ).all(),
         "stores": stores,
         "rooms": rooms,
+        "all_rooms": all_rooms,
         "room_store_name_map": room_store_name_map
 
     })
@@ -26472,11 +26617,25 @@ async def toggle_store(
     return RedirectResponse(url="/settings/stores-rooms?tab=stores&success=门店状态已更新", status_code=303)
 
 # ==== 新增包间 ====
+def _parse_room_price(raw_value) -> float:
+    clean_value = _normalize_text(raw_value)
+    if not clean_value:
+        return 0.0
+    try:
+        value = float(clean_value)
+    except (TypeError, ValueError):
+        raise ValueError("包间定价必须是有效数字")
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("包间定价必须是大于或等于0的有效数字")
+    return round(value, 2)
+
+
 @app.post("/settings/room/add")
 async def add_room(
         store_id: int = Form(...),
         name: str = Form(...),
         description: str = Form(""),
+        room_price: str = Form("0"),
         sort_order: int = Form(0),
         is_active: Optional[str] = Form(None),
         session: Session = Depends(get_session),
@@ -26504,12 +26663,21 @@ async def add_room(
     if exists:
         return RedirectResponse(url="/settings/stores-rooms?tab=rooms&error=同门店下包间名称已存在", status_code=303)
 
+    try:
+        parsed_room_price = _parse_room_price(room_price)
+    except ValueError as exc:
+        return RedirectResponse(
+            url="/settings/stores-rooms?" + urlencode({"tab": "rooms", "error": str(exc)}),
+            status_code=303
+        )
+
     now = datetime.now()
     new_room = Room(
         store_id=store.id,
         store_name=store.name,
         name=name,
         description=description.strip() or None,
+        room_price=parsed_room_price,
         sort_order=sort_order,
         is_active=(is_active == "true"),
         created_at=now,
@@ -26527,6 +26695,7 @@ async def update_room(
         store_id: int = Form(...),
         name: str = Form(...),
         description: str = Form(""),
+        room_price: str = Form("0"),
         sort_order: int = Form(0),
         is_active: Optional[str] = Form(None),
         session: Session = Depends(get_session),
@@ -26559,10 +26728,19 @@ async def update_room(
     if duplicate:
         return RedirectResponse(url="/settings/stores-rooms?tab=rooms&error=同门店下包间名称已存在", status_code=303)
 
+    try:
+        parsed_room_price = _parse_room_price(room_price)
+    except ValueError as exc:
+        return RedirectResponse(
+            url="/settings/stores-rooms?" + urlencode({"tab": "rooms", "error": str(exc)}),
+            status_code=303
+        )
+
     room.store_id = store.id
     room.store_name = store.name
     room.name = name
     room.description = description.strip() or None
+    room.room_price = parsed_room_price
     room.sort_order = sort_order
     room.is_active = (is_active == "true")
     room.updated_at = datetime.now()
@@ -26571,6 +26749,61 @@ async def update_room(
     session.commit()
 
     return RedirectResponse(url="/settings/stores-rooms?tab=rooms&success=包间更新成功", status_code=303)
+
+
+# ==== 批量填写包间定价 ====
+@app.post("/settings/room/batch-pricing")
+async def batch_update_room_pricing(
+        room_ids: List[int] = Form([]),
+        room_prices: List[str] = Form([]),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user)
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(url="/?error=无权限操作", status_code=303)
+
+    error_url_prefix = "/settings/stores-rooms?"
+    if not room_ids:
+        return RedirectResponse(
+            url=error_url_prefix + urlencode({"tab": "rooms", "error": "没有可保存的包间"}),
+            status_code=303
+        )
+    if len(room_ids) != len(room_prices) or len(set(room_ids)) != len(room_ids):
+        return RedirectResponse(
+            url=error_url_prefix + urlencode({"tab": "rooms", "error": "批量定价表单数据异常，请刷新页面后重试"}),
+            status_code=303
+        )
+
+    try:
+        parsed_prices = [_parse_room_price(value) for value in room_prices]
+    except ValueError as exc:
+        return RedirectResponse(
+            url=error_url_prefix + urlencode({"tab": "rooms", "error": str(exc)}),
+            status_code=303
+        )
+
+    target_rooms = session.exec(select(Room).where(Room.id.in_(room_ids))).all()
+    target_room_map = {room.id: room for room in target_rooms}
+    if len(target_room_map) != len(room_ids):
+        return RedirectResponse(
+            url=error_url_prefix + urlencode({"tab": "rooms", "error": "部分包间不存在，请刷新页面后重试"}),
+            status_code=303
+        )
+
+    now = datetime.now()
+    for room_id, room_price_value in zip(room_ids, parsed_prices):
+        room = target_room_map[room_id]
+        room.room_price = room_price_value
+        room.updated_at = now
+        session.add(room)
+    session.commit()
+
+    return RedirectResponse(
+        url=error_url_prefix + urlencode({"tab": "rooms", "success": f"已保存{len(room_ids)}个包间的定价"}),
+        status_code=303
+    )
 
 # ==== 包间启用/停用 ====
 @app.get("/settings/room/toggle/{room_id}")
@@ -26612,7 +26845,8 @@ async def api_rooms_by_store(
             "id": r.id,
             "name": r.name,
             "description": r.description or "",
-            "store_name": r.store_name or store_name
+            "store_name": r.store_name or store_name,
+            "room_price": r.room_price,
         }
         for r in rooms
     ]
@@ -26646,6 +26880,7 @@ async def api_admin_rooms_by_store(
             "name": r.name,
             "is_active": r.is_active,
             "sort_order": r.sort_order,
+            "room_price": r.room_price,
             "description": r.description or ""
         }
         for r in rooms

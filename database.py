@@ -191,6 +191,7 @@ class Room(SQLModel, table=True):
 
     # 附加信息
     description: Optional[str] = None  # 描述（如“自动麻将机”“靠窗”）
+    room_price: float = Field(default=0.0)  # 包间定价
     is_active: bool = Field(default=True, index=True)  # 是否启用
     sort_order: int = Field(default=0, index=True)  # 排序值
 
@@ -2611,6 +2612,7 @@ def migrate_store_room_settings_table():
 
         alter_columns = [
             ("store_id", "INTEGER"),
+            ("room_price", "REAL NOT NULL DEFAULT 0"),
             ("is_active", "BOOLEAN NOT NULL DEFAULT 1"),
             ("sort_order", "INTEGER NOT NULL DEFAULT 0"),
             ("created_at", "DATETIME"),

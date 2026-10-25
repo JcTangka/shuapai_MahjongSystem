@@ -588,7 +588,8 @@
                                     <select class="form-select" name="room_name" id="roomNameInput">
                                         <option value="">暂不指定</option>
                                         {% for room in room_list %}
-                                        <option value="{{ room.name if room.name is defined else room }}">
+                                        <option value="{{ room.name if room.name is defined else room }}"
+                                                data-room-price="{{ room_price_map.get(room.name if room.name is defined else room, 0) }}">
                                             {{ room.name if room.name is defined else room }}
                                         </option>
                                         {% endfor %}
@@ -597,6 +598,7 @@
                                 <div class="col-md-4">
                                     <label class="form-label fw-bold">费用</label>
                                     <input type="number" class="form-control" step="0.1" min="0" name="room_fee" id="roomFeeInput" value="0">
+                                    <div class="small mt-1 d-none" id="roomPriceHint" style="color:#d97878;"></div>
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label fw-bold">支付方式</label>
@@ -1061,6 +1063,41 @@ ${blacklistButton}
         }
     }
 
+    function selectedRoomPresetPrice(selectId) {
+        const select = document.getElementById(selectId);
+        const option = select?.selectedOptions?.[0];
+        if (!select?.value || !option) return null;
+        const price = Number(option.dataset.roomPrice);
+        return Number.isFinite(price) ? price : null;
+    }
+
+    function updateRoomPriceHint() {
+        const hint = document.getElementById('roomPriceHint');
+        if (!hint) return;
+        const presetPrice = selectedRoomPresetPrice('roomNameInput');
+        if (presetPrice === null) {
+            hint.textContent = '';
+            hint.classList.add('d-none');
+            return;
+        }
+        hint.textContent = `包间定价：¥${presetPrice.toFixed(2)}（仅供提示，请再次填写费用）`;
+        hint.classList.remove('d-none');
+    }
+
+    function validateRoomPriceRemark() {
+        const presetPrice = selectedRoomPresetPrice('roomNameInput');
+        if (presetPrice === null) return true;
+        const actualFee = Number(document.getElementById('roomFeeInput')?.value || 0);
+        const tableNote = (document.getElementById('tableNoteInput')?.value || '').trim();
+        if (Number.isFinite(actualFee)
+            && Math.round(actualFee * 100) !== Math.round(presetPrice * 100)
+            && !tableNote) {
+            alert(`实际填写费用（¥${actualFee.toFixed(2)}）与包间预设定价（¥${presetPrice.toFixed(2)}）不一致，请填写整桌备注后再保存`);
+            return false;
+        }
+        return true;
+    }
+
     function resetModal() {
         const form = document.getElementById('gameForm');
         form.reset();
@@ -1071,6 +1108,7 @@ ${blacklistButton}
         document.getElementById('roomFeeInput').value = 0;
         document.getElementById('tableNoteInput').value = '';
         document.getElementById('smokeTypeInput').value = 'smoking';
+        updateRoomPriceHint();
 
         rebuildStakesOptions();
         document.getElementById('gameTypeInput').dataset.previousValue = document.getElementById('gameTypeInput').value;
@@ -1108,6 +1146,7 @@ ${blacklistButton}
         document.getElementById('roomNameInput').value = btn.dataset.room || '';
         document.getElementById('paymentMethodInput').value = btn.dataset.payment || '';
         document.getElementById('roomFeeInput').value = btn.dataset.fee || 0;
+        updateRoomPriceHint();
 
         rebuildStakesOptions(btn.dataset.stakes || '');
 
@@ -1412,6 +1451,7 @@ ${blacklistButton}
     }
 
     async function checkAndSubmitGame() {
+        if (!validateRoomPriceRemark()) return;
         const pairValid = validateNicknameWechatPairs();
         if (!pairValid) return;
 
@@ -1454,6 +1494,12 @@ ${blacklistButton}
                 document.getElementById('stakesCustomInput').value = '';
                 rebuildStakesOptions();
             });
+        }
+
+        const roomNameInput = document.getElementById('roomNameInput');
+        if (roomNameInput) {
+            roomNameInput.addEventListener('change', updateRoomPriceHint);
+            updateRoomPriceHint();
         }
 
         const addGameModal = document.getElementById('addGameModal');

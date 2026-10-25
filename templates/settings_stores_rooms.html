@@ -137,6 +137,18 @@
     .action-btn-group .btn {
         border-radius: 10px;
     }
+
+    .bulk-pricing-list {
+        max-height: 52vh;
+        overflow-y: auto;
+    }
+
+    .bulk-pricing-row {
+        border: 1px solid #eaf0f6;
+        border-radius: 12px;
+        padding: 12px 14px;
+        background: #fff;
+    }
 </style>
 
 <div class="settings-page">
@@ -157,6 +169,9 @@
                 <i class="bi bi-plus-circle me-1"></i>新增门店
             </button>
             {% else %}
+            <button class="btn btn-outline-primary rounded-pill px-4" data-bs-toggle="modal" data-bs-target="#batchRoomPricingModal">
+                <i class="bi bi-cash-coin me-1"></i>批量填写包间定价
+            </button>
             <button class="btn btn-primary rounded-pill px-4" data-bs-toggle="modal" data-bs-target="#addRoomModal">
                 <i class="bi bi-plus-circle me-1"></i>新增包间
             </button>
@@ -402,6 +417,9 @@
                                 <div class="mini-meta mb-2">
                                     <i class="bi bi-sort-numeric-down me-1"></i>排序值：{{ room.sort_order }}
                                 </div>
+                                <div class="mini-meta">
+                                    <i class="bi bi-cash-coin me-1"></i>包间定价：¥{{ "%.2f"|format(room.room_price or 0) }}
+                                </div>
                             </div>
 
                             <div class="action-btn-group d-flex flex-wrap gap-2 justify-content-end">
@@ -478,6 +496,16 @@
                                             <option value="true" {% if room.is_active %}selected{% endif %}>启用</option>
                                             <option value="false" {% if not room.is_active %}selected{% endif %}>停用</option>
                                         </select>
+                                    </div>
+
+                                    <div class="col-md-4">
+                                        <label class="form-label field-label-strong">包间定价</label>
+                                        <div class="input-group">
+                                            <span class="input-group-text">¥</span>
+                                            <input type="number" name="room_price" class="form-control rounded-end-3"
+                                                   value="{{ '%.2f'|format(room.room_price or 0) }}"
+                                                   min="0" step="0.01" inputmode="decimal">
+                                        </div>
                                     </div>
 
                                     <div class="col-12">
@@ -609,6 +637,14 @@
                                 <option value="false">停用</option>
                             </select>
                         </div>
+                        <div class="col-md-4">
+                            <label class="form-label field-label-strong">包间定价</label>
+                            <div class="input-group">
+                                <span class="input-group-text">¥</span>
+                                <input type="number" name="room_price" class="form-control rounded-end-3"
+                                       value="0.00" min="0" step="0.01" inputmode="decimal">
+                            </div>
+                        </div>
                         <div class="col-12">
                             <label class="form-label field-label-strong">描述</label>
                             <textarea name="description" class="form-control rounded-3" rows="3"></textarea>
@@ -626,4 +662,117 @@
         </div>
     </div>
 </div>
+
+{% if tab == "rooms" %}
+<!-- 批量填写包间定价弹窗 -->
+<div class="modal fade" id="batchRoomPricingModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content border-0 shadow-lg rounded-4">
+            <form method="post" action="/settings/room/batch-pricing" id="batchRoomPricingForm">
+                <div class="modal-header blue-header">
+                    <h5 class="modal-title">
+                        <i class="bi bi-cash-coin me-2"></i>批量填写包间定价
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+
+                <div class="modal-body p-4">
+                    <div class="mb-3">
+                        <label class="form-label field-label-strong" for="batchRoomStoreFilter">按门店筛选</label>
+                        <select class="form-select rounded-3" id="batchRoomStoreFilter">
+                            <option value="">全部门店</option>
+                            {% for s in store_list %}
+                            <option value="{{ s.name }}" {% if store_filter == s.name %}selected{% endif %}>{{ s.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="d-flex justify-content-between align-items-center mb-3 text-secondary small">
+                        <span>金额单位：元；可切换门店后继续填写，最后统一保存。</span>
+                        <span>当前显示 <strong id="batchRoomVisibleCount">0</strong> 个包间</span>
+                    </div>
+
+                    <div class="bulk-pricing-list d-grid gap-2" id="batchRoomPricingList">
+                        {% for room in all_rooms %}
+                        <div class="bulk-pricing-row batch-room-pricing-row"
+                             data-store-name="{{ room_store_name_map.get(room.id, '-') }}">
+                            <input type="hidden" name="room_ids" value="{{ room.id }}">
+                            <div class="row g-3 align-items-center">
+                                <div class="col-md-7">
+                                    <div class="fw-bold">{{ room.name }}</div>
+                                    <div class="small text-secondary">
+                                        {{ room_store_name_map.get(room.id, '-') }}
+                                        {% if not room.is_active %}<span class="badge text-bg-secondary ms-1">已停用</span>{% endif %}
+                                    </div>
+                                </div>
+                                <div class="col-md-5">
+                                    <label class="form-label small text-secondary mb-1" for="batchRoomPrice{{ room.id }}">包间定价</label>
+                                    <div class="input-group">
+                                        <span class="input-group-text">¥</span>
+                                        <input type="number" class="form-control" id="batchRoomPrice{{ room.id }}"
+                                               name="room_prices" value="{{ '%.2f'|format(room.room_price or 0) }}"
+                                               min="0" step="0.01" inputmode="decimal" required>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+
+                    <div class="empty-box py-4 d-none" id="batchRoomPricingEmpty">
+                        当前门店暂无包间。
+                    </div>
+                </div>
+
+                <div class="modal-footer border-0 px-4 pb-4">
+                    <button type="button" class="btn btn-light rounded-pill px-4" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary rounded-pill px-4" id="batchRoomPricingSave">
+                        <i class="bi bi-check2-circle me-1"></i>统一保存
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if tab == "rooms" %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const storeFilter = document.getElementById('batchRoomStoreFilter');
+    const rows = Array.from(document.querySelectorAll('.batch-room-pricing-row'));
+    const visibleCount = document.getElementById('batchRoomVisibleCount');
+    const emptyState = document.getElementById('batchRoomPricingEmpty');
+    const saveButton = document.getElementById('batchRoomPricingSave');
+
+    function filterBatchPricingRows() {
+        const selectedStore = storeFilter ? storeFilter.value : '';
+        let count = 0;
+        rows.forEach(function (row) {
+            const shouldShow = !selectedStore || row.dataset.storeName === selectedStore;
+            row.classList.toggle('d-none', !shouldShow);
+            if (shouldShow) {
+                count += 1;
+            }
+        });
+        if (visibleCount) {
+            visibleCount.textContent = String(count);
+        }
+        if (emptyState) {
+            emptyState.classList.toggle('d-none', count !== 0);
+        }
+        if (saveButton) {
+            saveButton.disabled = rows.length === 0;
+        }
+    }
+
+    if (storeFilter) {
+        storeFilter.addEventListener('change', filterBatchPricingRows);
+    }
+    filterBatchPricingRows();
+});
+</script>
+{% endif %}
 {% endblock %}
