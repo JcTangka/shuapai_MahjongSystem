@@ -151,6 +151,7 @@
     }
 </style>
 
+<div id="settingsStoresRoomsContent">
 <div class="settings-page">
     <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
         <div class="d-flex align-items-center gap-3">
@@ -318,7 +319,7 @@
                 <div class="modal-dialog modal-lg modal-dialog-centered">
                     <div class="modal-content border-0 shadow-lg rounded-4">
                         <form method="post" action="/settings/store/update/{{ store.id }}"
-                              class="js-preserve-settings-scroll">
+                              class="js-settings-edit-form">
                             <input type="hidden" name="return_keyword" value="{{ keyword }}">
                             <div class="modal-header blue-header">
                                 <h5 class="modal-title">
@@ -459,7 +460,7 @@
                 <div class="modal-dialog modal-lg modal-dialog-centered">
                     <div class="modal-content border-0 shadow-lg rounded-4">
                         <form method="post" action="/settings/room/update/{{ room.id }}"
-                              class="js-preserve-settings-scroll">
+                              class="js-settings-edit-form">
                             <input type="hidden" name="return_keyword" value="{{ keyword }}">
                             <input type="hidden" name="return_store_filter" value="{{ store_filter }}">
                             <div class="modal-header blue-header">
@@ -740,28 +741,111 @@
     </div>
 </div>
 {% endif %}
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-document.addEventListener('DOMContentLoaded', function () {
-    const scrollStorageKey = 'storesRoomsEditScrollPosition';
-    const savedScrollPosition = sessionStorage.getItem(scrollStorageKey);
-    if (savedScrollPosition !== null) {
-        sessionStorage.removeItem(scrollStorageKey);
-        const scrollTop = Number(savedScrollPosition);
-        if (Number.isFinite(scrollTop) && scrollTop >= 0) {
-            requestAnimationFrame(function () {
-                requestAnimationFrame(function () {
-                    window.scrollTo({ top: scrollTop, behavior: 'auto' });
-                });
-            });
-        }
+function showSettingsFeedback(message, isError = false) {
+    const oldFeedback = document.getElementById('settingsAjaxFeedback');
+    if (oldFeedback) oldFeedback.remove();
+
+    const feedback = document.createElement('div');
+    feedback.id = 'settingsAjaxFeedback';
+    feedback.className = `alert alert-${isError ? 'danger' : 'success'} shadow position-fixed top-0 end-0 m-3`;
+    feedback.style.zIndex = '2000';
+    feedback.style.maxWidth = '420px';
+    feedback.textContent = message;
+    document.body.appendChild(feedback);
+    setTimeout(() => feedback.remove(), 2600);
+}
+
+function hideSettingsModalAndWait(modalElement) {
+    if (!modalElement || !modalElement.classList.contains('show')) {
+        return Promise.resolve();
     }
 
-    document.querySelectorAll('.js-preserve-settings-scroll').forEach(function (form) {
-        form.addEventListener('submit', function () {
-            sessionStorage.setItem(scrollStorageKey, String(window.scrollY));
+    return new Promise(resolve => {
+        let completed = false;
+        const finish = () => {
+            if (completed) return;
+            completed = true;
+            resolve();
+        };
+        modalElement.addEventListener('hidden.bs.modal', finish, { once: true });
+        bootstrap.Modal.getOrCreateInstance(modalElement).hide();
+        setTimeout(finish, 500);
+    });
+}
+
+async function refreshSettingsContent() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('success');
+    url.searchParams.delete('error');
+
+    const response = await fetch(url.toString(), {
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    });
+    if (!response.ok) throw new Error('内容刷新失败，请稍后重试');
+
+    const htmlText = await response.text();
+    const nextDocument = new DOMParser().parseFromString(htmlText, 'text/html');
+    const nextContent = nextDocument.getElementById('settingsStoresRoomsContent');
+    const currentContent = document.getElementById('settingsStoresRoomsContent');
+    if (!nextContent || !currentContent) {
+        throw new Error('未找到门店与包间内容区域');
+    }
+
+    currentContent.innerHTML = nextContent.innerHTML;
+    initSettingsContentInteractions();
+}
+
+async function submitSettingsEditForm(form) {
+    if (form.dataset.submitting === '1') return;
+    form.dataset.submitting = '1';
+
+    const submitButton = form.querySelector('button[type="submit"]');
+    if (submitButton) submitButton.disabled = true;
+
+    try {
+        const response = await fetch(form.action, {
+            method: 'POST',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            body: new FormData(form)
+        });
+
+        let data = {};
+        try {
+            data = await response.json();
+        } catch (error) {
+            throw new Error('后端没有返回有效结果');
+        }
+
+        if (!response.ok || !data.ok) {
+            const detail = Array.isArray(data.detail)
+                ? data.detail.map(item => item.msg).filter(Boolean).join('；')
+                : '';
+            throw new Error(data.message || detail || '保存失败');
+        }
+
+        await hideSettingsModalAndWait(form.closest('.modal'));
+        await refreshSettingsContent();
+        showSettingsFeedback(data.message || '保存成功');
+    } catch (error) {
+        showSettingsFeedback(error.message || '保存失败', true);
+    } finally {
+        form.dataset.submitting = '0';
+        if (submitButton && document.body.contains(submitButton)) {
+            submitButton.disabled = false;
+        }
+    }
+}
+
+function initSettingsContentInteractions() {
+    document.querySelectorAll('.js-settings-edit-form').forEach(function (form) {
+        form.addEventListener('submit', function (event) {
+            event.preventDefault();
+            submitSettingsEditForm(form);
         });
     });
 
@@ -796,6 +880,10 @@ document.addEventListener('DOMContentLoaded', function () {
         storeFilter.addEventListener('change', filterBatchPricingRows);
     }
     filterBatchPricingRows();
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    initSettingsContentInteractions();
 });
 </script>
 {% endblock %}

@@ -26581,6 +26581,7 @@ async def add_store(
 # ==== 编辑门店 ====
 @app.post("/settings/store/update/{store_id}")
 async def update_store(
+        request: Request,
         store_id: int,
         short_name: str = Form(""),
         address: str = Form(""),
@@ -26593,17 +26594,28 @@ async def update_store(
         user: Optional[User] = Depends(get_current_user)
 ):
     if not user:
-        return RedirectResponse(url="/login", status_code=303)
+        return _ajax_or_redirect_error(
+            request,
+            message="请先登录",
+            redirect_url="/login",
+            status_code=401
+        )
     if user.role != "admin":
-        return RedirectResponse(url="/?error=无权限操作", status_code=303)
+        return _ajax_or_redirect_error(
+            request,
+            message="无权限操作",
+            redirect_url="/?error=无权限操作",
+            status_code=403
+        )
 
     store = session.get(Store, store_id)
     if not store:
-        return RedirectResponse(
-            url=_build_stores_rooms_settings_url(
+        return _ajax_or_redirect_error(
+            request,
+            message="门店不存在",
+            redirect_url=_build_stores_rooms_settings_url(
                 "stores", keyword=return_keyword, error="门店不存在"
             ),
-            status_code=303
         )
 
     # 本版先不允许改 name，只允许改附属信息
@@ -26617,6 +26629,13 @@ async def update_store(
 
     session.add(store)
     session.commit()
+
+    if _is_ajax_request(request):
+        return JSONResponse({
+            "ok": True,
+            "store_id": store.id,
+            "message": "门店更新成功"
+        })
 
     return RedirectResponse(
         url=_build_stores_rooms_settings_url(
@@ -26723,6 +26742,7 @@ async def add_room(
 # ==== 编辑包间 ====
 @app.post("/settings/room/update/{room_id}")
 async def update_room(
+        request: Request,
         room_id: int,
         store_id: int = Form(...),
         name: str = Form(...),
@@ -26736,44 +26756,57 @@ async def update_room(
         user: Optional[User] = Depends(get_current_user)
 ):
     if not user:
-        return RedirectResponse(url="/login", status_code=303)
+        return _ajax_or_redirect_error(
+            request,
+            message="请先登录",
+            redirect_url="/login",
+            status_code=401
+        )
     if user.role != "admin":
-        return RedirectResponse(url="/?error=无权限操作", status_code=303)
+        return _ajax_or_redirect_error(
+            request,
+            message="无权限操作",
+            redirect_url="/?error=无权限操作",
+            status_code=403
+        )
 
     room = session.get(Room, room_id)
     if not room:
-        return RedirectResponse(
-            url=_build_stores_rooms_settings_url(
+        return _ajax_or_redirect_error(
+            request,
+            message="包间不存在",
+            redirect_url=_build_stores_rooms_settings_url(
                 "rooms",
                 keyword=return_keyword,
                 store_filter=return_store_filter,
                 error="包间不存在"
             ),
-            status_code=303
         )
 
     store = session.get(Store, store_id)
     if not store:
-        return RedirectResponse(
-            url=_build_stores_rooms_settings_url(
+        return _ajax_or_redirect_error(
+            request,
+            message="所属门店不存在",
+            redirect_url=_build_stores_rooms_settings_url(
                 "rooms",
                 keyword=return_keyword,
                 store_filter=return_store_filter,
                 error="所属门店不存在"
             ),
-            status_code=303
         )
 
     name = name.strip()
     if not name:
-        return RedirectResponse(
-            url=_build_stores_rooms_settings_url(
+        return _ajax_or_redirect_error(
+            request,
+            message="包间名称不能为空",
+            redirect_url=_build_stores_rooms_settings_url(
                 "rooms",
                 keyword=return_keyword,
                 store_filter=return_store_filter,
                 error="包间名称不能为空"
             ),
-            status_code=303
         )
 
     duplicate = session.exec(
@@ -26784,27 +26817,29 @@ async def update_room(
         )
     ).first()
     if duplicate:
-        return RedirectResponse(
-            url=_build_stores_rooms_settings_url(
+        return _ajax_or_redirect_error(
+            request,
+            message="同门店下包间名称已存在",
+            redirect_url=_build_stores_rooms_settings_url(
                 "rooms",
                 keyword=return_keyword,
                 store_filter=return_store_filter,
                 error="同门店下包间名称已存在"
             ),
-            status_code=303
         )
 
     try:
         parsed_room_price = _parse_room_price(room_price)
     except ValueError as exc:
-        return RedirectResponse(
-            url=_build_stores_rooms_settings_url(
+        return _ajax_or_redirect_error(
+            request,
+            message=str(exc),
+            redirect_url=_build_stores_rooms_settings_url(
                 "rooms",
                 keyword=return_keyword,
                 store_filter=return_store_filter,
                 error=str(exc)
             ),
-            status_code=303
         )
 
     room.store_id = store.id
@@ -26818,6 +26853,13 @@ async def update_room(
 
     session.add(room)
     session.commit()
+
+    if _is_ajax_request(request):
+        return JSONResponse({
+            "ok": True,
+            "room_id": room.id,
+            "message": "包间更新成功"
+        })
 
     return RedirectResponse(
         url=_build_stores_rooms_settings_url(
