@@ -724,6 +724,21 @@ class ShiftSchedule(SQLModel, table=True):
     # 班次：early / mid / bigmid / night1 / night2 / off
     shift_type: str = Field(default="off", index=True)
 
+
+class MobileHandoverRule(SQLModel, table=True):
+    """排班表与手机交接的门店范围绑定规则。"""
+    __tablename__ = "mobilehandoverrule"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    active_assignments_json: str = Field(default="[]")
+    inactive_assignments_json: str = Field(default="[]")
+    is_enabled: bool = Field(default=False, index=True)
+    created_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    created_by_name: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+
 # ===================== 新增：待办及信息同步业务表 =====================
 class HandoverTodo(SQLModel, table=True):
     """
@@ -1666,6 +1681,7 @@ def create_db_and_tables():
     migrate_monthly_salary_settlement_table()
     migrate_daily_store_work_item_table()
     migrate_common_issue_tables()
+    initialize_mobile_handover_rules()
 
 def _normalize_migration_text(value: Optional[str]) -> str:
     return (value or "").strip()
@@ -3757,6 +3773,18 @@ def migrate_employee_module_tables():
         session.commit()
 
         print("员工管理模块表结构已检查，员工档案和默认团队已初始化。")
+
+
+def initialize_mobile_handover_rules():
+    """新功能首次启用时提供一个可编辑但默认未启用的规则。"""
+    with Session(engine) as session:
+        existing = session.exec(
+            select(MobileHandoverRule).order_by(MobileHandoverRule.id)
+        ).first()
+        if existing:
+            return
+        session.add(MobileHandoverRule(name="默认规则1"))
+        session.commit()
 
 def get_session():
     with Session(engine) as session:

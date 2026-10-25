@@ -11,6 +11,7 @@ from urllib.parse import quote
 import calendar
 import json
 import math
+import re
 import secrets
 import string
 import threading
@@ -31,7 +32,7 @@ from database import (GameRecord, GamePaymentItem, Store, Room, User,
                       refresh_recommendation_snapshots, RECOMMENDATION_DATE_TYPE_WORKDAY,
                       RECOMMENDATION_DATE_TYPE_WEEKEND, RECOMMENDATION_DATE_TYPE_HOLIDAY,
                       RECOMMENDATION_SNAPSHOT_WINDOW_DAYS,
-                      ShiftSchedule, MaintenanceRecord, upsert_shift, get_month_shifts_map, get_month_date_range, normalize_shift_type,
+                      ShiftSchedule, MobileHandoverRule, MaintenanceRecord, upsert_shift, get_month_shifts_map, get_month_date_range, normalize_shift_type,
                       get_manager_performance_stats, get_shift_performance_stats,
                       HandoverTodo, HandoverTodoCustomerLink, FormedGameHandoverLink,SelfArrivalRecord,
                       PublicTrafficLead, ContactCustomerFollowup, CancelledGameContactSnapshot,
@@ -3758,28 +3759,17 @@ def _build_employee_whiteboard_data(
 
     # 当前月份应该展示的员工名：在职员工 + 本月仍展示的已停用员工
     visible_employee_names = set(_get_visible_employee_names_for_month(session, year, month))
-    today_for_champion = date.today()
-    champion_cutoff_date = min(today_for_champion, month_end)
-    champion_order_count_map = {}
-    if champion_cutoff_date >= month_start:
-        for g in month_games:
-            if not g.record_date or g.record_date > champion_cutoff_date:
-                continue
-            who_did = _normalize_text(g.who_did)
-            if who_did:
-                champion_order_count_map[who_did] = champion_order_count_map.get(who_did, 0) + 1
-
-    max_champion_order_count = max(champion_order_count_map.values() or [0])
+    # 销冠必须直接复用“员工本月订单量对比”的统计结果，避免按当天再次截断后出现单量不一致。
+    max_champion_order_count = max(employee_order_count_map.values() or [0])
     champion_names = sorted([
         employee_name
-        for employee_name, order_count in champion_order_count_map.items()
+        for employee_name, order_count in employee_order_count_map.items()
         if order_count == max_champion_order_count and order_count > 0
     ])
     sales_champion = {
         "names": champion_names,
         "display_name": "、".join(champion_names) if champion_names else "",
         "order_count": max_champion_order_count if champion_names else 0,
-        "as_of_date": champion_cutoff_date,
         "is_tie": len(champion_names) > 1,
     }
 
@@ -5032,6 +5022,306 @@ def _normalize_text(v: Optional[str]) -> str:
     return (v or "").strip()
 
 
+MOBILE_HANDOVER_DUTY_ACTIVE = "active"
+MOBILE_HANDOVER_DUTY_INACTIVE = "inactive"
+MOBILE_HANDOVER_RULE_SHIFT_TYPES = {
+    "off", SHIFT_TYPE_PUBLIC_REST, "early", "mid", "bigmid",
+    SHIFT_TYPE_NIGHT_1, SHIFT_TYPE_NIGHT_2,
+}
+
+
+def _decode_mobile_handover_assignments(raw_json: Optional[str]) -> List[dict]:
+    try:
+        payload = json.loads(raw_json or "[]")
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    result = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        shift_type = normalize_shift_type(_normalize_text(str(row.get("shift_type") or "")))
+        if shift_type not in MOBILE_HANDOVER_RULE_SHIFT_TYPES:
+            continue
+        store_names = []
+        for value in row.get("store_names") or []:
+            store_name = _normalize_text(str(value))
+            if store_name and store_name not in store_names:
+                store_names.append(store_name)
+        result.append({"shift_type": shift_type, "store_names": store_names})
+    return result
+
+
+def _normalize_mobile_handover_assignments(
+        rows: object,
+        active_store_names: set[str]
+) -> List[dict]:
+    if not isinstance(rows, list):
+        return []
+    result = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        shift_type = normalize_shift_type(_normalize_text(str(row.get("shift_type") or "")))
+        if shift_type not in MOBILE_HANDOVER_RULE_SHIFT_TYPES:
+            continue
+        store_names = []
+        raw_store_names = row.get("store_names") or []
+        if not isinstance(raw_store_names, list):
+            raw_store_names = []
+        for value in raw_store_names:
+            store_name = _normalize_text(str(value))
+            if store_name in active_store_names and store_name not in store_names:
+                store_names.append(store_name)
+        result.append({"shift_type": shift_type, "store_names": store_names})
+    return result
+
+
+def _mobile_handover_rule_payload(rule: MobileHandoverRule) -> dict:
+    return {
+        "id": rule.id,
+        "name": rule.name,
+        "is_enabled": bool(rule.is_enabled),
+        "active_assignments": _decode_mobile_handover_assignments(rule.active_assignments_json),
+        "inactive_assignments": _decode_mobile_handover_assignments(rule.inactive_assignments_json),
+    }
+
+
+def _game_business_datetime(game: GameRecord) -> datetime:
+    business_date = game.record_date or (game.created_at.date() if game.created_at else date.today())
+    raw_time = _normalize_text(game.order_start_time) or _normalize_text(game.start_time)
+    match = re.match(r"^(\d{1,2}):(\d{2})", raw_time)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return datetime.combine(business_date, time(hour, minute))
+    return datetime.combine(business_date, time.min)
+
+
+def _game_business_datetime_label(game: GameRecord) -> str:
+    business_dt = _game_business_datetime(game)
+    raw_time = _normalize_text(game.order_start_time) or _normalize_text(game.start_time)
+    if re.match(r"^\d{1,2}:\d{2}", raw_time):
+        return business_dt.strftime("%Y-%m-%d %H:%M")
+    return f"{business_dt.date().isoformat()}（时间未填写）"
+
+
+def _mobile_handover_allowed_stores(rule: MobileHandoverRule, duty_mode: str, shift_type: str) -> List[str]:
+    raw_json = (
+        rule.active_assignments_json
+        if duty_mode == MOBILE_HANDOVER_DUTY_ACTIVE
+        else rule.inactive_assignments_json
+    )
+    allowed = []
+    normalized_shift = normalize_shift_type(shift_type or "off")
+    for row in _decode_mobile_handover_assignments(raw_json):
+        if row["shift_type"] != normalized_shift:
+            continue
+        for store_name in row["store_names"]:
+            if store_name not in allowed:
+                allowed.append(store_name)
+    return allowed
+
+
+def _build_mobile_handover_anomaly_rows(
+        session: Session,
+        *,
+        start_date: date,
+        end_date: date,
+        employee_id: Optional[int] = None,
+        store_filter: str = "all",
+) -> Tuple[Optional[MobileHandoverRule], List[dict]]:
+    active_rule = session.exec(
+        select(MobileHandoverRule).where(
+            MobileHandoverRule.is_enabled == True
+        ).order_by(MobileHandoverRule.id)
+    ).first()
+    if not active_rule:
+        return None, []
+
+    users = session.exec(select(User).order_by(User.id)).all()
+    user_by_name = {item.display_name: item for item in users if item.display_name}
+    selected_employee = session.get(User, employee_id) if employee_id else None
+
+    game_query = select(GameRecord).where(
+        GameRecord.status == "formed",
+        GameRecord.record_date >= start_date,
+        GameRecord.record_date <= end_date,
+    )
+    if selected_employee:
+        game_query = game_query.where(GameRecord.who_did == selected_employee.display_name)
+    if store_filter != "all":
+        game_query = game_query.where(GameRecord.store_name == store_filter)
+    games = session.exec(
+        game_query.order_by(GameRecord.record_date.desc(), GameRecord.id.desc())
+    ).all()
+    if not games:
+        return active_rule, []
+
+    shift_rows = session.exec(
+        select(ShiftSchedule).where(
+            ShiftSchedule.work_date >= start_date - timedelta(days=1),
+            ShiftSchedule.work_date <= end_date,
+        )
+    ).all()
+    shift_map = {
+        (item.operator_name, item.work_date): normalize_shift_type(item.shift_type or "off")
+        for item in shift_rows
+    }
+
+    relevant_user_ids = {
+        user_by_name[game.who_did].id
+        for game in games
+        if game.who_did in user_by_name and user_by_name[game.who_did].id
+    }
+    duty_rows_by_user: Dict[int, List[EmployeeDutySession]] = {}
+    if relevant_user_ids:
+        duty_rows = session.exec(
+            select(EmployeeDutySession).where(
+                EmployeeDutySession.user_id.in_(relevant_user_ids),
+                EmployeeDutySession.action_type == "store_duty",
+            ).order_by(EmployeeDutySession.started_at, EmployeeDutySession.id)
+        ).all()
+        for duty in duty_rows:
+            duty_rows_by_user.setdefault(duty.user_id, []).append(duty)
+
+    anomaly_rows = []
+    rest_shift_types = {"off", SHIFT_TYPE_PUBLIC_REST}
+    for game in games:
+        employee_name = _normalize_text(game.who_did)
+        if not employee_name:
+            continue
+        business_dt = _game_business_datetime(game)
+        shift_date = business_dt.date()
+        shift_type = shift_map.get((employee_name, shift_date), "off")
+        if shift_type in rest_shift_types:
+            previous_date = shift_date - timedelta(days=1)
+            previous_shift = shift_map.get((employee_name, previous_date), "off")
+            if previous_shift not in rest_shift_types:
+                shift_date = previous_date
+                shift_type = previous_shift
+
+        registered_at = game.created_at or business_dt
+        employee = user_by_name.get(employee_name)
+        duty_mode = MOBILE_HANDOVER_DUTY_INACTIVE
+        if employee and employee.id:
+            for duty in duty_rows_by_user.get(employee.id, []):
+                if not duty.started_at or duty.started_at > registered_at:
+                    continue
+                if duty.ended_at is None or duty.ended_at >= registered_at:
+                    duty_mode = MOBILE_HANDOVER_DUTY_ACTIVE
+                    break
+
+        allowed_store_names = _mobile_handover_allowed_stores(active_rule, duty_mode, shift_type)
+        actual_store_name = _normalize_text(game.store_name)
+        if actual_store_name in allowed_store_names:
+            continue
+
+        anomaly_rows.append({
+            "game": game,
+            "business_datetime": business_dt,
+            "business_datetime_label": _game_business_datetime_label(game),
+            "registered_at": registered_at,
+            "shift_date": shift_date,
+            "shift_type": shift_type,
+            "employee_name": employee_name,
+            "duty_mode": duty_mode,
+            "actual_store_name": actual_store_name,
+            "allowed_store_names": allowed_store_names,
+            "order_url": "/formed-games?" + urlencode({
+                "store": actual_store_name,
+                "focus_game_id": game.id,
+            }),
+        })
+
+    anomaly_rows.sort(
+        key=lambda item: (item["business_datetime"], item["game"].id or 0),
+        reverse=True,
+    )
+    return active_rule, anomaly_rows
+
+
+WECHAT_ID_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{5,19}$")
+WECHAT_ID_RULE_MESSAGE = "微信号必须为6到20位，以英文字母或下划线开头，且只能包含英文字母、数字、下划线和减号"
+PHONE_11_DIGIT_PATTERN = re.compile(r"^[0-9]{11}$")
+
+
+def _is_valid_wechat_id(value: Optional[str]) -> bool:
+    return bool(WECHAT_ID_PATTERN.fullmatch(_normalize_text(value)))
+
+
+def _validate_wechat_id_value(
+        value: Optional[str],
+        *,
+        old_value: Optional[str] = None,
+        allow_unchanged_legacy: bool = False,
+        field_label: str = "微信号",
+) -> Tuple[bool, str]:
+    """Validate a non-empty WeChat ID while allowing an unchanged legacy value on edits."""
+    clean_value = _normalize_text(value)
+    if not clean_value:
+        return True, ""
+    if _is_valid_wechat_id(clean_value):
+        return True, ""
+    if allow_unchanged_legacy and clean_value == _normalize_text(old_value):
+        return True, ""
+    return False, f"{field_label}格式不正确：{WECHAT_ID_RULE_MESSAGE}"
+
+
+def _validate_optional_phone_value(
+        value: Optional[str],
+        *,
+        old_value: Optional[str] = None,
+        allow_unchanged_legacy: bool = False,
+) -> Tuple[bool, str]:
+    """Self-arrival phone is optional, but a new or changed value must be 11 digits."""
+    clean_value = _normalize_text(value)
+    if not clean_value:
+        return True, ""
+    if PHONE_11_DIGIT_PATTERN.fullmatch(clean_value):
+        return True, ""
+    if allow_unchanged_legacy and clean_value == _normalize_text(old_value):
+        return True, ""
+    return False, "手机号格式不正确：填写时必须为11位纯数字"
+
+
+def _validate_phone_or_wechat_contact(
+        value: Optional[str],
+        *,
+        old_value: Optional[str] = None,
+        allow_unchanged_legacy: bool = False,
+) -> Tuple[bool, str]:
+    """Compatibility validator for the legacy combined phone/WeChat contact field."""
+    clean_value = _normalize_text(value)
+    if not clean_value:
+        return False, "下单用户手机号 / 微信号不能为空"
+    if re.fullmatch(r"[0-9]+", clean_value):
+        ok, _ = _validate_optional_phone_value(
+            clean_value,
+            old_value=old_value,
+            allow_unchanged_legacy=allow_unchanged_legacy,
+        )
+        return (True, "") if ok else (False, "下单用户手机号格式不正确：必须为11位纯数字")
+    ok, _ = _validate_wechat_id_value(
+        clean_value,
+        old_value=old_value,
+        allow_unchanged_legacy=allow_unchanged_legacy,
+    )
+    return (True, "") if ok else (False, f"下单用户微信号格式不正确：{WECHAT_ID_RULE_MESSAGE}")
+
+
+def _game_legacy_wechat_by_index(game: Optional[GameRecord]) -> Dict[int, str]:
+    if not game:
+        return {}
+    return {
+        idx: _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+        for idx in range(1, 5)
+    }
+
+
 def _deposit_exempt_customer_ids(session: Session) -> set[int]:
     return set(session.exec(
         select(CustomerDepositExemption.customer_id).where(
@@ -5215,7 +5505,8 @@ def _has_duplicate_real_player_for_confirm(game: GameRecord) -> bool:
 
 def _validate_players_and_customer_binding_detailed(
     session: Session,
-    slots: List[dict]
+    slots: List[dict],
+    legacy_wechat_by_index: Optional[Dict[int, str]] = None,
 ) -> Tuple[bool, str, List[int], str]:
     """
     参与人规则（详细返回版）：
@@ -5232,7 +5523,21 @@ def _validate_players_and_customer_binding_detailed(
         if (s["name"] and not s["wechat"]) or (s["wechat"] and not s["name"]):
             return False, f"参与人{s['idx']}的昵称和微信号必须同时填写", [s["idx"]], "pair_required"
 
-    # 2) 同一局内：相同微信号 + 不同昵称 => 禁止
+    # 2) 微信号格式。编辑历史数据时，仅允许原样保留旧的不合规值；新增或修改后必须合规。
+    legacy_wechat_by_index = legacy_wechat_by_index or {}
+    for s in slots:
+        if not s["wechat"]:
+            continue
+        ok, msg = _validate_wechat_id_value(
+            s["wechat"],
+            old_value=legacy_wechat_by_index.get(s["idx"]),
+            allow_unchanged_legacy=s["idx"] in legacy_wechat_by_index,
+            field_label=f"参与人{s['idx']}微信号",
+        )
+        if not ok:
+            return False, msg, [s["idx"]], "invalid_wechat_format"
+
+    # 3) 同一局内：相同微信号 + 不同昵称 => 禁止
     wechat_to_slot = {}
     wechat_to_name = {}
 
@@ -5249,7 +5554,7 @@ def _validate_players_and_customer_binding_detailed(
         wechat_to_name[wx] = nm
         wechat_to_slot[wx] = s["idx"]
 
-    # 3) 顾客库严格模式：微信号已存在，但昵称不一致
+    # 4) 顾客库严格模式：微信号已存在，但昵称不一致
     for s in slots:
         wx = s["wechat"]
         nm = s["name"]
@@ -5272,11 +5577,19 @@ def _validate_players_and_customer_binding_detailed(
     return True, "", [], ""
 
 
-def _validate_players_and_customer_binding(session: Session, slots: List[dict]) -> Tuple[bool, str]:
+def _validate_players_and_customer_binding(
+        session: Session,
+        slots: List[dict],
+        legacy_wechat_by_index: Optional[Dict[int, str]] = None,
+) -> Tuple[bool, str]:
     """
     兼容旧调用：仅返回 ok, msg
     """
-    ok, msg, _, _ = _validate_players_and_customer_binding_detailed(session, slots)
+    ok, msg, _, _ = _validate_players_and_customer_binding_detailed(
+        session,
+        slots,
+        legacy_wechat_by_index=legacy_wechat_by_index,
+    )
     return ok, msg
 
 def _parse_reservation_datetime_local(start_time_full: str) -> Tuple[date, str]:
@@ -10766,6 +11079,11 @@ async def employees_page(
         attendance_end_date: str = "",
         attendance_event_type: str = "all",
         attendance_employee: str = "all",
+        anomaly_date_filter: str = "this_month",
+        anomaly_start_date: str = "",
+        anomaly_end_date: str = "",
+        anomaly_employee: str = "all",
+        anomaly_store: str = "all",
         duty_date_filter: str = "today",
         duty_start_date: str = "",
         duty_end_date: str = "",
@@ -10812,6 +11130,7 @@ async def employees_page(
         "my_assessment",
         "salary_settlement",
         "duty_sessions",
+        "order_anomalies",
     ]
 
     employee_tabs = [
@@ -10890,6 +11209,15 @@ async def employees_page(
         "end_date": attendance_end_date,
         "event_type": attendance_event_type,
         "employee": attendance_employee,
+    }
+    order_anomaly_rows = []
+    order_anomaly_rule = None
+    order_anomaly_filters = {
+        "date_filter": anomaly_date_filter,
+        "start_date": anomaly_start_date,
+        "end_date": anomaly_end_date,
+        "employee": anomaly_employee,
+        "store": anomaly_store,
     }
 
     # ===== 6. 工资调整流水数据 =====
@@ -11067,6 +11395,35 @@ async def employees_page(
                 "end_date": attendance_filter_end.strftime("%Y-%m-%d") if attendance_filter_end else "",
                 "event_type": attendance_event_type,
                 "employee": attendance_employee,
+            })
+
+        if tab == "order_anomalies":
+            anomaly_date_filter, anomaly_filter_start, anomaly_filter_end = _parse_employee_period_filter(
+                anomaly_date_filter,
+                anomaly_start_date,
+                anomaly_end_date,
+                default_filter="this_month",
+            )
+            anomaly_employee_id = (
+                int(anomaly_employee)
+                if anomaly_employee != "all" and str(anomaly_employee).isdigit()
+                else None
+            )
+            if anomaly_store not in store_list:
+                anomaly_store = "all"
+            order_anomaly_rule, order_anomaly_rows = _build_mobile_handover_anomaly_rows(
+                session,
+                start_date=anomaly_filter_start,
+                end_date=anomaly_filter_end,
+                employee_id=anomaly_employee_id,
+                store_filter=anomaly_store,
+            )
+            order_anomaly_filters.update({
+                "date_filter": anomaly_date_filter,
+                "start_date": anomaly_filter_start.strftime("%Y-%m-%d"),
+                "end_date": anomaly_filter_end.strftime("%Y-%m-%d"),
+                "employee": anomaly_employee,
+                "store": anomaly_store,
             })
 
     # 普通员工进入“我的考勤”页签时，只查看自己的考勤记录
@@ -11440,6 +11797,9 @@ async def employees_page(
         "attendance_filters": attendance_filters,
         "attendance_employee_options": all_employees,
         "attendance_event_type_label": _attendance_event_type_label,
+        "order_anomaly_rows": order_anomaly_rows,
+        "order_anomaly_rule": order_anomaly_rule,
+        "order_anomaly_filters": order_anomaly_filters,
 
         # 管理员登记考勤时可选员工
         "active_employees": active_employees,
@@ -17196,6 +17556,7 @@ async def customer_search(
 
 @app.post("/api/validate-unformed-game-players")
 async def validate_unformed_game_players(
+        game_id: Optional[int] = Form(None),
         player_1: str = Form(""), player_2: str = Form(""),
         player_3: str = Form(""), player_4: str = Form(""),
         player_1_wechat: str = Form(""), player_2_wechat: str = Form(""),
@@ -17211,7 +17572,12 @@ async def validate_unformed_game_players(
         player_1_wechat, player_2_wechat, player_3_wechat, player_4_wechat
     )
 
-    ok, msg, indices, error_type = _validate_players_and_customer_binding_detailed(session, slots)
+    existing_game = session.get(GameRecord, game_id) if game_id else None
+    ok, msg, indices, error_type = _validate_players_and_customer_binding_detailed(
+        session,
+        slots,
+        legacy_wechat_by_index=_game_legacy_wechat_by_index(existing_game),
+    )
 
     return JSONResponse({
         "ok": ok,
@@ -17767,7 +18133,11 @@ async def update_game(
         player_1, player_2, player_3, player_4,
         player_1_wechat, player_2_wechat, player_3_wechat, player_4_wechat
     )
-    ok, msg = _validate_players_and_customer_binding(session, slots)
+    ok, msg = _validate_players_and_customer_binding(
+        session,
+        slots,
+        legacy_wechat_by_index=_game_legacy_wechat_by_index(game),
+    )
     if not ok:
         redirect_url = _build_formed_redirect_url(
             store=store_name,
@@ -18679,6 +19049,21 @@ async def add_self_arrival_game(
     self_arrival_phone = _normalize_text(self_arrival_phone)
     player_1 = _normalize_text(player_1)
     player_1_wechat = _normalize_text(player_1_wechat)
+    phone_ok, phone_msg = _validate_optional_phone_value(self_arrival_phone)
+    if not phone_ok:
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_SELF_ARRIVAL,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=phone_msg
+            ),
+            status_code=303
+        )
     ok, msg = _validate_self_arrival_contact_pairs(
         self_arrival_app_nickname,
         self_arrival_phone,
@@ -19079,6 +19464,25 @@ async def update_self_arrival_game(
     self_arrival_phone = _normalize_text(self_arrival_phone)
     player_1 = _normalize_text(player_1)
     player_1_wechat = _normalize_text(player_1_wechat)
+    phone_ok, phone_msg = _validate_optional_phone_value(
+        self_arrival_phone,
+        old_value=game.self_arrival_phone,
+        allow_unchanged_legacy=True,
+    )
+    if not phone_ok:
+        return RedirectResponse(
+            url=_build_formed_redirect_url(
+                store=store_name,
+                source_filter=FORMED_SOURCE_SELF_ARRIVAL,
+                pay_status=pay_status,
+                date_filter=date_filter,
+                start_date=start_date,
+                end_date=end_date,
+                payment_method_filter=payment_method_filter,
+                error=phone_msg
+            ),
+            status_code=303
+        )
     ok, msg = _validate_self_arrival_contact_pairs(
         self_arrival_app_nickname,
         self_arrival_phone,
@@ -19105,7 +19509,11 @@ async def update_self_arrival_game(
         player_1_wechat, "", "", ""
     )
     if player_1 and player_1_wechat:
-        ok, msg = _validate_players_and_customer_binding(session, slots)
+        ok, msg = _validate_players_and_customer_binding(
+            session,
+            slots,
+            legacy_wechat_by_index=_game_legacy_wechat_by_index(game),
+        )
         if not ok:
             return RedirectResponse(
                 url=_build_formed_redirect_url(
@@ -19853,7 +20261,11 @@ async def update_overflow_game(
         player_1, player_2, player_3, player_4,
         player_1_wechat, player_2_wechat, player_3_wechat, player_4_wechat
     )
-    ok, msg = _validate_players_and_customer_binding(session, slots)
+    ok, msg = _validate_players_and_customer_binding(
+        session,
+        slots,
+        legacy_wechat_by_index=_game_legacy_wechat_by_index(game),
+    )
     if not ok:
         return RedirectResponse(
             url=_build_formed_redirect_url(
@@ -20283,6 +20695,14 @@ async def add_self_arrival_record(
             status_code=303
         )
 
+    customer_contact = _normalize_text(customer_contact)
+    contact_ok, contact_msg = _validate_phone_or_wechat_contact(customer_contact)
+    if not contact_ok:
+        return RedirectResponse(
+            url=f"/self-arrival-register?" + urlencode({"store": store_name, "error": contact_msg}),
+            status_code=303,
+        )
+
     new_record = SelfArrivalRecord(
         store_name=store_name,
         serial_number=serial_number,
@@ -20290,7 +20710,7 @@ async def add_self_arrival_record(
         order_date=order_date,
         order_start_time=order_start_time,
         customer_name=_normalize_text(customer_name),
-        customer_contact=_normalize_text(customer_contact),
+        customer_contact=customer_contact,
         order_method=order_method,
         operator_user_id=user.id,
         operator_name=user.display_name,
@@ -20376,6 +20796,18 @@ async def update_self_arrival_record(
             status_code=303
         )
 
+    customer_contact = _normalize_text(customer_contact)
+    contact_ok, contact_msg = _validate_phone_or_wechat_contact(
+        customer_contact,
+        old_value=record.customer_contact,
+        allow_unchanged_legacy=True,
+    )
+    if not contact_ok:
+        return RedirectResponse(
+            url=f"/self-arrival-register?" + urlencode({"store": store_name, "error": contact_msg}),
+            status_code=303,
+        )
+
     order_date, order_start_time = _parse_self_arrival_order_start_time(order_start_time_full)
 
     # 如果跨月了，重新生成该月序号；同月则保留原序号
@@ -20392,7 +20824,7 @@ async def update_self_arrival_record(
     record.order_date = order_date
     record.order_start_time = order_start_time
     record.customer_name = _normalize_text(customer_name)
-    record.customer_contact = _normalize_text(customer_contact)
+    record.customer_contact = customer_contact
     record.order_method = order_method
 
     # 按你的规则：谁点确定，操作人就是谁
@@ -20654,7 +21086,11 @@ async def update_formed_game(
         player_1_wechat, player_2_wechat, player_3_wechat, player_4_wechat
     )
 
-    ok, msg, indices, error_type = _validate_players_and_customer_binding_detailed(session, slots)
+    ok, msg, indices, error_type = _validate_players_and_customer_binding_detailed(
+        session,
+        slots,
+        legacy_wechat_by_index=_game_legacy_wechat_by_index(game),
+    )
     if not ok:
         return _ajax_or_redirect_error(
             request,
@@ -22864,6 +23300,12 @@ async def add_customer(
             url=_build_customers_url(store_name, error="微信号不能为空"),
             status_code=303
         )
+    wechat_ok, wechat_msg = _validate_wechat_id_value(wechat_id)
+    if not wechat_ok:
+        return RedirectResponse(
+            url=_build_customers_url(store_name, error=wechat_msg),
+            status_code=303
+        )
 
     # 1. 检查微信号是否已存在
     existing_cust = _find_customer_by_wechat_case_insensitive(session, wechat_id)
@@ -23049,6 +23491,17 @@ async def add_customer_complaint_record(
         complainant_nickname = complainant_customer.nickname or complainant_nickname
         complainant_wechat_id = complainant_customer.wechat_id or complainant_wechat_id
 
+    for field_label, wechat_value in (
+        ("被投诉人微信号", complained_wechat_id),
+        ("投诉人微信号", complainant_wechat_id),
+    ):
+        wechat_ok, wechat_msg = _validate_wechat_id_value(wechat_value, field_label=field_label)
+        if not wechat_ok:
+            return RedirectResponse(
+                url=_build_customer_complaints_url(store, error=wechat_msg),
+                status_code=303,
+            )
+
     record = CustomerComplaintRecord(
         store_name=store,
         complained_customer_id=complained_customer.id if complained_customer else None,
@@ -23152,6 +23605,22 @@ async def update_customer_complaint_record(
         complainant_nickname = complainant_customer.nickname or complainant_nickname
         complainant_wechat_id = complainant_customer.wechat_id or complainant_wechat_id
 
+    for field_label, wechat_value, old_wechat_value in (
+        ("被投诉人微信号", complained_wechat_id, record.complained_wechat_id),
+        ("投诉人微信号", complainant_wechat_id, record.complainant_wechat_id),
+    ):
+        wechat_ok, wechat_msg = _validate_wechat_id_value(
+            wechat_value,
+            old_value=old_wechat_value,
+            allow_unchanged_legacy=True,
+            field_label=field_label,
+        )
+        if not wechat_ok:
+            return RedirectResponse(
+                url=_build_customer_complaints_url(store, error=wechat_msg),
+                status_code=303,
+            )
+
     record.store_name = store
     record.complained_customer_id = complained_customer.id if complained_customer else None
     record.complained_nickname = complained_nickname or "-"
@@ -23244,6 +23713,20 @@ async def add_public_traffic_lead(
                 public_source_port,
                 public_same_store_rate_store,
                 error="微信号不能为空"
+            ),
+            status_code=303
+        )
+    wechat_ok, wechat_msg = _validate_wechat_id_value(wechat_id)
+    if not wechat_ok:
+        return RedirectResponse(
+            url=_build_public_traffic_url(
+                store,
+                public_date_filter,
+                public_start_date,
+                public_end_date,
+                public_source_port,
+                public_same_store_rate_store,
+                error=wechat_msg
             ),
             status_code=303
         )
@@ -23355,6 +23838,24 @@ async def update_public_traffic_lead(
                 public_source_port,
                 public_same_store_rate_store,
                 error="微信号不能为空"
+            ),
+            status_code=303
+        )
+    wechat_ok, wechat_msg = _validate_wechat_id_value(
+        wechat_id,
+        old_value=lead.wechat_id,
+        allow_unchanged_legacy=True,
+    )
+    if not wechat_ok:
+        return RedirectResponse(
+            url=_build_public_traffic_url(
+                store,
+                public_date_filter,
+                public_start_date,
+                public_end_date,
+                public_source_port,
+                public_same_store_rate_store,
+                error=wechat_msg
             ),
             status_code=303
         )
@@ -23651,6 +24152,26 @@ async def save_new_customer_pull_records(
     for row in session.exec(duplicate_stmt).all():
         posted_nickname = form.get(f"customer_nickname_{row.id}") if row.id in record_ids else None
         posted_wechat = form.get(f"customer_wechat_id_{row.id}") if row.id in record_ids else None
+        if row.id in record_ids and _normalize_text(posted_wechat):
+            wechat_ok, wechat_msg = _validate_wechat_id_value(
+                posted_wechat,
+                old_value=row.customer_wechat_id,
+                allow_unchanged_legacy=True,
+                field_label="用户微信号",
+            )
+            if not wechat_ok:
+                return RedirectResponse(
+                    url=_build_new_customer_pull_url(
+                        store,
+                        pull_date_filter,
+                        pull_start_date,
+                        pull_end_date,
+                        pull_employee if user.role == "admin" else _normalize_text(user.display_name),
+                        pull_view_previous_shift,
+                        error=wechat_msg,
+                    ),
+                    status_code=303,
+                )
         dup_key = _new_customer_pull_duplicate_key(row, posted_nickname, posted_wechat)
         if not dup_key:
             continue
@@ -24065,6 +24586,16 @@ async def update_customer(
     if not wechat_id:
         return RedirectResponse(
             url=_build_customers_url(store_name, error="微信号不能为空"),
+            status_code=303
+        )
+    wechat_ok, wechat_msg = _validate_wechat_id_value(
+        wechat_id,
+        old_value=cust.wechat_id,
+        allow_unchanged_legacy=True,
+    )
+    if not wechat_ok:
+        return RedirectResponse(
+            url=_build_customers_url(store_name, error=wechat_msg),
             status_code=303
         )
 
@@ -24524,6 +25055,12 @@ async def add_brand_blacklist(
         return RedirectResponse(url="/brand-blacklist?error=昵称不能为空", status_code=303)
     if not wechat_id:
         return RedirectResponse(url="/brand-blacklist?error=微信号不能为空", status_code=303)
+    wechat_ok, wechat_msg = _validate_wechat_id_value(wechat_id)
+    if not wechat_ok:
+        return RedirectResponse(
+            url="/brand-blacklist?" + urlencode({"error": wechat_msg}),
+            status_code=303,
+        )
     if not reason:
         return RedirectResponse(url="/brand-blacklist?error=理由不能为空", status_code=303)
 
@@ -24594,6 +25131,16 @@ async def update_brand_blacklist(
         return RedirectResponse(url="/brand-blacklist?error=昵称不能为空", status_code=303)
     if not wechat_id:
         return RedirectResponse(url="/brand-blacklist?error=微信号不能为空", status_code=303)
+    wechat_ok, wechat_msg = _validate_wechat_id_value(
+        wechat_id,
+        old_value=record.wechat_id,
+        allow_unchanged_legacy=True,
+    )
+    if not wechat_ok:
+        return RedirectResponse(
+            url="/brand-blacklist?" + urlencode({"error": wechat_msg}),
+            status_code=303,
+        )
     if not reason:
         return RedirectResponse(url="/brand-blacklist?error=理由不能为空", status_code=303)
 
@@ -25004,6 +25551,13 @@ async def schedule_page(
 
     # 年份下拉（最近 5 年）
     year_options = list(range(today.year - 4, today.year + 1))
+    mobile_handover_rule_payloads = [
+        _mobile_handover_rule_payload(rule)
+        for rule in session.exec(
+            select(MobileHandoverRule).order_by(MobileHandoverRule.id)
+        ).all()
+    ]
+    mobile_handover_store_names = get_active_store_name_list(session)
 
     return templates.TemplateResponse("schedule.html", {
         "request": request,
@@ -25025,6 +25579,9 @@ async def schedule_page(
         "shift_options": shift_options,
         "auto_schedule_shift_cycle": AUTO_SCHEDULE_SHIFT_CYCLE,
         "shift_label": shift_label,
+        "mobile_handover_rules": mobile_handover_rule_payloads,
+        "mobile_handover_store_names": mobile_handover_store_names,
+        "mobile_handover_shift_options": SHIFT_OPTIONS,
 
         # 固定班次说明
         "shift_desc": {
@@ -25132,6 +25689,101 @@ async def schedule_save(
     return RedirectResponse(
         url=f"/schedule?year={year}&month={month}&success={msg}",
         status_code=303
+    )
+
+
+@app.post("/schedule/mobile-handover-rules/save")
+async def save_mobile_handover_rules(
+        rules_json: str = Form(...),
+        year: int = Form(...),
+        month: int = Form(...),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user),
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != "admin":
+        return RedirectResponse(
+            url=f"/schedule?year={year}&month={month}&error={quote('只有管理员可以配置手机交接规则')}",
+            status_code=303,
+        )
+
+    try:
+        payload = json.loads(rules_json or "[]")
+    except Exception:
+        payload = None
+    if not isinstance(payload, list):
+        return RedirectResponse(
+            url=f"/schedule?year={year}&month={month}&error={quote('规则数据格式不正确，请刷新页面后重试')}",
+            status_code=303,
+        )
+
+    active_store_names = set(get_active_store_name_list(session))
+    existing_rules = session.exec(
+        select(MobileHandoverRule).order_by(MobileHandoverRule.id)
+    ).all()
+    existing_by_id = {item.id: item for item in existing_rules if item.id}
+    retained_ids = set()
+    enabled_already = False
+    now = datetime.now()
+
+    for index, raw_rule in enumerate(payload, start=1):
+        if not isinstance(raw_rule, dict):
+            continue
+        rule_id = raw_rule.get("id")
+        try:
+            rule_id = int(rule_id) if rule_id not in {None, ""} else None
+        except (TypeError, ValueError):
+            rule_id = None
+        rule = existing_by_id.get(rule_id) if rule_id else None
+        if rule_id and not rule:
+            return RedirectResponse(
+                url=f"/schedule?year={year}&month={month}&error={quote('检测到已失效的规则，请刷新页面后重试')}",
+                status_code=303,
+            )
+        if not rule:
+            rule = MobileHandoverRule(
+                name=f"规则{index}",
+                created_by_user_id=user.id,
+                created_by_name=user.display_name,
+                created_at=now,
+            )
+
+        rule.name = _normalize_text(str(raw_rule.get("name") or ""))[:60] or f"规则{index}"
+        active_assignments = _normalize_mobile_handover_assignments(
+            raw_rule.get("active_assignments"), active_store_names
+        )
+        inactive_assignments = _normalize_mobile_handover_assignments(
+            raw_rule.get("inactive_assignments"), active_store_names
+        )
+        wants_enabled = bool(raw_rule.get("is_enabled"))
+        rule.is_enabled = wants_enabled and not enabled_already
+        enabled_already = enabled_already or rule.is_enabled
+        rule.active_assignments_json = json.dumps(active_assignments, ensure_ascii=False)
+        rule.inactive_assignments_json = json.dumps(inactive_assignments, ensure_ascii=False)
+        rule.updated_at = now
+        session.add(rule)
+        session.flush()
+        if rule.id:
+            retained_ids.add(rule.id)
+
+    for rule in existing_rules:
+        if rule.id not in retained_ids:
+            session.delete(rule)
+
+    if not retained_ids:
+        session.add(MobileHandoverRule(
+            name="默认规则1",
+            created_by_user_id=user.id,
+            created_by_name=user.display_name,
+            created_at=now,
+            updated_at=now,
+        ))
+
+    session.commit()
+    return RedirectResponse(
+        url=f"/schedule?year={year}&month={month}&success={quote('手机交接规则已保存')}",
+        status_code=303,
     )
 
 

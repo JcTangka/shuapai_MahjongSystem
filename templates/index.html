@@ -572,7 +572,7 @@
 
                             <div class="alert alert-warning mt-3 mb-0 py-2">
                                 <i class="bi bi-exclamation-triangle me-1"></i>
-                                规则：昵称和微信号必须成对填写；允许同一用户重复填写，但同一微信号不能对应不同昵称。
+                                规则：昵称和微信号必须成对填写；微信号为6到20位，以英文字母或下划线开头，仅可包含英文字母、数字、下划线和减号；允许同一用户重复填写，但同一微信号不能对应不同昵称。
                             </div>
                         </div>
                     </div>
@@ -1102,6 +1102,9 @@ ${blacklistButton}
         const form = document.getElementById('gameForm');
         form.reset();
         form.action = "/add-game";
+        for (let i = 1; i <= 4; i++) {
+            delete document.getElementById(`player_${i}_wechat`).dataset.originalValue;
+        }
 
         document.getElementById('modalTitle').innerText = '新增组局';
         document.getElementById('startTimeInput').value = getNowISOString();
@@ -1152,7 +1155,9 @@ ${blacklistButton}
 
         for (let i = 1; i <= 4; i++) {
             document.getElementById(`player_${i}`).value = btn.dataset[`p${i}`] || '';
-            document.getElementById(`player_${i}_wechat`).value = btn.dataset[`p${i}Wx`] || btn.getAttribute(`data-p${i}-wx`) || '';
+            const wechatInput = document.getElementById(`player_${i}_wechat`);
+            wechatInput.value = btn.dataset[`p${i}Wx`] || btn.getAttribute(`data-p${i}-wx`) || '';
+            wechatInput.dataset.originalValue = wechatInput.value.trim();
             document.getElementById(`player_${i}_note`).value = btn.dataset[`p${i}Note`] || btn.getAttribute(`data-p${i}-note`) || '';
         }
 
@@ -1204,6 +1209,15 @@ ${blacklistButton}
             }
 
             if (wechat) {
+                const unchangedLegacy = wechatInput.dataset.originalValue !== undefined
+                    && wechat === wechatInput.dataset.originalValue;
+                if (!/^[A-Za-z_][A-Za-z0-9_-]{5,19}$/.test(wechat) && !unchangedLegacy) {
+                    const message = `参与人 ${i} 微信号格式不正确：必须为6到20位，以英文字母或下划线开头，且只能包含英文字母、数字、下划线和减号`;
+                    markInvalidPair(i);
+                    highlightIndices([i], message);
+                    alert(message);
+                    return false;
+                }
                 if (wechatNameMap[wechat] && wechatNameMap[wechat] !== name) {
                     const conflictIndices = [wechatFirstIndexMap[wechat], i].filter(Boolean);
                     const message = `同一局中微信号【${wechat}】对应了不同昵称，无法提交`;
@@ -1376,6 +1390,8 @@ ${blacklistButton}
 
         const form = document.getElementById('gameForm');
         const formData = new FormData(form);
+        const editMatch = (form.getAttribute('action') || '').match(/\/update-game\/(\d+)$/);
+        if (editMatch) formData.append('game_id', editMatch[1]);
 
         try {
             const resp = await fetch('/api/validate-unformed-game-players', {

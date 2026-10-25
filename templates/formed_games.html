@@ -1259,7 +1259,7 @@
 
                         <div class="col-md-6">
                             <label class="form-label fw-bold">电话</label>
-                            <input type="text" class="form-control" name="self_arrival_phone" id="self_arrival_add_phone" placeholder="请输入电话">
+                            <input type="text" class="form-control" name="self_arrival_phone" id="self_arrival_add_phone" inputmode="numeric" placeholder="选填，填写时必须为11位纯数字">
                         </div>
 
                         <div class="col-md-6">
@@ -1269,7 +1269,7 @@
 
                         <div class="col-md-6">
                             <label class="form-label fw-bold">微信号</label>
-                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_add_player_1_wechat" placeholder="请输入微信号">
+                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_add_player_1_wechat" placeholder="6到20位，以字母或下划线开头">
                         </div>
 
                         <div class="col-md-6">
@@ -1387,7 +1387,7 @@
 
                         <div class="col-md-6">
                             <label class="form-label fw-bold">电话</label>
-                            <input type="text" class="form-control" name="self_arrival_phone" id="self_arrival_edit_phone" placeholder="请输入电话">
+                            <input type="text" class="form-control" name="self_arrival_phone" id="self_arrival_edit_phone" inputmode="numeric" placeholder="选填，填写时必须为11位纯数字">
                         </div>
 
                         <div class="col-md-6">
@@ -1397,7 +1397,7 @@
 
                         <div class="col-md-6">
                             <label class="form-label fw-bold">微信号</label>
-                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_edit_player_1_wechat" placeholder="请输入微信号">
+                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_edit_player_1_wechat" placeholder="6到20位，以字母或下划线开头">
                         </div>
 
                         <div class="col-md-6">
@@ -1672,7 +1672,7 @@
                         </div>
 
                         <div class="overflow-form-note mt-3">
-                            参与人规则与常规单保持一致：昵称和微信号必须成对填写；同一局内相同微信号不能对应不同昵称。<br>
+                            参与人规则与常规单保持一致：昵称和微信号必须成对填写；微信号为6到20位，以英文字母或下划线开头，仅可包含英文字母、数字、下划线和减号；同一局内相同微信号不能对应不同昵称。<br>
                             若参与人备注有内容，后端保存后会同步联动到“待办及信息同步区”。
                         </div>
                     </div>
@@ -2678,6 +2678,21 @@
         const appPairComplete = !!(appNickname && phone);
         const wechatPairComplete = !!(nickname && wechat);
 
+        const unchangedLegacyPhone = mode === 'edit'
+            && phoneInput?.dataset.originalValue !== undefined
+            && phone === phoneInput.dataset.originalValue;
+        if (phone && !/^\d{11}$/.test(phone) && !unchangedLegacyPhone) {
+            alert('手机号格式不正确：填写时必须为11位纯数字');
+            return false;
+        }
+        const unchangedLegacyWechat = mode === 'edit'
+            && wechatInput?.dataset.originalValue !== undefined
+            && wechat === wechatInput.dataset.originalValue;
+        if (wechat && !/^[A-Za-z_][A-Za-z0-9_-]{5,19}$/.test(wechat) && !unchangedLegacyWechat) {
+            alert('微信号格式不正确：必须为6到20位，以英文字母或下划线开头，且只能包含英文字母、数字、下划线和减号');
+            return false;
+        }
+
         if (hasAppPairValue && !appPairComplete) {
             alert('小程序昵称和电话必须同时填写');
             return false;
@@ -2821,6 +2836,15 @@
             }
 
             if (wechat) {
+                const unchangedLegacy = mode === 'edit'
+                    && wechatInput?.dataset.originalValue !== undefined
+                    && wechat === wechatInput.dataset.originalValue;
+                if (!/^[A-Za-z_][A-Za-z0-9_-]{5,19}$/.test(wechat) && !unchangedLegacy) {
+                    const message = `参与人 ${i} 微信号格式不正确：必须为6到20位，以英文字母或下划线开头，且只能包含英文字母、数字、下划线和减号`;
+                    highlightOverflowIndices(mode, [i], message);
+                    alert(message);
+                    return false;
+                }
                 if (wechatNameMap[wechat] && wechatNameMap[wechat] !== name) {
                     const conflictIndices = [wechatFirstIndexMap[wechat], i].filter(Boolean);
                     const message = `同一局中微信号【${wechat}】对应了不同昵称，无法提交`;
@@ -3064,7 +3088,9 @@
 
         for (let i = 1; i <= 4; i++) {
             document.getElementById(`edit_player_${i}`).value = btn.getAttribute(`data-p${i}`) || '';
-            document.getElementById(`edit_player_${i}_wechat`).value = btn.getAttribute(`data-p${i}-wx`) || '';
+            const wechatInput = document.getElementById(`edit_player_${i}_wechat`);
+            wechatInput.value = btn.getAttribute(`data-p${i}-wx`) || '';
+            wechatInput.dataset.originalValue = wechatInput.value.trim();
             document.getElementById(`edit_player_${i}_note`).value = btn.getAttribute(`data-p${i}-note`) || '';
         }
         clearFormedPlayerWarningStyle();
@@ -3078,8 +3104,10 @@
         setOrderEndInitial('self_arrival_edit', btn.dataset.orderEnd || '', btn.dataset.orderEndManual || '0');
         document.getElementById('self_arrival_edit_app_nickname').value = btn.dataset.appNickname || '';
         document.getElementById('self_arrival_edit_phone').value = btn.dataset.phone || '';
+        document.getElementById('self_arrival_edit_phone').dataset.originalValue = (btn.dataset.phone || '').trim();
         document.getElementById('self_arrival_edit_player_1').value = btn.dataset.p1 || '';
         document.getElementById('self_arrival_edit_player_1_wechat').value = btn.dataset.p1Wx || '';
+        document.getElementById('self_arrival_edit_player_1_wechat').dataset.originalValue = (btn.dataset.p1Wx || '').trim();
         document.getElementById('self_arrival_edit_payment_method').value = btn.dataset.payment || '';
         document.getElementById('self_arrival_edit_room_fee').value = btn.dataset.fee || 0;
         document.getElementById('self_arrival_edit_note_added').value = btn.dataset.noteAdded || '否';
@@ -3145,7 +3173,9 @@
 
         for (let i = 1; i <= 4; i++) {
             document.getElementById(`overflow_edit_player_${i}`).value = btn.getAttribute(`data-p${i}`) || '';
-            document.getElementById(`overflow_edit_player_${i}_wechat`).value = btn.getAttribute(`data-p${i}-wx`) || '';
+            const wechatInput = document.getElementById(`overflow_edit_player_${i}_wechat`);
+            wechatInput.value = btn.getAttribute(`data-p${i}-wx`) || '';
+            wechatInput.dataset.originalValue = wechatInput.value.trim();
             document.getElementById(`overflow_edit_player_${i}_note`).value = btn.getAttribute(`data-p${i}-note`) || '';
         }
 
@@ -3436,6 +3466,14 @@
             }
 
             if (wechat) {
+                const unchangedLegacy = wechatInput?.dataset.originalValue !== undefined
+                    && wechat === wechatInput.dataset.originalValue;
+                if (!/^[A-Za-z_][A-Za-z0-9_-]{5,19}$/.test(wechat) && !unchangedLegacy) {
+                    const message = `参与人 ${i} 微信号格式不正确：必须为6到20位，以英文字母或下划线开头，且只能包含英文字母、数字、下划线和减号`;
+                    highlightFormedIndices([i], message);
+                    alert(message);
+                    return false;
+                }
                 if (wechatNameMap[wechat] && wechatNameMap[wechat] !== name) {
                     const conflictIndices = [wechatFirstIndexMap[wechat], i].filter(Boolean);
                     const message = `同一局中微信号【${wechat}】对应了不同昵称，无法提交`;
@@ -3455,6 +3493,9 @@
 
     async function validateFormedPlayersViaServer() {
         const formData = new FormData();
+        const editForm = document.getElementById('formedEditForm');
+        const editMatch = (editForm?.getAttribute('action') || '').match(/\/update-formed-game\/(\d+)$/);
+        if (editMatch) formData.append('game_id', editMatch[1]);
         for (let i = 1; i <= 4; i++) {
             formData.append(`player_${i}`, document.getElementById(`edit_player_${i}`)?.value || '');
             formData.append(`player_${i}_wechat`, document.getElementById(`edit_player_${i}_wechat`)?.value || '');

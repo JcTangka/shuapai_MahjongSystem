@@ -125,6 +125,15 @@
     border-color: #f59f00;
     box-shadow: 0 0 0 0.15rem rgba(245, 159, 0, 0.18);
   }
+
+  .mobile-rule-card.enabled-rule {
+    border-color: #198754;
+    box-shadow: 0 0 0 0.15rem rgba(25, 135, 84, 0.12);
+  }
+
+  .mobile-rule-pair-row .form-select[multiple] {
+    min-height: 96px;
+  }
 </style>
 
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
@@ -169,6 +178,9 @@
     {% if current_user.role == "admin" %}
       <button type="button" id="autoScheduleBtn" class="btn btn-warning">
         <i class="bi bi-calendar2-week"></i> 一键排班
+      </button>
+      <button type="button" id="mobileHandoverRuleBtn" class="btn btn-outline-primary">
+        <i class="bi bi-phone"></i> 导入手机交接规则
       </button>
       <button type="submit" class="btn btn-success">
         <i class="bi bi-save"></i> 保存排班
@@ -315,6 +327,45 @@
     </table>
   </div>
 </form>
+
+{% if current_user.role == "admin" %}
+<div class="modal fade" id="mobileHandoverRuleModal" tabindex="-1" aria-labelledby="mobileHandoverRuleModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="mobileHandoverRuleModalLabel">
+          <i class="bi bi-phone me-1"></i>导入手机交接规则
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-info py-2">
+          只允许启用一套规则。系统按订单登记时是否存在进行中的带店记录，自动使用该规则的“有激活岗”或“无激活岗”分支；异常记录会随排班、规则和订单实时变化。
+        </div>
+        <div class="form-check mb-3">
+          <input class="form-check-input" type="radio" name="enabledMobileRule" id="disableAllMobileRules" value="none">
+          <label class="form-check-label" for="disableAllMobileRules">暂不启用任何规则</label>
+        </div>
+        <div id="mobileHandoverRulesContainer"></div>
+        <button type="button" id="addMobileHandoverRuleBtn" class="btn btn-outline-primary">
+          <i class="bi bi-plus-circle me-1"></i>新增规则
+        </button>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+        <form id="mobileHandoverRulesForm" method="post" action="/schedule/mobile-handover-rules/save" class="m-0">
+          <input type="hidden" name="year" value="{{ year }}">
+          <input type="hidden" name="month" value="{{ month }}">
+          <input type="hidden" name="rules_json" id="mobileHandoverRulesJson">
+          <button type="submit" class="btn btn-primary">
+            <i class="bi bi-save me-1"></i>保存规则
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
 
 {% endblock %}
 
@@ -477,6 +528,150 @@
       hideWarning();
       resetOverwriteConfirmation();
       autoScheduleModal.hide();
+    });
+  }
+
+  const mobileRuleButton = document.getElementById("mobileHandoverRuleBtn");
+  const mobileRuleModalElement = document.getElementById("mobileHandoverRuleModal");
+  const mobileRuleContainer = document.getElementById("mobileHandoverRulesContainer");
+  const addMobileRuleButton = document.getElementById("addMobileHandoverRuleBtn");
+  const mobileRuleForm = document.getElementById("mobileHandoverRulesForm");
+  const mobileRuleJsonInput = document.getElementById("mobileHandoverRulesJson");
+  const mobileRuleInitialData = {{ mobile_handover_rules | tojson }};
+  const mobileRuleStores = {{ mobile_handover_store_names | tojson }};
+  const mobileRuleShiftOptions = {{ mobile_handover_shift_options | tojson }};
+  let mobileRuleSequence = 0;
+
+  const escapeHtml = (value) => String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+
+  const createRulePairRow = (assignment = {}) => {
+    const row = document.createElement("div");
+    row.className = "row g-2 align-items-start mobile-rule-pair-row mb-2";
+    const selectedStores = new Set(assignment.store_names || []);
+    row.innerHTML = `
+      <div class="col-md-3">
+        <select class="form-select mobile-rule-shift">
+          ${mobileRuleShiftOptions.map(([value, label]) => `<option value="${escapeHtml(value)}" ${value === assignment.shift_type ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="col-md-8">
+        <select class="form-select mobile-rule-stores" multiple aria-label="可负责门店">
+          ${mobileRuleStores.map((storeName) => `<option value="${escapeHtml(storeName)}" ${selectedStores.has(storeName) ? "selected" : ""}>${escapeHtml(storeName)}</option>`).join("")}
+        </select>
+        <div class="form-text">按住 Ctrl 可多选门店。</div>
+      </div>
+      <div class="col-md-1 d-grid">
+        <button type="button" class="btn btn-outline-danger mobile-rule-remove-pair" title="删除班次门店对">
+          <i class="bi bi-trash"></i>
+        </button>
+      </div>`;
+    row.querySelector(".mobile-rule-remove-pair").addEventListener("click", () => row.remove());
+    return row;
+  };
+
+  const appendPair = (card, branch, assignment = {}) => {
+    card.querySelector(`[data-rule-branch="${branch}"]`).appendChild(createRulePairRow(assignment));
+  };
+
+  const refreshRuleCardState = () => {
+    document.querySelectorAll(".mobile-rule-card").forEach((card) => {
+      const radio = card.querySelector(".mobile-rule-enabled");
+      card.classList.toggle("enabled-rule", Boolean(radio && radio.checked));
+    });
+  };
+
+  const addRuleCard = (rule = {}) => {
+    mobileRuleSequence += 1;
+    const clientKey = `mobile-rule-${mobileRuleSequence}`;
+    const card = document.createElement("div");
+    card.className = "card mobile-rule-card mb-3";
+    card.dataset.ruleId = rule.id || "";
+    card.dataset.clientKey = clientKey;
+    card.innerHTML = `
+      <div class="card-header bg-white d-flex justify-content-between align-items-center gap-2 flex-wrap">
+        <div class="d-flex align-items-center gap-2 flex-grow-1">
+          <input class="form-check-input mobile-rule-enabled mt-0" type="radio" name="enabledMobileRule" id="${clientKey}" value="${clientKey}" ${rule.is_enabled ? "checked" : ""}>
+          <label class="form-check-label fw-bold" for="${clientKey}">启用</label>
+          <input class="form-control mobile-rule-name" style="max-width: 320px;" maxlength="60" value="${escapeHtml(rule.name || `规则${mobileRuleSequence}`)}" aria-label="规则名称">
+        </div>
+        <button type="button" class="btn btn-sm btn-outline-danger mobile-rule-remove">删除规则</button>
+      </div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-lg-6">
+            <div class="fw-bold mb-2"><i class="bi bi-person-check text-success me-1"></i>有激活岗</div>
+            <div data-rule-branch="active"></div>
+            <button type="button" class="btn btn-sm btn-outline-secondary mobile-rule-add-pair" data-branch="active">
+              <i class="bi bi-plus me-1"></i>增加班次门店对
+            </button>
+          </div>
+          <div class="col-lg-6">
+            <div class="fw-bold mb-2"><i class="bi bi-person-dash text-secondary me-1"></i>无激活岗</div>
+            <div data-rule-branch="inactive"></div>
+            <button type="button" class="btn btn-sm btn-outline-secondary mobile-rule-add-pair" data-branch="inactive">
+              <i class="bi bi-plus me-1"></i>增加班次门店对
+            </button>
+          </div>
+        </div>
+      </div>`;
+
+    card.querySelectorAll(".mobile-rule-add-pair").forEach((button) => {
+      button.addEventListener("click", () => appendPair(card, button.dataset.branch));
+    });
+    card.querySelector(".mobile-rule-remove").addEventListener("click", () => {
+      if (document.querySelectorAll(".mobile-rule-card").length <= 1) {
+        window.alert("至少保留一条规则。");
+        return;
+      }
+      card.remove();
+      refreshRuleCardState();
+    });
+    card.querySelector(".mobile-rule-enabled").addEventListener("change", refreshRuleCardState);
+    mobileRuleContainer.appendChild(card);
+
+    const activeRows = rule.active_assignments || [];
+    const inactiveRows = rule.inactive_assignments || [];
+    (activeRows.length ? activeRows : [{}]).forEach((item) => appendPair(card, "active", item));
+    (inactiveRows.length ? inactiveRows : [{}]).forEach((item) => appendPair(card, "inactive", item));
+    refreshRuleCardState();
+  };
+
+  if (mobileRuleButton && mobileRuleModalElement && mobileRuleContainer && mobileRuleForm) {
+    const mobileRuleModal = new bootstrap.Modal(mobileRuleModalElement);
+    (mobileRuleInitialData.length ? mobileRuleInitialData : [{name: "默认规则1"}]).forEach(addRuleCard);
+    if (!mobileRuleInitialData.some((rule) => rule.is_enabled)) {
+      document.getElementById("disableAllMobileRules").checked = true;
+    }
+    document.getElementById("disableAllMobileRules").addEventListener("change", refreshRuleCardState);
+    addMobileRuleButton.addEventListener("click", () => addRuleCard({name: `规则${mobileRuleSequence + 1}`}));
+    mobileRuleButton.addEventListener("click", () => mobileRuleModal.show());
+
+    mobileRuleForm.addEventListener("submit", (event) => {
+      const cards = Array.from(document.querySelectorAll(".mobile-rule-card"));
+      const payload = cards.map((card) => {
+        const readBranch = (branch) => Array.from(card.querySelectorAll(`[data-rule-branch="${branch}"] .mobile-rule-pair-row`)).map((row) => ({
+          shift_type: row.querySelector(".mobile-rule-shift").value,
+          store_names: Array.from(row.querySelector(".mobile-rule-stores").selectedOptions).map((option) => option.value),
+        }));
+        return {
+          id: card.dataset.ruleId || null,
+          name: card.querySelector(".mobile-rule-name").value.trim(),
+          is_enabled: card.querySelector(".mobile-rule-enabled").checked,
+          active_assignments: readBranch("active"),
+          inactive_assignments: readBranch("inactive"),
+        };
+      });
+      if (payload.some((rule) => !rule.name)) {
+        event.preventDefault();
+        window.alert("规则名称不能为空。");
+        return;
+      }
+      mobileRuleJsonInput.value = JSON.stringify(payload);
     });
   }
 </script>

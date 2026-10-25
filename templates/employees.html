@@ -819,6 +819,11 @@
                    href="/employees?store={{ current_store }}&tab=duty_sessions">
                     <i class="bi bi-clock-history"></i>员工上班情况
                 </a>
+
+                <a class="employee-tab-link {% if active_tab == 'order_anomalies' %}active{% endif %}"
+                   href="/employees?store={{ current_store }}&tab=order_anomalies">
+                    <i class="bi bi-exclamation-triangle"></i>异常记录表
+                </a>
             {% else %}
                 <a class="employee-tab-link {% if active_tab == 'my_salary' %}active{% endif %}"
                    href="/employees?store={{ current_store }}&tab=my_salary">
@@ -864,7 +869,138 @@
      页签内容区
 ========================= -->
 
-{% if active_tab == 'duty_sessions' %}
+{% if active_tab == 'order_anomalies' %}
+<div class="card employee-module-card mb-3">
+    <div class="card-header bg-white py-3">
+        <div class="fw-bold"><i class="bi bi-exclamation-triangle me-1 text-danger"></i>异常订单记录表</div>
+        <div class="employee-page-subtitle mt-1">
+            按当前启用的手机交接规则和当前排班实时计算，仅做异常统计，不影响订单量、提成或订单状态。
+        </div>
+    </div>
+    <div class="card-body">
+        {% if order_anomaly_rule %}
+        <div class="alert alert-success py-2">
+            当前绑定规则：<span class="fw-bold">{{ order_anomaly_rule.name }}</span>。订单删除后对应记录会自动消失，排班或规则修改后统计边界会同步变化。
+        </div>
+        {% else %}
+        <div class="alert alert-warning py-2">
+            当前没有启用手机交接规则，因此暂不生成异常记录。请到“排班表—导入手机交接规则”中配置并启用一套规则。
+        </div>
+        {% endif %}
+
+        <form method="get" action="/employees" class="row g-3 align-items-end">
+            <input type="hidden" name="store" value="{{ current_store }}">
+            <input type="hidden" name="tab" value="order_anomalies">
+            <div class="col-md-2">
+                <label class="form-label fw-bold">日期</label>
+                <select class="form-select" name="anomaly_date_filter">
+                    <option value="today" {% if order_anomaly_filters.date_filter == 'today' %}selected{% endif %}>今天</option>
+                    <option value="yesterday" {% if order_anomaly_filters.date_filter == 'yesterday' %}selected{% endif %}>昨天</option>
+                    <option value="this_month" {% if order_anomaly_filters.date_filter == 'this_month' %}selected{% endif %}>本月</option>
+                    <option value="last_month" {% if order_anomaly_filters.date_filter == 'last_month' %}selected{% endif %}>上月</option>
+                    <option value="custom" {% if order_anomaly_filters.date_filter == 'custom' %}selected{% endif %}>自定义</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-bold">开始日期</label>
+                <input type="date" class="form-control" name="anomaly_start_date" value="{{ order_anomaly_filters.start_date }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-bold">结束日期</label>
+                <input type="date" class="form-control" name="anomaly_end_date" value="{{ order_anomaly_filters.end_date }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-bold">接待店长</label>
+                <select class="form-select" name="anomaly_employee">
+                    <option value="all">全部员工</option>
+                    {% for emp in attendance_employee_options %}
+                    <option value="{{ emp.id }}" {% if order_anomaly_filters.employee|string == emp.id|string %}selected{% endif %}>{{ emp.display_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-bold">异常门店</label>
+                <select class="form-select" name="anomaly_store">
+                    <option value="all">全部门店</option>
+                    {% for store_name in store_list %}
+                    <option value="{{ store_name }}" {% if order_anomaly_filters.store == store_name %}selected{% endif %}>{{ store_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2 d-flex gap-2">
+                <button type="submit" class="btn btn-primary flex-fill"><i class="bi bi-search me-1"></i>筛选</button>
+                <a href="/employees?store={{ current_store }}&tab=order_anomalies" class="btn btn-outline-secondary">重置</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card employee-module-card">
+    <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+        <div class="fw-bold"><i class="bi bi-list-ul me-1 text-danger"></i>异常订单</div>
+        <span class="badge bg-danger">{{ order_anomaly_rows|length }} 条</span>
+    </div>
+    <div class="card-body p-0 table-responsive">
+        <table class="table table-hover align-middle mb-0 text-center">
+            <thead class="table-light">
+                <tr>
+                    <th>订单日期时间</th>
+                    <th>登记时间</th>
+                    <th>异常班次</th>
+                    <th>激活岗状态</th>
+                    <th>接待店长</th>
+                    <th>实际门店</th>
+                    <th>规则允许门店</th>
+                    <th>异常订单</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in order_anomaly_rows %}
+                <tr>
+                    <td class="text-nowrap">{{ item.business_datetime_label }}</td>
+                    <td class="text-nowrap text-muted">{{ item.registered_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                    <td>
+                        <span class="badge bg-light text-dark border">{{ shift_type_label(item.shift_type) }}</span>
+                        {% if item.shift_date != item.business_datetime.date() %}
+                        <div class="small text-muted mt-1">归属 {{ item.shift_date }}</div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if item.duty_mode == 'active' %}
+                        <span class="badge bg-success">有激活岗</span>
+                        {% else %}
+                        <span class="badge bg-secondary">无激活岗</span>
+                        {% endif %}
+                    </td>
+                    <td class="fw-bold">{{ item.employee_name }}</td>
+                    <td><span class="badge bg-danger">{{ item.actual_store_name or '-' }}</span></td>
+                    <td class="text-start" style="min-width: 180px;">
+                        {% if item.allowed_store_names %}
+                            {{ item.allowed_store_names|join('、') }}
+                        {% else %}
+                            <span class="text-danger">该分支/班次未配置门店</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <a class="btn btn-sm btn-outline-primary text-nowrap" href="{{ item.order_url }}">
+                            查看 #{{ item.game.id }}
+                        </a>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="8" class="text-muted py-5">
+                        <i class="bi bi-check-circle fs-1 d-block mb-3 text-success"></i>
+                        当前筛选范围内没有异常订单
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% elif active_tab == 'duty_sessions' %}
 <div class="card employee-module-card">
     <div class="card-header bg-white py-3">
         <div class="fw-bold"><i class="bi bi-clock-history me-1 text-primary"></i>员工上班情况</div>
@@ -3445,7 +3581,7 @@
                 </div>
             </div>
             {% if whiteboard_data.sales_champion and whiteboard_data.sales_champion.order_count %}
-            <div class="whiteboard-champion" title="仅展示截至 {{ whiteboard_data.sales_champion.as_of_date }} 的本月订单量第一名，不产生奖金或工资流水。">
+            <div class="whiteboard-champion" title="与员工本月订单量对比使用同一统计口径，仅展示本月订单量第一名，不产生奖金或工资流水。">
                 <i class="bi bi-trophy-fill"></i>
                 <div>
                     <div class="small fw-bold">当前销冠{% if whiteboard_data.sales_champion.is_tie %}（并列）{% endif %}</div>
