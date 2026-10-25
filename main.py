@@ -3547,6 +3547,8 @@ def _build_employee_whiteboard_data(
 
     store_order_count_map = {}
     employee_order_count_map = {}
+    employee_private_order_count_map = {}
+    employee_self_arrival_order_count_map = {}
     employee_store_order_count_map = {}
 
     for g in month_games:
@@ -3558,6 +3560,14 @@ def _build_employee_whiteboard_data(
         who_did = _normalize_text(g.who_did)
         if who_did:
             employee_order_count_map[who_did] = employee_order_count_map.get(who_did, 0) + 1
+            if _normalize_text(g.record_source) == FORMED_SOURCE_SELF_ARRIVAL:
+                employee_self_arrival_order_count_map[who_did] = (
+                    employee_self_arrival_order_count_map.get(who_did, 0) + 1
+                )
+            else:
+                employee_private_order_count_map[who_did] = (
+                    employee_private_order_count_map.get(who_did, 0) + 1
+                )
             if store_name:
                 employee_store_key = (who_did, store_name)
                 employee_store_order_count_map[employee_store_key] = (
@@ -3782,6 +3792,8 @@ def _build_employee_whiteboard_data(
         employee_rows.append({
             "employee_name": employee_name,
             "order_count": order_count,
+            "private_order_count": employee_private_order_count_map.get(employee_name, 0),
+            "self_arrival_order_count": employee_self_arrival_order_count_map.get(employee_name, 0),
             "is_visible_employee": is_visible_employee,
             "store_rows": employee_store_rows_by_employee.get(employee_name, []),
             "store_row_count": len(employee_store_rows_by_employee.get(employee_name, [])),
@@ -3802,6 +3814,14 @@ def _build_employee_whiteboard_data(
 
     for row in employee_rows:
         row["bar_percent"] = round(row["order_count"] / employee_axis_max * 100, 2)
+        row["private_bar_percent"] = round(
+            row["private_order_count"] / employee_axis_max * 100,
+            2,
+        )
+        row["self_arrival_bar_percent"] = round(
+            row["self_arrival_order_count"] / employee_axis_max * 100,
+            2,
+        )
 
     commission_node_rows = [
         {
@@ -5490,6 +5510,24 @@ def _new_customer_pull_is_success(record: NewCustomerPullRecord) -> bool:
         _normalize_text(record.customer_nickname)
         and _normalize_text(record.customer_wechat_id)
         and record.in_group_chat
+    )
+
+
+def _new_customer_pull_is_privacy_complete(record: NewCustomerPullRecord) -> bool:
+    return bool(
+        _normalize_text(record.customer_nickname)
+        and _normalize_text(record.remark) == "隐私设置"
+    )
+
+
+def _new_customer_pull_is_handover_complete(record: NewCustomerPullRecord) -> bool:
+    return bool(
+        _new_customer_pull_is_privacy_complete(record)
+        or _new_customer_pull_is_success(record)
+        or (
+            _normalize_text(record.customer_nickname)
+            and record.friend_request_not_approved_current_shift
+        )
     )
 
 
@@ -7290,6 +7328,17 @@ def get_brand_store_dashboard_stats(
     ])
     private_order_count = order_count - self_arrival_order_count
 
+    # 门店维度玩法统计：与订单总数使用同一批 period_games，包含溢出单和自主到店。
+    game_type_count_map = {}
+    if is_store:
+        for game in period_games:
+            game_type_name = _normalize_text(game.game_type) or "未填写玩法"
+            game_type_count_map[game_type_name] = game_type_count_map.get(game_type_name, 0) + 1
+    game_type_rows = sorted(
+        game_type_count_map.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+
     # ========= 6. 当前时间区间内顾客成功组局次数 =========
     # 这里继续按全部 formed 统计，包含溢出单
     period_visit_count_by_customer_id = {}
@@ -7448,6 +7497,8 @@ def get_brand_store_dashboard_stats(
             "revenue_total_compare_date_ranges": revenue_total_compare_chart["date_ranges"],
             "private_order_trend": private_order_trend,
             "self_arrival_order_trend": self_arrival_order_trend,
+            "game_type_labels": [item[0] for item in game_type_rows],
+            "game_type_counts": [item[1] for item in game_type_rows],
             "customer_funnel": [
                 customer_total,
                 new_customer_count,
@@ -7588,10 +7639,9 @@ def get_active_room_list_by_store(session: Session, store_name: str) -> List[str
 
 def get_store_list_for_page(session: Session) -> List[str]:
     """
-    获取所有门店名称（去重后排序）
+    获取所有启用门店名称，顺序与门店管理配置一致。
     """
-    all_rooms = session.exec(select(Room)).all()
-    return sorted(list(set([r.store_name for r in all_rooms])))
+    return get_active_store_name_list(session)
 
 
 def get_room_list_by_store(session: Session, store_name: str) -> List[Room]:
@@ -7854,9 +7904,12 @@ def resolve_store_from_request(
     1. 优先使用当前请求显式传入的 store
     2. 若未传，则尝试从上一个页面 Referer 的 query 中继承 store
     3. 若仍无，则回退到第一个有效门店
-    4. 若门店列表为空，再兜底为“牛王庙店”
+    4. 若没有有效门店，则返回空字符串
+
+    只从 Store 表中的启用门店选择，避免已停用门店或遗留 Room 数据
+    被当成页面默认门店。
     """
-    store_list = get_store_list_for_page(session)
+    store_list = get_active_store_name_list(session)
 
     # 1. 当前请求明确传了 store
     if store and store in store_list:
@@ -7878,8 +7931,8 @@ def resolve_store_from_request(
     if store_list:
         return store_list[0]
 
-    # 4. 最终兜底
-    return "牛王庙店"
+    # 4. 没有可用门店
+    return ""
 
 HANDOVER_LEGACY_EMPTY_NOTE_SYSTEM_HINT = "【系统提示】该牌局当前已无同步备注，请人工确认该同步事项是否仍需继续跟进。"
 HANDOVER_EMPTY_NOTE_SYSTEM_HINT = "【系统提示】该牌局当前已无同步备注，系统已自动将该同步事项标记为已解决。"
@@ -9073,6 +9126,137 @@ def _run_store_duty_info_self_check(
     return result
 
 
+def _format_store_duty_customer_check_items(items: List[str], limit: int = 20) -> str:
+    visible_items = items[:limit]
+    lines = [f"{idx}.{item}" for idx, item in enumerate(visible_items, start=1)]
+    if len(items) > limit:
+        lines.append(f"……另有 {len(items) - limit} 条未展示")
+    return "\n".join(lines)
+
+
+def _run_store_duty_contact_customer_self_check(
+        session: Session,
+        duty: EmployeeDutySession,
+        clicked_at: datetime,
+) -> dict:
+    """交接前检查当前店长、当前负责门店当日的接触顾客跟进。"""
+    store_names = _decode_duty_store_names(duty.store_names_json)
+    employee_name = _normalize_text(duty.employee_name)
+    result = {"blocking_messages": [], "warning_messages": []}
+    if not store_names or not employee_name:
+        return result
+
+    target_date = clicked_at.date()
+    contacts = {}
+    games = session.exec(
+        select(GameRecord).where(
+            GameRecord.record_source != FORMED_SOURCE_SELF_ARRIVAL,
+            GameRecord.status.in_(["unformed", "formed"]),
+            GameRecord.record_date == target_date,
+            GameRecord.store_name.in_(store_names),
+            GameRecord.who_did == employee_name,
+        )
+    ).all()
+    for game in games:
+        reservation_dt = _game_reservation_dt(game)
+        if reservation_dt.date() != target_date:
+            continue
+        for idx in range(1, 5):
+            nickname = _normalize_text(getattr(game, f"player_{idx}", None))
+            wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+            if not nickname or not wechat_id or _is_pull_placeholder_player(nickname, wechat_id):
+                continue
+            key = (_normalize_text(game.store_name), wechat_id)
+            contacts.setdefault(key, nickname)
+
+    day_start, day_end = _day_start_end(target_date)
+    snapshots = session.exec(
+        select(CancelledGameContactSnapshot).where(
+            CancelledGameContactSnapshot.employee_name == employee_name,
+            CancelledGameContactSnapshot.store_name.in_(store_names),
+            CancelledGameContactSnapshot.reservation_time >= day_start,
+            CancelledGameContactSnapshot.reservation_time < day_end,
+        )
+    ).all()
+    for snapshot in snapshots:
+        nickname = _normalize_text(snapshot.nickname)
+        wechat_id = _normalize_text(snapshot.wechat_id)
+        if not nickname or not wechat_id or _is_pull_placeholder_player(nickname, wechat_id):
+            continue
+        contacts.setdefault((_normalize_text(snapshot.store_name), wechat_id), nickname)
+
+    if not contacts:
+        return result
+
+    wechat_ids = sorted({wechat_id for _, wechat_id in contacts})
+    followup_by_wechat = {
+        row.wechat_id: row
+        for row in session.exec(
+            select(ContactCustomerFollowup).where(ContactCustomerFollowup.wechat_id.in_(wechat_ids))
+        ).all()
+    }
+    incomplete_items = []
+    for (store_name, wechat_id), nickname in sorted(contacts.items()):
+        followup = followup_by_wechat.get(wechat_id)
+        if followup and (followup.in_group_chat or _normalize_text(followup.remark)):
+            continue
+        incomplete_items.append(f"{store_name}｜{nickname}｜{wechat_id}")
+
+    if incomplete_items:
+        result["blocking_messages"].append(
+            "以下当日‘我的接触顾客’尚未勾选门店私域群聊邀请或填写备注，无法结束带店：\n"
+            + _format_store_duty_customer_check_items(incomplete_items)
+        )
+    return result
+
+
+def _run_store_duty_new_customer_pull_self_check(
+        session: Session,
+        duty: EmployeeDutySession,
+        clicked_at: datetime,
+) -> dict:
+    """交接前检查当日待拉新及从此前同店班次延续的记录。"""
+    store_names = _decode_duty_store_names(duty.store_names_json)
+    employee_name = _normalize_text(duty.employee_name)
+    result = {"blocking_messages": [], "warning_messages": []}
+    if not store_names or not employee_name:
+        return result
+
+    day_start, day_end = _day_start_end(clicked_at.date())
+    duty_start = duty.started_at or day_start
+    rows = session.exec(
+        select(NewCustomerPullRecord).where(
+            NewCustomerPullRecord.pull_employee == employee_name,
+            NewCustomerPullRecord.store_name.in_(store_names),
+            or_(
+                and_(
+                    NewCustomerPullRecord.order_start_time >= day_start,
+                    NewCustomerPullRecord.order_start_time < day_end,
+                ),
+                NewCustomerPullRecord.created_at >= duty_start,
+                NewCustomerPullRecord.updated_at >= duty_start,
+                NewCustomerPullRecord.friend_request_not_approved_current_shift == True,
+            ),
+        ).order_by(NewCustomerPullRecord.order_start_time, NewCustomerPullRecord.id)
+    ).all()
+
+    incomplete_items = []
+    for row in rows:
+        if _new_customer_pull_is_handover_complete(row):
+            continue
+        nickname = _normalize_text(row.customer_nickname) or "未填写昵称"
+        incomplete_items.append(
+            f"{row.store_name}｜{_new_customer_pull_source_label(row)}｜{nickname}"
+        )
+
+    if incomplete_items:
+        result["blocking_messages"].append(
+            "以下‘我的待拉新’尚未按隐私设置、拉新成功或未通过好友申请任一方式处理，无法结束带店：\n"
+            + _format_store_duty_customer_check_items(incomplete_items)
+        )
+    return result
+
+
 def _extract_handover_current_note_detail(detail: Optional[str]) -> str:
     raw = (detail or "").strip()
     if not raw:
@@ -9191,7 +9375,7 @@ def _run_store_duty_self_checks(
         result["requires_first_warning_ack"] = True
         return result
 
-    # 自检项 2：已组齐订单信息遗漏检查。后续自检项继续按顺序追加在这里。
+    # 自检项 2：已组齐订单信息遗漏检查。
     info_result = _run_store_duty_info_self_check(session, duty, clicked_at)
     result["blocking_messages"].extend(info_result.get("blocking_messages") or [])
     result["warning_messages"].extend(info_result.get("warning_messages") or [])
@@ -9199,7 +9383,20 @@ def _run_store_duty_self_checks(
     if result["blocking_messages"]:
         return result
 
-    # 自检项 3-8：非阻断提示。逐项确认后继续下一项；第 8 项确认后结束带店。
+    # 自检项 3：当日“我的接触顾客”必须完成群聊邀请或备注。
+    contact_result = _run_store_duty_contact_customer_self_check(session, duty, clicked_at)
+    result["blocking_messages"].extend(contact_result.get("blocking_messages") or [])
+    result["warning_messages"].extend(contact_result.get("warning_messages") or [])
+
+    # 自检项 4：当日及同店延续的“我的待拉新”必须完成任一处理路径。
+    pull_result = _run_store_duty_new_customer_pull_self_check(session, duty, clicked_at)
+    result["blocking_messages"].extend(pull_result.get("blocking_messages") or [])
+    result["warning_messages"].extend(pull_result.get("warning_messages") or [])
+
+    if result["blocking_messages"]:
+        return result
+
+    # 后续为非阻断提示，逐项确认后结束带店。
     next_notice = _get_next_store_duty_non_blocking_self_check(
         session,
         duty,
@@ -9353,6 +9550,18 @@ def _run_store_duty_store_release_checks(
         result["warning_messages"].append(
             "以下订单存在信息提醒，移出后请继续跟进：\n" + "\n".join(warning_items)
         )
+
+    contact_result = _run_store_duty_contact_customer_self_check(session, scope_duty, clicked_at)
+    result["blocking_messages"].extend(
+        message.replace("无法结束带店", "暂时不能移出负责范围")
+        for message in (contact_result.get("blocking_messages") or [])
+    )
+
+    pull_result = _run_store_duty_new_customer_pull_self_check(session, scope_duty, clicked_at)
+    result["blocking_messages"].extend(
+        message.replace("无法结束带店", "暂时不能移出负责范围")
+        for message in (pull_result.get("blocking_messages") or [])
+    )
 
     return result
 
@@ -10471,7 +10680,7 @@ async def change_password_action(
 @app.get("/employees")
 async def employees_page(
         request: Request,
-        store: str = "牛王庙店",
+        store: Optional[str] = None,
         tab: str = "",
         status_filter: str = "active",
 
@@ -10523,8 +10732,7 @@ async def employees_page(
     store_objs = get_store_list(session)
     store_list = [s.name for s in store_objs if s.is_active]
 
-    if store not in store_list and store_list:
-        store = store_list[0]
+    store = resolve_store_from_request(request, session, store)
 
     current_user_is_logistics = _is_logistics_employee(user)
     can_manage_salary_settlement = user.role == "admin"
@@ -15991,7 +16199,7 @@ async def employee_salary_settlement_lock(
 @app.get("/")
 async def read_root(
         request: Request,
-        store: str = "牛王庙店",
+        store: Optional[str] = None,
         focus_game_id: Optional[int] = None,
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user) # <--- 注入用户
@@ -16006,8 +16214,7 @@ async def read_root(
     store_list = [s.name for s in store_objs if s.is_active]
 
     # 当前门店兜底
-    if store not in store_list and store_list:
-        store = store_list[0]
+    store = resolve_store_from_request(request, session, store)
 
     # B. 当前门店下包间：优先走 store_id 逻辑
     current_store_rooms = get_active_room_list_by_store(session, store)
@@ -17802,7 +18009,7 @@ async def update_payment(
 @app.get("/formed-games")
 async def formed_games(
         request: Request,
-        store: str = "牛王庙店",
+        store: Optional[str] = None,
         source_filter: str = FORMED_SOURCE_NORMAL,
 
         pay_status: str = "all",
@@ -17834,8 +18041,7 @@ async def formed_games(
     store_objs = get_store_list(session)
     store_list = [s.name for s in store_objs if s.is_active]
 
-    if store not in store_list and store_list:
-        store = store_list[0]
+    store = resolve_store_from_request(request, session, store)
 
     current_store_rooms = get_active_room_list_by_store(session, store)
 
@@ -19844,7 +20050,7 @@ async def export_formed_games_excel(
 @app.get("/self-arrival-register")
 async def self_arrival_register_page(
         request: Request,
-        store: str = "牛王庙店",
+        store: Optional[str] = None,
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -19854,8 +20060,7 @@ async def self_arrival_register_page(
     store_objs = get_store_list(session)
     store_list = [s.name for s in store_objs if s.is_active]
 
-    if store not in store_list and store_list:
-        store = store_list[0]
+    store = resolve_store_from_request(request, session, store)
 
     room_list = get_active_room_list_by_store(session, store)
 
@@ -20658,7 +20863,7 @@ class DepositExemptAddRequest(BaseModel):
 @app.get("/deposit-exempt-customers")
 async def deposit_exempt_customers_page(
         request: Request,
-        store: str = "牛王庙店",
+        store: Optional[str] = None,
         filter_store: str = "all",
         success: str = "",
         error: str = "",
@@ -20669,8 +20874,7 @@ async def deposit_exempt_customers_page(
         return RedirectResponse(url="/login", status_code=303)
 
     store_list = get_active_store_name_list(session)
-    if store not in store_list and store_list:
-        store = store_list[0]
+    store = resolve_store_from_request(request, session, store)
     if filter_store not in {"all", *store_list}:
         filter_store = "all"
 
@@ -21148,7 +21352,7 @@ def _customer_complaint_payload(record: CustomerComplaintRecord) -> dict:
 @app.get("/customers")
 async def read_customers(
         request: Request,
-        store: str = "牛王庙店",
+        store: Optional[str] = None,
         tab: str = "store_customers",
         search_query: str = "",
         sort_by: str = "default",
@@ -21171,6 +21375,7 @@ async def read_customers(
         pull_start_date: str = "",
         pull_end_date: str = "",
         pull_employee: str = "all",
+        pull_view_previous_shift: str = "no",
         success: str = "",
         error: str = "",
         list_offset: int = 0,
@@ -21185,8 +21390,7 @@ async def read_customers(
     store_objs = get_store_list(session)
     store_list = [s.name for s in store_objs if s.is_active]
 
-    if store not in store_list and store_list:
-        store = store_list[0]
+    store = resolve_store_from_request(request, session, store)
 
     keyword = (search_query or "").strip()
     duplicate_nickname = str(duplicate_nickname or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -21654,6 +21858,9 @@ async def read_customers(
 
     # 2. 先按关键词查顾客
     if tab == "my_new_customer_pull":
+        pull_view_previous_shift = (
+            "yes" if _normalize_text(pull_view_previous_shift).lower() == "yes" else "no"
+        )
         pull_date_filter = pull_date_filter if pull_date_filter in {
             "today", "yesterday", "last2days", "this_week", "this_month", "last_month", "custom"
         } else "today"
@@ -21677,19 +21884,51 @@ async def read_customers(
             if pull_employee != "all" and pull_employee not in employee_names:
                 pull_employee = "all"
 
-        stmt = select(NewCustomerPullRecord).where(
-            NewCustomerPullRecord.created_at >= start_dt,
-            NewCustomerPullRecord.created_at < end_dt_exclusive,
-        )
+        stmt = select(NewCustomerPullRecord)
+        if pull_view_previous_shift == "yes":
+            stmt = stmt.where(
+                NewCustomerPullRecord.friend_request_not_approved_current_shift == True
+            )
+        elif user.role != "admin" and pull_date_filter == "today":
+            active_pull_duty = _active_store_duty_session(session, user.id)
+            active_pull_store_names = (
+                _decode_duty_store_names(active_pull_duty.store_names_json)
+                if active_pull_duty else []
+            )
+            if active_pull_duty and active_pull_duty.started_at and active_pull_store_names:
+                stmt = stmt.where(
+                    NewCustomerPullRecord.store_name.in_(active_pull_store_names),
+                    or_(
+                        NewCustomerPullRecord.created_at >= active_pull_duty.started_at,
+                        NewCustomerPullRecord.updated_at >= active_pull_duty.started_at,
+                        NewCustomerPullRecord.friend_request_not_approved_current_shift == True,
+                    ),
+                )
+            else:
+                stmt = stmt.where(
+                    NewCustomerPullRecord.created_at >= start_dt,
+                    NewCustomerPullRecord.created_at < end_dt_exclusive,
+                )
+        else:
+            stmt = stmt.where(
+                NewCustomerPullRecord.created_at >= start_dt,
+                NewCustomerPullRecord.created_at < end_dt_exclusive,
+            )
         if pull_employee != "all":
             stmt = stmt.where(NewCustomerPullRecord.pull_employee == pull_employee)
 
         pull_records = session.exec(stmt).all()
-        pull_records.sort(key=lambda row: (
-            1 if _new_customer_pull_is_success(row) else 0,
-            -int(row.created_at.timestamp()) if row.created_at else 0,
-            row.id or 0,
-        ))
+        if pull_view_previous_shift == "yes":
+            pull_records.sort(key=lambda row: (
+                row.order_start_time or datetime.max,
+                row.id or 0,
+            ))
+        else:
+            pull_records.sort(key=lambda row: (
+                1 if _new_customer_pull_is_success(row) else 0,
+                -int(row.created_at.timestamp()) if row.created_at else 0,
+                row.id or 0,
+            ))
 
         pending_count = len([
             row for row in pull_records
@@ -21722,6 +21961,7 @@ async def read_customers(
             "pull_start_date": range_start.strftime("%Y-%m-%d"),
             "pull_end_date": range_end.strftime("%Y-%m-%d"),
             "pull_employee": pull_employee,
+            "pull_view_previous_shift": pull_view_previous_shift,
             "employee_names": employee_names,
             "pull_record_list": pull_record_list,
             "pull_pending_count": pending_count,
@@ -21923,9 +22163,10 @@ async def read_customers(
 # === 新增顾客接口 (POST) ===
 def _build_customers_url(store: str, success: str = "", error: str = "") -> str:
     params = {
-        "store": store or "牛王庙店",
         "tab": "store_customers",
     }
+    if store:
+        params["store"] = store
     if success:
         params["success"] = success
     if error:
@@ -21944,13 +22185,14 @@ def _build_public_traffic_url(
     error: str = "",
 ) -> str:
     params = {
-        "store": store or "牛王庙店",
         "tab": "public_traffic",
         "public_date_filter": date_filter or "today",
         "public_start_date": start_date or "",
         "public_end_date": end_date or "",
         "public_source_port": source_port or "all",
     }
+    if store:
+        params["store"] = store
     if same_store_rate_store:
         params["public_same_store_rate_store"] = same_store_rate_store
     if success:
@@ -21969,10 +22211,11 @@ def _build_store_customers_url(
     duplicate_nickname: bool = False,
 ) -> str:
     params = {
-        "store": store or "牛王庙店",
         "tab": "store_customers",
         "sort_by": sort_by or "default",
     }
+    if store:
+        params["store"] = store
     if duplicate_nickname:
         params["duplicate_nickname"] = "1"
     if search_query:
@@ -22086,7 +22329,6 @@ def _build_contact_customers_url(
     error: str = "",
 ) -> str:
     params = {
-        "store": store or "牛王庙店",
         "tab": "contact_customers",
         "contact_date_filter": date_filter or "today",
         "contact_start_date": start_date or "",
@@ -22094,6 +22336,8 @@ def _build_contact_customers_url(
         "contact_store_filter": contact_store_filter or "all",
         "contact_employee": employee or "all",
     }
+    if store:
+        params["store"] = store
     if success:
         params["success"] = success
     if error:
@@ -22107,9 +22351,10 @@ def _build_customer_complaints_url(
     error: str = "",
 ) -> str:
     params = {
-        "store": store or "牛王庙店",
         "tab": "customer_complaints",
     }
+    if store:
+        params["store"] = store
     if success:
         params["success"] = success
     if error:
@@ -22123,17 +22368,20 @@ def _build_new_customer_pull_url(
     start_date: str = "",
     end_date: str = "",
     employee: str = "all",
+    view_previous_shift: str = "no",
     success: str = "",
     error: str = "",
 ) -> str:
     params = {
-        "store": store or "牛王庙店",
         "tab": "my_new_customer_pull",
         "pull_date_filter": date_filter or "today",
         "pull_start_date": start_date or "",
         "pull_end_date": end_date or "",
         "pull_employee": employee or "all",
+        "pull_view_previous_shift": "yes" if view_previous_shift == "yes" else "no",
     }
+    if store:
+        params["store"] = store
     if success:
         params["success"] = success
     if error:
@@ -22536,7 +22784,7 @@ async def add_customer(
 @app.post("/customers/store-followup/save")
 async def save_store_customer_followup(
         request: Request,
-        store: str = Form("牛王庙店"),
+        store: str = Form(""),
         search_query: str = Form(""),
         sort_by: str = Form("default"),
         duplicate_nickname: str = Form(""),
@@ -22812,7 +23060,7 @@ async def add_public_traffic_lead(
         source_port: str = Form(...),
         wechat_id: str = Form(...),
         intended_store_names: Optional[List[str]] = Form(None),
-        store: str = Form("牛王庙店"),
+        store: str = Form(""),
         public_date_filter: str = Form("today"),
         public_start_date: str = Form(""),
         public_end_date: str = Form(""),
@@ -22908,7 +23156,7 @@ async def update_public_traffic_lead(
         source_port: str = Form(...),
         wechat_id: str = Form(...),
         intended_store_names: Optional[List[str]] = Form(None),
-        store: str = Form("牛王庙店"),
+        store: str = Form(""),
         public_date_filter: str = Form("today"),
         public_start_date: str = Form(""),
         public_end_date: str = Form(""),
@@ -23017,7 +23265,7 @@ async def update_public_traffic_lead(
 @app.post("/public-traffic-leads/{lead_id}/delete")
 async def delete_public_traffic_lead(
         lead_id: int,
-        store: str = Form("牛王庙店"),
+        store: str = Form(""),
         public_date_filter: str = Form("today"),
         public_start_date: str = Form(""),
         public_end_date: str = Form(""),
@@ -23148,7 +23396,7 @@ def _sync_contact_followup_to_store_link(
 @app.post("/contact-customers/followup/save")
 async def save_contact_customer_followup(
         request: Request,
-        store: str = Form("牛王庙店"),
+        store: str = Form(""),
         contact_date_filter: str = Form("today"),
         contact_start_date: str = Form(""),
         contact_end_date: str = Form(""),
@@ -23237,11 +23485,12 @@ async def save_contact_customer_followup(
 @app.post("/new-customer-pull/save")
 async def save_new_customer_pull_records(
         request: Request,
-        store: str = Form("牛王庙店"),
+        store: str = Form(""),
         pull_date_filter: str = Form("today"),
         pull_start_date: str = Form(""),
         pull_end_date: str = Form(""),
         pull_employee: str = Form("all"),
+        pull_view_previous_shift: str = Form("no"),
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
@@ -23272,6 +23521,7 @@ async def save_new_customer_pull_records(
                     pull_start_date,
                     pull_end_date,
                     pull_employee if user.role == "admin" else _normalize_text(user.display_name),
+                    pull_view_previous_shift,
                     error="存在重复拉新：用户昵称、用户微信号相同，请检查后再保存"
                 ),
                 status_code=303
@@ -23279,6 +23529,8 @@ async def save_new_customer_pull_records(
         seen_pull_keys[dup_key] = row.id
 
     now = datetime.now()
+    today = date.today()
+    active_store_names = set(get_active_store_name_list(session))
     for record_id in record_ids:
         row = session.get(NewCustomerPullRecord, record_id)
         if not row:
@@ -23301,6 +23553,23 @@ async def save_new_customer_pull_records(
         row.friend_request_not_approved_current_shift = (
             form.get(f"friend_request_not_approved_current_shift_{record_id}") == "1"
         )
+        is_success = _new_customer_pull_is_success(row)
+        if is_success or _new_customer_pull_is_privacy_complete(row):
+            # 已通过隐私设置或拉新成功完成处理，不再延续到下一次同店班次。
+            row.friend_request_not_approved_current_shift = False
+        if is_success:
+            # 拉新成功后按“我的接触顾客”相同口径进入对应门店组局散客池。
+            _sync_contact_followup_to_store_link(
+                session,
+                wechat_id=row.customer_wechat_id,
+                nickname=row.customer_nickname,
+                store_name=row.store_name,
+                in_group_chat=True,
+                active_store_names=active_store_names,
+                today=today,
+                now=now,
+                operator_name=user.display_name,
+            )
         row.updated_at = now
         row.updated_by = user.display_name
         session.add(row)
@@ -23313,6 +23582,7 @@ async def save_new_customer_pull_records(
             pull_start_date,
             pull_end_date,
             pull_employee if user.role == "admin" else _normalize_text(user.display_name),
+            pull_view_previous_shift,
             success="待拉新记录已保存"
         ),
         status_code=303
@@ -23489,14 +23759,14 @@ async def add_customer_store_link(
     store_name = (store_name or "").strip()
     if not store_name:
         return RedirectResponse(
-            url=_build_customers_url(current_store or "牛王庙店", error="门店不能为空"),
+            url=_build_customers_url(current_store, error="门店不能为空"),
             status_code=303
         )
 
     active_store_names = get_active_store_name_list(session)
     if store_name not in active_store_names:
         return RedirectResponse(
-            url=_build_customers_url(current_store or "牛王庙店", error="所选门店不存在或未启用"),
+            url=_build_customers_url(current_store, error="所选门店不存在或未启用"),
             status_code=303
         )
 
@@ -23552,14 +23822,14 @@ async def update_customer_store_link(
     new_store_name = (new_store_name or "").strip()
     if not new_store_name:
         return RedirectResponse(
-            url=_build_customers_url(current_store or "牛王庙店", error="新门店不能为空"),
+            url=_build_customers_url(current_store, error="新门店不能为空"),
             status_code=303
         )
 
     active_store_names = get_active_store_name_list(session)
     if new_store_name not in active_store_names:
         return RedirectResponse(
-            url=_build_customers_url(current_store or "牛王庙店", error="目标门店不存在或未启用"),
+            url=_build_customers_url(current_store, error="目标门店不存在或未启用"),
             status_code=303
         )
 
@@ -23700,7 +23970,7 @@ async def update_customer(
 @app.post("/customer/{customer_id}/delete")
 async def delete_customer(
         customer_id: int,
-        store: str = Form("牛王庙店"),
+        store: str = Form(""),
         search_query: str = Form(""),
         sort_by: str = Form("default"),
         duplicate_nickname: str = Form(""),
@@ -24240,7 +24510,7 @@ async def revoke_brand_blacklist(
 async def brand_store_data_page(
         request: Request,
         dimension: str = "brand",   # brand / store
-        store: str = "牛王庙店",
+        store: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         compare_mode: str = "none",
@@ -24250,7 +24520,8 @@ async def brand_store_data_page(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    store_list = _get_all_store_list(session)
+    store_list = get_active_store_name_list(session)
+    store = resolve_store_from_request(request, session, store)
 
     today = date.today()
     month_start = date(today.year, today.month, 1)
@@ -24318,6 +24589,8 @@ async def brand_store_data_page(
         "revenue_total_compare_date_ranges_json": json.dumps(stats["charts"]["revenue_total_compare_date_ranges"], ensure_ascii=False),
         "private_order_trend_json": json.dumps(stats["charts"]["private_order_trend"], ensure_ascii=False),
         "self_arrival_order_trend_json": json.dumps(stats["charts"]["self_arrival_order_trend"], ensure_ascii=False),
+        "game_type_labels_json": json.dumps(stats["charts"]["game_type_labels"], ensure_ascii=False),
+        "game_type_counts_json": json.dumps(stats["charts"]["game_type_counts"], ensure_ascii=False),
         "customer_funnel_json": json.dumps(stats["charts"]["customer_funnel"], ensure_ascii=False),
     })
 
@@ -24326,7 +24599,7 @@ async def brand_store_data_page(
 @app.get("/manager-performance")
 async def manager_performance(
         request: Request,
-        store: str = "牛王庙店",
+        store: Optional[str] = None,
         year: Optional[int] = None,
         month: Optional[int] = None,
         display_mode: str = "monthly_summary",   # 新增：当前展示
@@ -24340,8 +24613,7 @@ async def manager_performance(
     store_objs = get_store_list(session)
     store_list = [s.name for s in store_objs if s.is_active]
 
-    if store not in store_list and store_list:
-        store = store_list[0]
+    store = resolve_store_from_request(request, session, store)
 
     # 2. 年月默认值
     today = date.today()
@@ -24729,7 +25001,7 @@ async def schedule_save(
 @app.get("/maintenance-records")
 async def maintenance_records_page(
         request: Request,
-        store: str = "牛王庙店",
+        store: Optional[str] = None,
         year: int = date.today().year,
         month: int = date.today().month,
         focus_record_id: Optional[int] = None,
@@ -24747,7 +25019,8 @@ async def maintenance_records_page(
     list_limit = min(max(1, int(list_limit or LIST_PAGE_SIZE)), 1000)
 
     # 门店列表
-    store_list = get_all_store_list(session)
+    store_list = get_active_store_name_list(session)
+    store = resolve_store_from_request(request, session, store)
 
     # 所有门店 -> 顾客映射（只取去过该店的顾客）
     customer_links = session.exec(select(CustomerStoreLink)).all()

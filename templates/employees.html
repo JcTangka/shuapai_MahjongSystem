@@ -448,6 +448,81 @@
         background: linear-gradient(135deg, #f59e0b, #d97706);
     }
 
+    .whiteboard-bar-fill.employee-private-orders {
+        background: linear-gradient(135deg, #2563eb, #1d4ed8);
+        border-radius: 999px 0 0 999px;
+    }
+
+    .whiteboard-bar-fill.employee-self-arrival-orders {
+        background: linear-gradient(135deg, #22c55e, #15803d);
+        border-radius: 0 999px 999px 0;
+    }
+
+    .whiteboard-bar-fill.employee-order-only-segment {
+        border-radius: 999px;
+    }
+
+    .whiteboard-bar-fill.employee-order-segment {
+        cursor: help;
+        z-index: 2;
+    }
+
+    .whiteboard-bar-fill.employee-order-segment::after {
+        content: attr(data-order-tooltip);
+        position: absolute;
+        left: 50%;
+        bottom: calc(100% + 8px);
+        transform: translateX(-50%) translateY(4px);
+        min-width: max-content;
+        padding: 6px 9px;
+        border-radius: 7px;
+        background: rgba(15, 23, 42, 0.94);
+        color: #fff;
+        font-size: 0.78rem;
+        font-weight: 700;
+        line-height: 1.2;
+        white-space: nowrap;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.15s ease, transform 0.15s ease;
+        box-shadow: 0 4px 12px rgba(15, 23, 42, 0.22);
+        z-index: 10;
+    }
+
+    .whiteboard-bar-fill.employee-order-segment:hover::after,
+    .whiteboard-bar-fill.employee-order-segment:focus::after {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
+
+    .whiteboard-bar-fill.employee-order-segment:hover,
+    .whiteboard-bar-fill.employee-order-segment:focus {
+        z-index: 20;
+        outline: none;
+    }
+
+    .whiteboard-order-legend {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        white-space: nowrap;
+    }
+
+    .whiteboard-order-legend-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 3px;
+        display: inline-block;
+    }
+
+    .whiteboard-order-legend-dot.private-orders {
+        background: #2563eb;
+    }
+
+    .whiteboard-order-legend-dot.self-arrival-orders {
+        background: #22c55e;
+    }
+
     .whiteboard-bar-value {
         position: absolute;
         right: 10px;
@@ -3360,6 +3435,14 @@
                 <div class="small text-muted mt-1">
                     仅展示本月订单量大于 0 的员工；红色竖线为个人提成关键节点：660、710、760、810、860……。点击员工可展开查看其每个门店的目标订单完成情况。
                 </div>
+                <div class="small text-muted mt-2 d-flex align-items-center gap-3 flex-wrap">
+                    <span class="whiteboard-order-legend">
+                        <span class="whiteboard-order-legend-dot private-orders"></span>私域组局
+                    </span>
+                    <span class="whiteboard-order-legend">
+                        <span class="whiteboard-order-legend-dot self-arrival-orders"></span>自主到店
+                    </span>
+                </div>
             </div>
             {% if whiteboard_data.sales_champion and whiteboard_data.sales_champion.order_count %}
             <div class="whiteboard-champion" title="仅展示截至 {{ whiteboard_data.sales_champion.as_of_date }} 的本月订单量第一名，不产生奖金或工资流水。">
@@ -3393,14 +3476,26 @@
                         {% endif %}
                     </button>
                     <div class="whiteboard-bar-meta">
-                        本月 {{ row.order_count }} 单
+                        本月 {{ row.order_count }} 单｜私域组局 {{ row.private_order_count }} 单｜自主到店 {{ row.self_arrival_order_count }} 单
                     </div>
                 </div>
 
                 <div class="col-md-7">
                     <div class="whiteboard-bar-track">
-                        <div class="whiteboard-bar-fill warning"
-                             style="width: {{ row.bar_percent }}%;"></div>
+                        {% if row.private_order_count > 0 %}
+                        <div class="whiteboard-bar-fill employee-order-segment employee-private-orders {% if row.self_arrival_order_count == 0 %}employee-order-only-segment{% endif %}"
+                             data-order-tooltip="私域组局：{{ row.private_order_count }} 单"
+                             aria-label="私域组局：{{ row.private_order_count }} 单"
+                             tabindex="0"
+                             style="width: {{ row.private_bar_percent }}%;"></div>
+                        {% endif %}
+                        {% if row.self_arrival_order_count > 0 %}
+                        <div class="whiteboard-bar-fill employee-order-segment employee-self-arrival-orders {% if row.private_order_count == 0 %}employee-order-only-segment{% endif %}"
+                             data-order-tooltip="自主到店：{{ row.self_arrival_order_count }} 单"
+                             aria-label="自主到店：{{ row.self_arrival_order_count }} 单"
+                             tabindex="0"
+                             style="left: {{ row.private_bar_percent }}%; width: {{ row.self_arrival_bar_percent }}%;"></div>
+                        {% endif %}
 
                         {% for node in whiteboard_data.commission_nodes %}
                         <div class="whiteboard-node-line"

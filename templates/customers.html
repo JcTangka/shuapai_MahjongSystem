@@ -130,6 +130,13 @@
             </div>
             {% endif %}
             <div class="col-lg-3 col-md-6">
+                <label class="form-label fw-bold text-secondary">是否查看上一班次待拉新</label>
+                <select class="form-select" name="pull_view_previous_shift">
+                    <option value="no" {% if pull_view_previous_shift != 'yes' %}selected{% endif %}>否</option>
+                    <option value="yes" {% if pull_view_previous_shift == 'yes' %}selected{% endif %}>是</option>
+                </select>
+            </div>
+            <div class="col-lg-3 col-md-6">
                 <button type="submit" class="btn btn-primary rounded-pill px-4 me-2"><i class="bi bi-search me-1"></i>查询</button>
                 <a href="/customers?store={{ current_store }}&tab={{ tab }}" class="btn btn-outline-secondary rounded-pill px-4"><i class="bi bi-arrow-clockwise me-1"></i>重置</a>
             </div>
@@ -146,6 +153,7 @@
     <input type="hidden" name="pull_start_date" value="{{ pull_start_date or '' }}">
     <input type="hidden" name="pull_end_date" value="{{ pull_end_date or '' }}">
     <input type="hidden" name="pull_employee" value="{{ pull_employee or 'all' }}">
+    <input type="hidden" name="pull_view_previous_shift" value="{{ pull_view_previous_shift or 'no' }}">
     {% if pull_record_list %}
     <div class="text-end mb-3"><button type="submit" class="btn btn-primary rounded-pill px-4"><i class="bi bi-save me-1"></i>批量保存</button></div>
     {% endif %}
@@ -1179,7 +1187,7 @@
                         <label class="form-label fw-bold">选择引流端口</label>
                         <select class="form-select" name="source_port" required>
                             {% for source_port in source_ports %}
-                            <option value="{{ source_port }}">{{ source_port }}</option>
+                            <option value="{{ source_port }}" {% if source_port == '抖音' %}selected{% endif %}>{{ source_port }}</option>
                             {% endfor %}
                         </select>
                     </div>

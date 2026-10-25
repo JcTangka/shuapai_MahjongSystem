@@ -204,7 +204,7 @@
                   </a>
                 </li>
                 <li>
-                     <a href="/maintenance-records?store={{ current_store if current_store else '（2008）吾悦广场店' }}" class="nav-link {% if page_name == 'maintenance' %}active{% endif %}" >
+                     <a href="/maintenance-records{% if current_store %}?store={{ current_store | urlencode }}{% endif %}" class="nav-link {% if page_name == 'maintenance' %}active{% endif %}" >
                         <i class="bi bi-box2-heart"></i> 人情维护支出
                     </a>
                 </li>
