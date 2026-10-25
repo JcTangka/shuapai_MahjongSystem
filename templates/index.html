@@ -350,7 +350,7 @@
                 </div>
 
                 <div class="alert alert-info py-2 mb-3" id="recommendationSummary">
-                    点击后按当前牌局条件即时计算推荐。
+                    点击后从凌晨生成的三维推荐池快照读取候选人。
                 </div>
 
                 <div id="recommendationLoading" class="text-center text-muted py-5 d-none">
@@ -363,7 +363,7 @@
                 <div id="recommendationEmpty" class="text-center text-muted py-5 d-none">
                     <i class="bi bi-inbox fs-1 d-block mb-3"></i>
                     <div class="fw-bold mb-1">暂无可推荐顾客</div>
-                    <div class="small">可能原因：玩法分数匹配人数不足，或候选人正在娱乐、被屏蔽、被拉黑。</div>
+                    <div class="small" id="recommendationEmptyMessage">当前三维推荐池中没有通过即时过滤的顾客。</div>
                 </div>
 
                 <div id="recommendationResult" class="recommendation-table-wrapper d-none">
@@ -373,15 +373,10 @@
                                 <th style="width: 64px;">排名</th>
                                 <th>顾客</th>
                                 <th>微信号</th>
-                                <th>综合分</th>
-                                <th>日期+时间</th>
-                                <th>玩法</th>
-                                <th>时间轴</th>
-                                <th>日期类型</th>
-                                <th>投诉</th>
+                                <th>近30天到店</th>
+                                <th>三维匹配依据</th>
                                 <th>最近到店</th>
-                                <th>推荐原因</th>
-                                <th style="width: 280px;">操作</th>
+                                <th style="width: 250px;">操作</th>
                             </tr>
                         </thead>
                         <tbody id="recommendationTbody"></tbody>
@@ -706,7 +701,7 @@
         const serialText = row ? (row.querySelector('td')?.innerText || '').trim() : '';
         document.getElementById('recommendationGameTitle').innerText = `${serialText || '#'} {{ current_store }}`;
         document.getElementById('recommendationGameMeta').innerText = '正在读取牌局条件...';
-        document.getElementById('recommendationSummary').innerText = '点击后按当前牌局条件即时计算推荐。';
+        document.getElementById('recommendationSummary').innerText = '正在从凌晨生成的三维推荐池快照读取候选人。';
         document.getElementById('recommendationTbody').innerHTML = '';
         loadRecommendations();
     }
@@ -726,7 +721,7 @@
         setRecommendationState('loading');
 
         try {
-            const resp = await fetch(`/api/games/${encodeURIComponent(activeRecommendationGameId)}/recommendations?limit=100`, {
+            const resp = await fetch(`/api/games/${encodeURIComponent(activeRecommendationGameId)}/recommendations?limit=5000`, {
                 signal: activeRecommendationController.signal
             });
             const data = await resp.json();
@@ -742,16 +737,27 @@
 
     function renderRecommendationData(data) {
         const game = data.game || {};
+        const snapshot = data.snapshot || {};
         activeRecommendationGame = game;
         document.getElementById('recommendationGameTitle').innerText =
             `#${game.serial_number || '-'} ${game.store_name || '{{ current_store }}'}`;
         document.getElementById('recommendationGameMeta').innerText =
             `${game.reservation_time || '-'} / ${game.stakes || '-'} / ${game.game_type || '-'} / ${game.smoke_type_label || '-'}`;
         document.getElementById('recommendationSummary').innerText =
-            `共 ${data.total || 0} 位候选，当前显示 ${(data.recommendations || []).length} 位；${game.date_type_label || '-'} / 时间轴 ${game.time_bucket_label || '-'}`;
+            `三维匹配：${game.play_label || '-'} / ${game.smoke_type_label || '-'} / ${game.time_bucket_label || '-'}；` +
+            `可推荐 ${data.total || 0} 人；快照更新于 ${snapshot.snapshot_at || '-'}（${snapshot.window_start || '-'} 至 ${snapshot.window_end || '-'}）`;
 
         const list = data.recommendations || [];
         if (!list.length) {
+            const counts = data.excluded_counts || {};
+            const details = [
+                `三维池 ${counts.snapshot_pool || 0}人`,
+                `正在娱乐 ${counts.currently_playing || 0}人`,
+                `一直不推荐 ${counts.recommendation_blocked || 0}人`,
+                `拉黑冲突 ${(counts.brand_blacklisted || 0) + (counts.player_blacklist_conflict || 0)}人`
+            ].join('；');
+            document.getElementById('recommendationEmptyMessage').innerText =
+                `${data.message || '当前三维推荐池中没有通过即时过滤的顾客。'}（${details}）`;
             setRecommendationState('empty');
             return;
         }
@@ -759,12 +765,12 @@
         const tbody = document.getElementById('recommendationTbody');
         const hasBlacklistInitiators = Array.isArray(game.current_players) && game.current_players.length > 0;
         tbody.innerHTML = list.map(item => {
-            const dormantBadge = item.is_recent_unvisited
-                ? '<span class="badge bg-warning text-dark ms-1">近7天未到店</span>'
-                : '';
-            const complaintText = item.complaint_count > 0
-                ? `<span class="text-danger">-${item.complaint_penalty}</span>`
-                : '<span class="text-success">0</span>';
+            const timeCounts = Array.isArray(item.time_counts) ? item.time_counts : [0, 0, 0, 0];
+            const playDetail = (game.game_type === '换三' || game.game_type === '定缺')
+                ? `当前组合 ${item.play_count || 0}次；换三 ${item.huansan_count || 0} / 定缺 ${item.dingque_count || 0}`
+                : `当前组合 ${item.play_count || 0}次`;
+            const smokeDetail = `有烟 ${item.smoking_count || 0} / 无烟 ${item.non_smoking_count || 0}`;
+            const timeDetail = `早 ${timeCounts[0] || 0} / 下午 ${timeCounts[1] || 0} / 晚 ${timeCounts[2] || 0} / 凌晨 ${timeCounts[3] || 0}`;
             const blacklistButton = hasBlacklistInitiators
                 ? `
                             <button type="button" class="btn btn-sm btn-outline-danger"
@@ -788,17 +794,19 @@
                         <div class="small text-muted">${escapeHtml(item.gender || '-')}</div>
                     </td>
                     <td><code>${escapeHtml(item.wechat_id)}</code></td>
-                    <td class="fw-bold">${item.score}</td>
-                    <td class="fw-bold text-primary">${item.date_time_bucket_count || 0}</td>
-                    <td>${item.play_count}</td>
-                    <td>${item.time_bucket_count}</td>
-                    <td>${item.date_type_count || 0}</td>
-                    <td>${complaintText}</td>
+                    <td>
+                        <div class="fw-bold text-primary fs-5">${item.visit_count_30d || 0}</div>
+                        <div class="small text-muted">本门店</div>
+                    </td>
+                    <td class="text-start small">
+                        <div><span class="badge bg-primary me-1">玩法</span>${escapeHtml(playDetail)}</div>
+                        <div class="mt-1"><span class="badge bg-secondary me-1">烟局</span>${escapeHtml(smokeDetail)}</div>
+                        <div class="mt-1"><span class="badge bg-info text-dark me-1">时段</span>${escapeHtml(timeDetail)}</div>
+                    </td>
                     <td>
                         <div>${escapeHtml(item.last_visit_at_store || '-')}</div>
-                        ${dormantBadge}
+                        <div class="small text-muted">${item.days_since_visit || 0}天前</div>
                     </td>
-                    <td class="text-start recommendation-reason">${escapeHtml(item.reason || '')}</td>
                     <td>
                         <div class="d-flex flex-wrap justify-content-center gap-1">
                             <button type="button" class="btn btn-sm btn-outline-secondary"
@@ -813,12 +821,6 @@
                                 <i class="bi bi-person-plus me-1"></i>填入本桌
                             </button>
 ${blacklistButton}
-                            <button type="button" class="btn btn-sm btn-outline-warning"
-                                    data-customer-id="${item.customer_id}"
-                                    data-mode="temporary"
-                                    onclick="blockRecommendationCustomer(this)">
-                                近7天不推荐
-                            </button>
                             <button type="button" class="btn btn-sm btn-outline-dark"
                                     data-customer-id="${item.customer_id}"
                                     data-mode="permanent"
@@ -976,8 +978,9 @@ ${blacklistButton}
 
     async function blockRecommendationCustomer(button) {
         const customerId = button.dataset.customerId || '';
-        const mode = button.dataset.mode || 'temporary';
+        const mode = button.dataset.mode || 'permanent';
         if (!customerId) return;
+        if (mode === 'permanent' && !confirm('确认将该顾客设置为一直不进入当前门店智能推荐池吗？')) return;
         button.disabled = true;
 
         const formData = new FormData();

@@ -27,7 +27,8 @@ from database import (GameRecord, GamePaymentItem, Store, Room, User,
                       Customer, CustomerStoreLink, CustomerDepositExemption, CustomerComplaintRecord,
                       Blacklist, BrandBlacklistEntry, PlayFrequency, CustomerPlayTypeStat,
                       GameSmokeSetting, CustomerRecommendationBlock, CustomerRecommendationTimeBucketStat,
-                      RecommendationHolidayDate, RecommendationPreferenceSnapshot,
+                      RecommendationHolidayDate, RecommendationPreferenceSnapshot, RecommendationPoolSnapshot,
+                      RecommendationPoolSnapshotState,
                       create_db_and_tables, get_session,
                       refresh_recommendation_snapshots, RECOMMENDATION_DATE_TYPE_WORKDAY,
                       RECOMMENDATION_DATE_TYPE_WEEKEND, RECOMMENDATION_DATE_TYPE_HOLIDAY,
@@ -4786,15 +4787,15 @@ RECOMMENDATION_RECENT_DAYS = 7
 RECOMMENDATION_COMPLAINT_PENALTY = 5
 RECOMMENDATION_DORMANT_WINDOW_SIZE = 6
 RECOMMENDATION_DORMANT_PER_WINDOW = 1
-RECOMMENDATION_DEFAULT_LIMIT = 100
-RECOMMENDATION_MAX_LIMIT = 100
+RECOMMENDATION_DEFAULT_LIMIT = 5000
+RECOMMENDATION_MAX_LIMIT = 5000
 RECOMMENDATION_TIME_BUCKETS = (
-    (0, 9),
-    (9, 13),
-    (13, 17),
-    (17, 20),
-    (20, 24),
+    (1, 12),
+    (12, 17),
+    (17, 22),
+    (22, 1),
 )
+RECOMMENDATION_TIME_BUCKET_LABELS = ("早场 01:00-12:00", "下午场 12:00-17:00", "晚场 17:00-22:00", "凌晨场 22:00-01:00")
 
 FORMED_GAMES_PAGE_SIZE = 40
 LIST_PAGE_SIZE = 40
@@ -5787,7 +5788,7 @@ def _game_is_unended_for_recommendation(game: GameRecord, now: Optional[datetime
     if _normalize_text(game.status) != "formed":
         return False
     current_dt = now or datetime.now()
-    return current_dt < _recommendation_game_end_dt(game)
+    return _recommendation_game_start_dt(game) <= current_dt < _recommendation_game_end_dt(game)
 
 
 def get_unended_recommendation_player_wechats(
@@ -5795,13 +5796,17 @@ def get_unended_recommendation_player_wechats(
         store_name: Optional[str] = None,
         now: Optional[datetime] = None
 ) -> set:
-    stmt = select(GameRecord).where(GameRecord.status == "formed")
+    current_dt = now or datetime.now()
+    stmt = select(GameRecord).where(
+        GameRecord.status == "formed",
+        GameRecord.record_date >= current_dt.date() - timedelta(days=1),
+        GameRecord.record_date <= current_dt.date(),
+    )
     clean_store_name = _normalize_text(store_name)
     if clean_store_name:
         stmt = stmt.where(GameRecord.store_name == clean_store_name)
 
     result = set()
-    current_dt = now or datetime.now()
     for game in session.exec(stmt).all():
         if not _game_is_unended_for_recommendation(game, current_dt):
             continue
@@ -6221,10 +6226,13 @@ def _game_recommendation_time_snapshot(session: Session, game: GameRecord) -> di
 
 def _recommendation_time_bucket_for_dt(played_at: datetime) -> int:
     hour = int((played_at or datetime.min).hour)
-    for idx, (start_hour, end_hour) in enumerate(RECOMMENDATION_TIME_BUCKETS):
-        if start_hour <= hour < end_hour:
-            return idx
-    return 0
+    if 1 <= hour < 12:
+        return 0
+    if 12 <= hour < 17:
+        return 1
+    if 17 <= hour < 22:
+        return 2
+    return 3
 
 def _game_recommendation_time_bucket(game_or_snapshot) -> int:
     played_at = _game_play_type_played_at(game_or_snapshot)
@@ -6329,16 +6337,14 @@ def _recompute_customer_recommendation_time_bucket_stat_key(
     session.add(stat)
 
 def sync_customer_recommendation_time_bucket_stats_for_changed_games(session: Session, *game_versions):
-    # 智能推荐评分已切换为凌晨/启动补偿生成的偏好快照。
+    # 智能推荐已切换为凌晨/启动补偿生成的三维推荐池快照。
     # 白天牌局变更不再实时改写推荐统计，避免高频编辑触发重算。
     return
 
 
 def _recommendation_time_bucket_label(time_bucket: int) -> str:
-    clean_bucket = max(0, min(len(RECOMMENDATION_TIME_BUCKETS) - 1, int(time_bucket or 0)))
-    start_hour, raw_end_hour = RECOMMENDATION_TIME_BUCKETS[clean_bucket]
-    end_hour = raw_end_hour % 24
-    return f"{start_hour:02d}:00-{end_hour:02d}:00"
+    clean_bucket = max(0, min(len(RECOMMENDATION_TIME_BUCKET_LABELS) - 1, int(time_bucket or 0)))
+    return RECOMMENDATION_TIME_BUCKET_LABELS[clean_bucket]
 
 def _recommendation_date_type_for_date(session: Session, target_date: date) -> str:
     holiday = session.exec(
@@ -6436,7 +6442,8 @@ def _mix_recommendation_recent_unvisited_candidates(items: List[dict], limit: in
     return selected[:limit]
 
 
-def build_game_recommendations(
+# 旧评分实现仅保留为迁移期参考；API 路由只调用下方新版 build_game_recommendations。
+def _build_game_recommendations_legacy(
         session: Session,
         game_id: int,
         limit: int = RECOMMENDATION_DEFAULT_LIMIT,
@@ -6818,6 +6825,251 @@ def build_game_recommendations(
             "secondary": "time_bucket_count_desc",
             "third": "date_type_count_desc",
             "fourth": "play_count_desc",
+        },
+        "message": "" if selected_recommendations else "暂无可推荐顾客",
+    }
+
+
+def build_game_recommendations(
+        session: Session,
+        game_id: int,
+        limit: int = RECOMMENDATION_DEFAULT_LIMIT,
+        now: Optional[datetime] = None
+) -> dict:
+    """从凌晨生成的三维池快照读取候选人，仅执行必须即时生效的硬过滤。"""
+    game = session.get(GameRecord, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="牌局不存在")
+    if _normalize_text(game.status) != "unformed":
+        raise HTTPException(status_code=400, detail="仅未组齐牌局支持智能推荐")
+
+    current_dt = now or datetime.now()
+    store_name = _normalize_text(game.store_name)
+    play_label = _game_play_type_label(game)
+    smoke_type = get_game_smoke_type(session, game.id)
+    time_bucket = _game_recommendation_time_bucket(game)
+    played_at = _game_play_type_played_at(game)
+    clean_limit = min(max(1, int(limit or RECOMMENDATION_DEFAULT_LIMIT)), RECOMMENDATION_MAX_LIMIT)
+
+    existing_player_wechat_list = _recommendation_player_wechats(game)
+    existing_player_customers = session.exec(
+        select(Customer).where(Customer.wechat_id.in_(existing_player_wechat_list))
+    ).all() if existing_player_wechat_list else []
+    existing_player_by_wechat = {
+        _normalize_text(customer.wechat_id): customer
+        for customer in existing_player_customers
+        if customer.id is not None and _normalize_text(customer.wechat_id)
+    }
+    existing_player_ids = {
+        customer.id for customer in existing_player_customers if customer.id is not None
+    }
+    current_players = []
+    for idx in range(1, 5):
+        wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+        customer = existing_player_by_wechat.get(wechat_id)
+        if not customer or customer.id is None:
+            continue
+        current_players.append({
+            "slot": idx,
+            "customer_id": customer.id,
+            "nickname": customer.nickname or _normalize_text(getattr(game, f"player_{idx}", None)),
+            "wechat_id": wechat_id,
+        })
+
+    game_payload = {
+        "id": game.id,
+        "serial_number": game.serial_number,
+        "store_name": store_name,
+        "stakes": _normalize_text(game.stakes),
+        "game_type": _normalize_text(game.game_type),
+        "play_label": play_label,
+        "smoke_type": smoke_type,
+        "smoke_type_label": SMOKE_TYPE_LABEL_MAP.get(smoke_type, "有烟局"),
+        "time_bucket": time_bucket,
+        "time_bucket_label": _recommendation_time_bucket_label(time_bucket),
+        "reservation_time": played_at.strftime("%Y-%m-%d %H:%M"),
+        "existing_player_wechats": existing_player_wechat_list,
+        "current_players": current_players,
+    }
+    empty_counts = {
+        "snapshot_pool": 0,
+        "current_game_player": 0,
+        "currently_playing": 0,
+        "recommendation_blocked": 0,
+        "brand_blacklisted": 0,
+        "player_blacklist_conflict": 0,
+        "deleted_customer": 0,
+    }
+
+    latest_snapshot = session.get(RecommendationPoolSnapshotState, 1)
+    snapshot_payload = {
+        "snapshot_at": latest_snapshot.snapshot_at.strftime("%Y-%m-%d %H:%M") if latest_snapshot else "",
+        "window_start": latest_snapshot.window_start.isoformat() if latest_snapshot else "",
+        "window_end": latest_snapshot.window_end.isoformat() if latest_snapshot else "",
+    }
+    if not latest_snapshot:
+        return {
+            "ok": True,
+            "game": game_payload,
+            "snapshot": snapshot_payload,
+            "recommendations": [],
+            "total": 0,
+            "limit": clean_limit,
+            "excluded_counts": empty_counts,
+            "message": "智能推荐池快照尚未生成，请稍后刷新",
+        }
+    if not store_name or not play_label:
+        return {
+            "ok": True,
+            "game": game_payload,
+            "snapshot": snapshot_payload,
+            "recommendations": [],
+            "total": 0,
+            "limit": clean_limit,
+            "excluded_counts": empty_counts,
+            "message": "牌局门店、分数或玩法不完整，无法匹配推荐池",
+        }
+
+    pool_rows = session.exec(
+        select(RecommendationPoolSnapshot).where(
+            RecommendationPoolSnapshot.store_name == store_name,
+            RecommendationPoolSnapshot.play_label == play_label,
+            RecommendationPoolSnapshot.smoke_type == smoke_type,
+            RecommendationPoolSnapshot.time_bucket == time_bucket,
+        )
+    ).all()
+    excluded_counts = dict(empty_counts)
+    excluded_counts["snapshot_pool"] = len(pool_rows)
+    if not pool_rows:
+        return {
+            "ok": True,
+            "game": game_payload,
+            "snapshot": snapshot_payload,
+            "recommendations": [],
+            "total": 0,
+            "limit": clean_limit,
+            "excluded_counts": excluded_counts,
+            "message": "当前玩法分数、烟局和时间段暂无同时匹配的顾客",
+        }
+
+    row_by_customer_id = {row.customer_id: row for row in pool_rows}
+    candidate_customer_ids = list(row_by_customer_id.keys())
+    candidate_customer_id_set = set(candidate_customer_ids)
+    customers = session.exec(
+        select(Customer).where(Customer.id.in_(candidate_customer_ids))
+    ).all()
+    customer_by_id = {customer.id: customer for customer in customers if customer.id is not None}
+    candidate_wechat_ids = [row.wechat_id for row in pool_rows if _normalize_text(row.wechat_id)]
+
+    currently_playing_wechats = get_unended_recommendation_player_wechats(
+        session=session,
+        store_name=None,
+        now=current_dt,
+    )
+    permanently_blocked_ids = {
+        row.customer_id
+        for row in session.exec(
+            select(CustomerRecommendationBlock).where(
+                CustomerRecommendationBlock.customer_id.in_(candidate_customer_ids),
+                CustomerRecommendationBlock.store_name == store_name,
+                CustomerRecommendationBlock.mode == RECOMMENDATION_BLOCK_PERMANENT,
+                CustomerRecommendationBlock.is_active == True,
+            )
+        ).all()
+    }
+    brand_blacklisted_wechats = {
+        _normalize_text(row.wechat_id)
+        for row in session.exec(
+            select(BrandBlacklistEntry).where(
+                BrandBlacklistEntry.wechat_id.in_(candidate_wechat_ids),
+                BrandBlacklistEntry.is_active == True,
+            )
+        ).all()
+        if _normalize_text(row.wechat_id)
+    }
+
+    conflict_customer_ids = set()
+    if existing_player_ids:
+        relevant_ids = list(set(candidate_customer_ids) | existing_player_ids)
+        for row in session.exec(
+            select(Blacklist).where(
+                Blacklist.initiator_id.in_(relevant_ids),
+                Blacklist.target_id.in_(relevant_ids),
+            )
+        ).all():
+            if row.initiator_id in candidate_customer_id_set and row.target_id in existing_player_ids:
+                conflict_customer_ids.add(row.initiator_id)
+            if row.target_id in candidate_customer_id_set and row.initiator_id in existing_player_ids:
+                conflict_customer_ids.add(row.target_id)
+
+    exempt_customer_ids = _deposit_exempt_customer_ids(session)
+    existing_player_wechats = set(existing_player_wechat_list)
+    recommendations = []
+    for row in pool_rows:
+        customer = customer_by_id.get(row.customer_id)
+        if not customer or bool(getattr(customer, "is_deleted", False)):
+            excluded_counts["deleted_customer"] += 1
+            continue
+        wechat_id = _normalize_text(customer.wechat_id)
+        if wechat_id in existing_player_wechats:
+            excluded_counts["current_game_player"] += 1
+            continue
+        if wechat_id in currently_playing_wechats:
+            excluded_counts["currently_playing"] += 1
+            continue
+        if customer.id in permanently_blocked_ids:
+            excluded_counts["recommendation_blocked"] += 1
+            continue
+        if wechat_id in brand_blacklisted_wechats:
+            excluded_counts["brand_blacklisted"] += 1
+            continue
+        if customer.id in conflict_customer_ids:
+            excluded_counts["player_blacklist_conflict"] += 1
+            continue
+
+        days_since_visit = max(0, (current_dt.date() - row.last_visit_at.date()).days)
+        time_counts = [row.early_count, row.afternoon_count, row.evening_count, row.overnight_count]
+        recommendations.append({
+            "customer_id": customer.id,
+            "nickname": customer.nickname or "",
+            "wechat_id": wechat_id,
+            "gender": customer.gender or "",
+            "is_deposit_exempt": customer.id in exempt_customer_ids,
+            "visit_count_30d": int(row.visit_count_30d or 0),
+            "play_count": int(row.play_count or 0),
+            "huansan_count": int(row.huansan_count or 0),
+            "dingque_count": int(row.dingque_count or 0),
+            "smoking_count": int(row.smoking_count or 0),
+            "non_smoking_count": int(row.non_smoking_count or 0),
+            "time_counts": time_counts,
+            "time_bucket_count": int(time_counts[time_bucket] or 0),
+            "last_visit_at_store": row.last_visit_at.strftime("%Y-%m-%d"),
+            "days_since_visit": days_since_visit,
+            "_sort_last_visit": row.last_visit_at,
+        })
+
+    recommendations.sort(key=lambda item: (
+        -item["visit_count_30d"],
+        -item["_sort_last_visit"].timestamp(),
+        item["customer_id"],
+    ))
+    selected_recommendations = recommendations[:clean_limit]
+    for rank, item in enumerate(selected_recommendations, start=1):
+        item["rank"] = rank
+        item.pop("_sort_last_visit", None)
+
+    return {
+        "ok": True,
+        "game": game_payload,
+        "snapshot": snapshot_payload,
+        "recommendations": selected_recommendations,
+        "total": len(recommendations),
+        "limit": clean_limit,
+        "excluded_counts": excluded_counts,
+        "sort_policy": {
+            "primary": "visit_count_30d_desc",
+            "secondary": "last_visit_at_desc",
+            "third": "customer_id_asc",
         },
         "message": "" if selected_recommendations else "暂无可推荐顾客",
     }
@@ -10244,13 +10496,8 @@ _recommendation_snapshot_scheduler_started = False
 
 
 def _recommendation_snapshot_needs_startup_refresh(session: Session) -> bool:
-    snapshot_count = session.exec(select(func.count(RecommendationPreferenceSnapshot.id))).first() or 0
-    if snapshot_count <= 0:
-        return True
-
-    last_snapshot_at = session.exec(
-        select(func.max(RecommendationPreferenceSnapshot.snapshot_at))
-    ).first()
+    state = session.get(RecommendationPoolSnapshotState, 1)
+    last_snapshot_at = state.snapshot_at if state else None
     if not last_snapshot_at:
         return True
     if isinstance(last_snapshot_at, str):
@@ -10276,13 +10523,13 @@ def _run_recommendation_snapshot_refresh(reason: str = "scheduled", force_full: 
             session.commit()
         start_date = result["start_date"].strftime("%Y-%m-%d") if result.get("start_date") else "全量"
         print(
-            f"智能推荐偏好快照刷新完成（{reason}，范围：{start_date}）："
+            f"智能推荐三维池快照刷新完成（{reason}，范围：{start_date}）："
             f"扫描牌局 {result['scanned_game_count']}，"
-            f"日快照 {result['daily_snapshot_count']}，"
-            f"汇总快照 {result['preference_snapshot_count']}"
+            f"活跃顾客 {result['active_customer_count']}，"
+            f"池成员 {result['pool_snapshot_count']}"
         )
     except Exception as exc:
-        print(f"智能推荐偏好快照刷新失败（{reason}）：{exc}")
+        print(f"智能推荐三维池快照刷新失败（{reason}）：{exc}")
     finally:
         _recommendation_snapshot_refresh_lock.release()
 
@@ -22657,7 +22904,6 @@ async def read_customers(
         if item.get("id") is not None
     ]
     recommendation_blocks_by_customer_id = {}
-    today = date.today()
     if page_customer_ids:
         block_rows = session.exec(
             select(CustomerRecommendationBlock).where(
@@ -22668,12 +22914,7 @@ async def read_customers(
         ).all()
         for block in block_rows:
             is_permanent = block.mode == RECOMMENDATION_BLOCK_PERMANENT
-            is_temporary_active = (
-                block.mode == RECOMMENDATION_BLOCK_TEMPORARY
-                and block.hidden_until is not None
-                and block.hidden_until >= today
-            )
-            if not (is_permanent or is_temporary_active):
+            if not is_permanent:
                 continue
             recommendation_blocks_by_customer_id[block.customer_id] = block
 
@@ -22687,8 +22928,6 @@ async def read_customers(
         item["recommendation_block_label"] = (
             "一直不推荐"
             if block and block.mode == RECOMMENDATION_BLOCK_PERMANENT
-            else f"近7天不推荐至 {item['recommendation_block_until']}"
-            if block and block.mode == RECOMMENDATION_BLOCK_TEMPORARY
             else ""
         )
 
@@ -22831,18 +23070,6 @@ async def toggle_customer_recommendation_block(
     if not customer or bool(getattr(customer, "is_deleted", False)):
         return RedirectResponse(
             url=_build_store_customers_url(store, search_query, sort_by, error="顾客不存在", duplicate_nickname=duplicate_filter),
-            status_code=303
-        )
-
-    link = session.exec(
-        select(CustomerStoreLink).where(
-            CustomerStoreLink.customer_id == customer_id,
-            CustomerStoreLink.store_name == store
-        )
-    ).first()
-    if not link:
-        return RedirectResponse(
-            url=_build_store_customers_url(store, search_query, sort_by, error="该顾客不在当前门店组局散客池中", duplicate_nickname=duplicate_filter),
             status_code=303
         )
 

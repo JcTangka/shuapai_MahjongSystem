@@ -2,7 +2,7 @@ from sqlmodel import func,SQLModel, Field, create_engine, Session, select
 from datetime import datetime, date, time, timedelta
 from typing import Optional,Dict, List, Tuple, Any
 import calendar
-from sqlalchemy import UniqueConstraint,text
+from sqlalchemy import UniqueConstraint, delete, text
 
 
 # === 数据库模型定义 ===
@@ -677,6 +677,58 @@ class RecommendationPreferenceSnapshot(SQLModel, table=True):
     play_count: int = Field(default=0, index=True)
     last_played_at: datetime = Field(index=True)
     snapshot_at: datetime = Field(default_factory=datetime.now, index=True)
+
+
+class RecommendationPoolSnapshot(SQLModel, table=True):
+    """智能推荐三维池快照；点击推荐时只按池键查询，不再扫描历史牌局。"""
+    __tablename__ = "recommendationpoolsnapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "store_name",
+            "customer_id",
+            "play_label",
+            "smoke_type",
+            "time_bucket",
+            name="uq_recommendation_pool_member",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    customer_id: int = Field(foreign_key="customer.id", index=True)
+    wechat_id: str = Field(index=True)
+    store_name: str = Field(index=True)
+    play_label: str = Field(index=True)
+    smoke_type: str = Field(index=True)  # smoking / non_smoking
+    time_bucket: int = Field(index=True)  # 0早场/1下午场/2晚场/3凌晨场
+
+    visit_count_30d: int = Field(default=0, index=True)
+    play_count: int = Field(default=0)
+    huansan_count: int = Field(default=0)
+    dingque_count: int = Field(default=0)
+    smoking_count: int = Field(default=0)
+    non_smoking_count: int = Field(default=0)
+    early_count: int = Field(default=0)
+    afternoon_count: int = Field(default=0)
+    evening_count: int = Field(default=0)
+    overnight_count: int = Field(default=0)
+
+    last_visit_at: datetime = Field(index=True)
+    window_start: date = Field(index=True)
+    window_end: date = Field(index=True)
+    snapshot_at: datetime = Field(default_factory=datetime.now, index=True)
+
+
+class RecommendationPoolSnapshotState(SQLModel, table=True):
+    """记录最近一次推荐池生成状态，即使结果为零行也能识别为有效快照。"""
+    __tablename__ = "recommendationpoolsnapshotstate"
+
+    id: int = Field(default=1, primary_key=True)
+    window_start: date = Field(index=True)
+    window_end: date = Field(index=True)
+    snapshot_at: datetime = Field(default_factory=datetime.now, index=True)
+    scanned_game_count: int = Field(default=0)
+    active_customer_count: int = Field(default=0)
+    pool_snapshot_count: int = Field(default=0)
 
 # === 人情维护表 ===
 class MaintenanceRecord(SQLModel, table=True):
@@ -2073,6 +2125,8 @@ def _migration_game_played_at(game: GameRecord) -> datetime:
         try:
             if len(start_time) >= 11 and "-" in start_time and ":" in start_time:
                 return datetime.strptime(f"{record_date.year}-{start_time}", "%Y-%m-%d %H:%M")
+            parsed_time = datetime.strptime(start_time[:5], "%H:%M").time()
+            return datetime.combine(record_date, parsed_time)
         except Exception:
             pass
 
@@ -2104,7 +2158,8 @@ MIGRATION_RECOMMENDATION_TIME_BUCKETS = (
 RECOMMENDATION_DATE_TYPE_WORKDAY = "workday"
 RECOMMENDATION_DATE_TYPE_WEEKEND = "weekend"
 RECOMMENDATION_DATE_TYPE_HOLIDAY = "holiday"
-RECOMMENDATION_SNAPSHOT_WINDOW_DAYS = 14
+RECOMMENDATION_SNAPSHOT_WINDOW_DAYS = 30
+RECOMMENDATION_RECENT_ACTIVE_DAYS = 7
 
 def _migration_recommendation_time_bucket(played_at: datetime) -> int:
     hour = int((played_at or datetime.min).hour)
@@ -2112,6 +2167,18 @@ def _migration_recommendation_time_bucket(played_at: datetime) -> int:
         if start_hour <= hour < end_hour:
             return idx
     return 0
+
+
+def _recommendation_pool_time_bucket(played_at: datetime) -> int:
+    """新版四段时间轴：早场、下午场、晚场、凌晨场。"""
+    hour = int((played_at or datetime.min).hour)
+    if 1 <= hour < 12:
+        return 0
+    if 12 <= hour < 17:
+        return 1
+    if 17 <= hour < 22:
+        return 2
+    return 3
 
 def _migration_recommendation_date_type(played_date: date, holiday_dates: set[date]) -> str:
     if played_date in holiday_dates:
@@ -2323,20 +2390,196 @@ def rebuild_recommendation_snapshots(
         "snapshot_at": snapshot_at,
     }
 
+
+def rebuild_recommendation_pool_snapshot(
+        session: Session,
+        *,
+        as_of: Optional[datetime] = None,
+        window_days: int = RECOMMENDATION_SNAPSHOT_WINDOW_DAYS,
+) -> Dict[str, Any]:
+    """按本门店近 30 天记录生成玩法分数、烟局、时间段三维推荐池。"""
+    snapshot_at = as_of or datetime.now()
+    window_end = snapshot_at.date()
+    clean_window_days = max(1, int(window_days or RECOMMENDATION_SNAPSHOT_WINDOW_DAYS))
+    window_start = window_end - timedelta(days=clean_window_days - 1)
+    recent_start = window_end - timedelta(days=RECOMMENDATION_RECENT_ACTIVE_DAYS - 1)
+
+    smoke_by_game_id = {
+        row.game_id: row.smoke_type
+        for row in session.exec(select(GameSmokeSetting)).all()
+        if row.game_id is not None and row.smoke_type in {"smoking", "non_smoking"}
+    }
+    customers_by_wechat = {
+        _normalize_migration_text(customer.wechat_id): customer
+        for customer in session.exec(select(Customer)).all()
+        if (
+            customer.id is not None
+            and not bool(getattr(customer, "is_deleted", False))
+            and _normalize_migration_text(customer.wechat_id)
+        )
+    }
+
+    stats: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    games = session.exec(
+        select(GameRecord).where(
+            GameRecord.status == "formed",
+            GameRecord.record_date >= window_start,
+            GameRecord.record_date <= window_end,
+        )
+    ).all()
+    scanned_game_count = 0
+    for game in games:
+        played_at = _migration_game_played_at(game)
+        if played_at < datetime.combine(window_start, time.min) or played_at > snapshot_at:
+            continue
+        store_name = _normalize_migration_text(game.store_name)
+        if not store_name:
+            continue
+
+        scanned_game_count += 1
+        play_label = _migration_game_play_label(game)
+        game_type = _normalize_migration_text(game.game_type)
+        is_preference_game = _normalize_migration_text(game.record_source) != "self_arrival"
+        smoke_type = smoke_by_game_id.get(game.id or 0, "smoking")
+        if smoke_type not in {"smoking", "non_smoking"}:
+            smoke_type = "smoking"
+        time_bucket = _recommendation_pool_time_bucket(played_at)
+
+        for wechat_id in _migration_game_player_wechats(game):
+            customer = customers_by_wechat.get(wechat_id)
+            if not customer:
+                continue
+            key = (store_name, wechat_id)
+            item = stats.setdefault(key, {
+                "customer_id": customer.id,
+                "visit_count": 0,
+                "last_visit_at": played_at,
+                "play_counts": {},
+                "play_types": {},
+                "smoke_counts": {"smoking": 0, "non_smoking": 0},
+                "time_counts": {0: 0, 1: 0, 2: 0, 3: 0},
+                "huansan_count": 0,
+                "dingque_count": 0,
+            })
+            item["visit_count"] += 1
+            if played_at > item["last_visit_at"]:
+                item["last_visit_at"] = played_at
+            # 自主到店属于真实到店，可更新30天次数、最近到店和7天活跃状态；
+            # 但其记录通常没有可靠的玩法、烟局信息，不用于三个偏好池的归属计算。
+            if not is_preference_game:
+                continue
+            item["smoke_counts"][smoke_type] += 1
+            item["time_counts"][time_bucket] += 1
+            if play_label:
+                item["play_counts"][play_label] = item["play_counts"].get(play_label, 0) + 1
+                item["play_types"][play_label] = game_type
+                if game_type == "换三":
+                    item["huansan_count"] += 1
+                elif game_type == "定缺":
+                    item["dingque_count"] += 1
+
+    # 删除和写入均在调度器同一事务内完成；失败会回滚，查询方仍看到上一版快照。
+    session.exec(delete(RecommendationPoolSnapshot))
+    session.exec(delete(RecommendationPoolSnapshotState))
+    session.flush()
+
+    pool_rows = 0
+    active_customer_count = 0
+    for (store_name, wechat_id), item in stats.items():
+        last_visit_at = item["last_visit_at"]
+        if last_visit_at.date() < recent_start:
+            continue
+
+        allowed_play_labels = []
+        for play_label, play_count in item["play_counts"].items():
+            game_type = item["play_types"].get(play_label, "")
+            if game_type == "换三" and item["huansan_count"] < item["dingque_count"]:
+                continue
+            if game_type == "定缺" and item["dingque_count"] < item["huansan_count"]:
+                continue
+            if play_count > 0:
+                allowed_play_labels.append(play_label)
+        if not allowed_play_labels:
+            continue
+
+        max_smoke_count = max(item["smoke_counts"].values())
+        smoke_pools = [
+            smoke_type
+            for smoke_type, count in item["smoke_counts"].items()
+            if count == max_smoke_count and count > 0
+        ]
+        max_time_count = max(item["time_counts"].values())
+        time_pools = [
+            bucket
+            for bucket, count in item["time_counts"].items()
+            if count == max_time_count and count > 0
+        ]
+        if not smoke_pools or not time_pools:
+            continue
+
+        active_customer_count += 1
+        for play_label in allowed_play_labels:
+            for smoke_type in smoke_pools:
+                for time_bucket in time_pools:
+                    session.add(RecommendationPoolSnapshot(
+                        customer_id=item["customer_id"],
+                        wechat_id=wechat_id,
+                        store_name=store_name,
+                        play_label=play_label,
+                        smoke_type=smoke_type,
+                        time_bucket=time_bucket,
+                        visit_count_30d=item["visit_count"],
+                        play_count=item["play_counts"][play_label],
+                        huansan_count=item["huansan_count"],
+                        dingque_count=item["dingque_count"],
+                        smoking_count=item["smoke_counts"]["smoking"],
+                        non_smoking_count=item["smoke_counts"]["non_smoking"],
+                        early_count=item["time_counts"][0],
+                        afternoon_count=item["time_counts"][1],
+                        evening_count=item["time_counts"][2],
+                        overnight_count=item["time_counts"][3],
+                        last_visit_at=last_visit_at,
+                        window_start=window_start,
+                        window_end=window_end,
+                        snapshot_at=snapshot_at,
+                    ))
+                    pool_rows += 1
+
+    session.add(RecommendationPoolSnapshotState(
+        id=1,
+        window_start=window_start,
+        window_end=window_end,
+        snapshot_at=snapshot_at,
+        scanned_game_count=scanned_game_count,
+        active_customer_count=active_customer_count,
+        pool_snapshot_count=pool_rows,
+    ))
+    session.flush()
+    return {
+        "start_date": window_start,
+        "window_end": window_end,
+        "full_rebuild": True,
+        "scanned_game_count": scanned_game_count,
+        "daily_snapshot_count": 0,
+        "preference_snapshot_count": pool_rows,
+        "pool_snapshot_count": pool_rows,
+        "active_customer_count": active_customer_count,
+        "snapshot_at": snapshot_at,
+    }
+
+
 def refresh_recommendation_snapshots(
         session: Session,
         *,
         window_days: int = RECOMMENDATION_SNAPSHOT_WINDOW_DAYS,
         force_full: bool = False,
+        as_of: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    daily_count = session.exec(select(func.count(RecommendationDailySnapshot.id))).first() or 0
-    preference_count = session.exec(select(func.count(RecommendationPreferenceSnapshot.id))).first() or 0
-    full_rebuild = force_full or daily_count <= 0 or preference_count <= 0
-    start_date = None if full_rebuild else date.today() - timedelta(days=max(1, int(window_days or 1)) - 1)
-    return rebuild_recommendation_snapshots(
+    # 保留旧函数名供凌晨调度器和启动补偿调用；新版始终严格重建滚动窗口。
+    return rebuild_recommendation_pool_snapshot(
         session,
-        start_date=start_date,
-        full_rebuild=full_rebuild,
+        as_of=as_of,
+        window_days=window_days,
     )
 
 def migrate_customer_play_type_stat_table():
@@ -2423,13 +2666,13 @@ def migrate_recommendation_prerequisite_tables():
     智能推荐前置表：
     1. gamesmokesetting：牌局烟局设置，不改 GameRecord 大表；
     2. customerrecommendationblock：组局散客推荐屏蔽；
-    3. customerrecommendationtimebucketstat：玩法/烟局/5 段时间轴统计。
-    4. recommendationdailysnapshot / recommendationpreferencesnapshot：智能推荐评分快照。
+    3. 旧统计表继续保留，兼容已有数据库。
+    4. recommendationpoolsnapshot：近 30 天三维推荐池快照。
     """
     time_bucket_version_key = "recommendation_time_bucket_version"
     time_bucket_version = "5_bucket_v1"
     snapshot_version_key = "recommendation_snapshot_version"
-    snapshot_version = "preference_snapshot_v1"
+    snapshot_version = "recommendation_pool_v3"
     needs_time_bucket_rebuild = True
     needs_snapshot_full_rebuild = True
 
@@ -2475,6 +2718,16 @@ def migrate_recommendation_prerequisite_tables():
             "CREATE INDEX IF NOT EXISTS ix_recommendationpreferencesnapshot_time_bucket ON recommendationpreferencesnapshot (time_bucket)",
             "CREATE INDEX IF NOT EXISTS ix_recommendationpreferencesnapshot_play_count ON recommendationpreferencesnapshot (play_count)",
             "CREATE INDEX IF NOT EXISTS ix_recommendationpreferencesnapshot_last_played_at ON recommendationpreferencesnapshot (last_played_at)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpoolsnapshot_customer_id ON recommendationpoolsnapshot (customer_id)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpoolsnapshot_wechat_id ON recommendationpoolsnapshot (wechat_id)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpoolsnapshot_store_name ON recommendationpoolsnapshot (store_name)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpoolsnapshot_play_label ON recommendationpoolsnapshot (play_label)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpoolsnapshot_smoke_type ON recommendationpoolsnapshot (smoke_type)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpoolsnapshot_time_bucket ON recommendationpoolsnapshot (time_bucket)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpoolsnapshot_visit_count_30d ON recommendationpoolsnapshot (visit_count_30d)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpoolsnapshot_last_visit_at ON recommendationpoolsnapshot (last_visit_at)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendationpoolsnapshot_snapshot_at ON recommendationpoolsnapshot (snapshot_at)",
+            "CREATE INDEX IF NOT EXISTS ix_recommendation_pool_lookup ON recommendationpoolsnapshot (store_name, play_label, smoke_type, time_bucket, visit_count_30d)",
         ]:
             conn.execute(text(sql))
 
@@ -2482,7 +2735,8 @@ def migrate_recommendation_prerequisite_tables():
             text("SELECT value FROM systemmigrationstate WHERE key_name = :key_name"),
             {"key_name": time_bucket_version_key}
         ).fetchone()
-        needs_time_bucket_rebuild = not version_row or version_row[0] != time_bucket_version
+        # 旧5段时间轴表已退出智能推荐查询链路，不再为它执行昂贵的全量重建。
+        needs_time_bucket_rebuild = False
         snapshot_version_row = conn.execute(
             text("SELECT value FROM systemmigrationstate WHERE key_name = :key_name"),
             {"key_name": snapshot_version_key}
@@ -2537,9 +2791,9 @@ def migrate_recommendation_prerequisite_tables():
         print(f"已按新版智能推荐时间轴重建统计 {rebuilt_count} 条")
     if snapshot_result:
         print(
-            "已构建智能推荐偏好快照 "
-            f"{snapshot_result['daily_snapshot_count']} 条日快照 / "
-            f"{snapshot_result['preference_snapshot_count']} 条汇总快照"
+            "已构建智能推荐三维池快照 "
+            f"{snapshot_result['pool_snapshot_count']} 条池成员 / "
+            f"{snapshot_result['active_customer_count']} 位近7天活跃顾客"
         )
 
 def migrate_brand_blacklist_entry_table():

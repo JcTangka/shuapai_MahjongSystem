@@ -347,18 +347,6 @@
                                 查看详情
                             </button>
                             <button type="button"
-                                    class="btn btn-sm {% if cust.recommendation_block_mode == 'temporary' %}btn-warning text-dark{% else %}btn-outline-warning{% endif %}"
-                                    data-customer-id="{{ cust.id }}"
-                                    data-store="{{ current_store }}"
-                                    data-mode="temporary"
-                                    data-search-query="{{ search_query }}"
-                                    data-sort-by="{{ sort_by }}"
-                                    data-duplicate-nickname="{{ '1' if duplicate_nickname else '' }}"
-                                    {% if not cust.current_store_link_id %}disabled{% endif %}
-                                    onclick="toggleRecommendationBlockFromButton(this)">
-                                {% if cust.recommendation_block_mode == 'temporary' %}取消近7天{% else %}近7天不推荐{% endif %}
-                            </button>
-                            <button type="button"
                                     class="btn btn-sm {% if cust.recommendation_block_mode == 'permanent' %}btn-secondary{% else %}btn-outline-secondary{% endif %}"
                                     data-customer-id="{{ cust.id }}"
                                     data-store="{{ current_store }}"
@@ -2094,7 +2082,7 @@
         [
             ['customer_id', button.dataset.customerId || ''],
             ['store', button.dataset.store || '{{ current_store }}'],
-            ['mode', button.dataset.mode || 'temporary'],
+            ['mode', button.dataset.mode || 'permanent'],
             ['search_query', button.dataset.searchQuery || ''],
             ['sort_by', button.dataset.sortBy || 'default'],
             ['duplicate_nickname', button.dataset.duplicateNickname || ''],
