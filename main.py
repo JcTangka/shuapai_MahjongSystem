@@ -9758,32 +9758,48 @@ def _format_store_duty_customer_check_items(items: List[str], limit: int = 20) -
     return "\n".join(lines)
 
 
+def _store_duty_customer_check_window(clicked_at: datetime) -> Tuple[datetime, datetime]:
+    """
+    “我的接触顾客 / 我的待拉新”交接校验时间窗。
+
+    00:00 至 01:30 结束晚班时，向前覆盖前一日 16:00；其他时间仍从
+    当日 00:00 起算。结束时间使用点击校验的实际时刻，避免把尚未发生的
+    后续记录提前纳入校验。
+    """
+    if clicked_at.time() <= time(1, 30):
+        window_start = datetime.combine(clicked_at.date() - timedelta(days=1), time(16, 0))
+    else:
+        window_start = datetime.combine(clicked_at.date(), time.min)
+    return window_start, clicked_at + timedelta(microseconds=1)
+
+
 def _run_store_duty_contact_customer_self_check(
         session: Session,
         duty: EmployeeDutySession,
         clicked_at: datetime,
 ) -> dict:
-    """交接前检查当前店长、当前负责门店当日的接触顾客跟进。"""
+    """交接前按统一校验时段检查当前店长、当前负责门店的接触顾客跟进。"""
     store_names = _decode_duty_store_names(duty.store_names_json)
     employee_name = _normalize_text(duty.employee_name)
     result = {"blocking_messages": [], "warning_messages": []}
     if not store_names or not employee_name:
         return result
 
-    target_date = clicked_at.date()
+    window_start, window_end = _store_duty_customer_check_window(clicked_at)
     contacts = {}
     games = session.exec(
         select(GameRecord).where(
             GameRecord.record_source != FORMED_SOURCE_SELF_ARRIVAL,
             GameRecord.status.in_(["unformed", "formed"]),
-            GameRecord.record_date == target_date,
+            GameRecord.record_date >= window_start.date(),
+            GameRecord.record_date <= window_end.date(),
             GameRecord.store_name.in_(store_names),
             GameRecord.who_did == employee_name,
         )
     ).all()
     for game in games:
         reservation_dt = _game_reservation_dt(game)
-        if reservation_dt.date() != target_date:
+        if reservation_dt < window_start or reservation_dt >= window_end:
             continue
         for idx in range(1, 5):
             nickname = _normalize_text(getattr(game, f"player_{idx}", None))
@@ -9793,13 +9809,12 @@ def _run_store_duty_contact_customer_self_check(
             key = (_normalize_text(game.store_name), wechat_id)
             contacts.setdefault(key, nickname)
 
-    day_start, day_end = _day_start_end(target_date)
     snapshots = session.exec(
         select(CancelledGameContactSnapshot).where(
             CancelledGameContactSnapshot.employee_name == employee_name,
             CancelledGameContactSnapshot.store_name.in_(store_names),
-            CancelledGameContactSnapshot.reservation_time >= day_start,
-            CancelledGameContactSnapshot.reservation_time < day_end,
+            CancelledGameContactSnapshot.reservation_time >= window_start,
+            CancelledGameContactSnapshot.reservation_time < window_end,
         )
     ).all()
     for snapshot in snapshots:
@@ -9828,7 +9843,7 @@ def _run_store_duty_contact_customer_self_check(
 
     if incomplete_items:
         result["blocking_messages"].append(
-            "以下当日‘我的接触顾客’尚未勾选门店私域群聊邀请或填写备注，无法结束带店：\n"
+            "以下当前校验时段内的‘我的接触顾客’尚未勾选门店私域群聊邀请或填写备注，无法结束带店：\n"
             + _format_store_duty_customer_check_items(incomplete_items)
         )
     return result
@@ -9839,23 +9854,23 @@ def _run_store_duty_new_customer_pull_self_check(
         duty: EmployeeDutySession,
         clicked_at: datetime,
 ) -> dict:
-    """交接前检查当日待拉新及从此前同店班次延续的记录。"""
+    """交接前检查统一校验时段内的待拉新及从此前同店班次延续的记录。"""
     store_names = _decode_duty_store_names(duty.store_names_json)
     employee_name = _normalize_text(duty.employee_name)
     result = {"blocking_messages": [], "warning_messages": []}
     if not store_names or not employee_name:
         return result
 
-    day_start, day_end = _day_start_end(clicked_at.date())
-    duty_start = duty.started_at or day_start
+    window_start, window_end = _store_duty_customer_check_window(clicked_at)
+    duty_start = duty.started_at or window_start
     rows = session.exec(
         select(NewCustomerPullRecord).where(
             NewCustomerPullRecord.pull_employee == employee_name,
             NewCustomerPullRecord.store_name.in_(store_names),
             or_(
                 and_(
-                    NewCustomerPullRecord.order_start_time >= day_start,
-                    NewCustomerPullRecord.order_start_time < day_end,
+                    NewCustomerPullRecord.order_start_time >= window_start,
+                    NewCustomerPullRecord.order_start_time < window_end,
                 ),
                 NewCustomerPullRecord.created_at >= duty_start,
                 NewCustomerPullRecord.updated_at >= duty_start,
@@ -10007,12 +10022,12 @@ def _run_store_duty_self_checks(
     if result["blocking_messages"]:
         return result
 
-    # 自检项 3：当日“我的接触顾客”必须完成群聊邀请或备注。
+    # 自检项 3：当前校验时段内“我的接触顾客”必须完成群聊邀请或备注。
     contact_result = _run_store_duty_contact_customer_self_check(session, duty, clicked_at)
     result["blocking_messages"].extend(contact_result.get("blocking_messages") or [])
     result["warning_messages"].extend(contact_result.get("warning_messages") or [])
 
-    # 自检项 4：当日及同店延续的“我的待拉新”必须完成任一处理路径。
+    # 自检项 4：当前校验时段及同店延续的“我的待拉新”必须完成任一处理路径。
     pull_result = _run_store_duty_new_customer_pull_self_check(session, duty, clicked_at)
     result["blocking_messages"].extend(pull_result.get("blocking_messages") or [])
     result["warning_messages"].extend(pull_result.get("warning_messages") or [])
@@ -19389,21 +19404,7 @@ async def add_self_arrival_game(
     else:
         final_room_fee = 0.0
 
-    pricing_note_error = _room_price_mismatch_note_error(room_obj, final_room_fee, final_table_note)
-    if pricing_note_error:
-        return RedirectResponse(
-            url=_build_formed_redirect_url(
-                store=store_name,
-                source_filter=FORMED_SOURCE_SELF_ARRIVAL,
-                pay_status=pay_status,
-                date_filter=date_filter,
-                start_date=start_date,
-                end_date=end_date,
-                payment_method_filter=payment_method_filter,
-                error=pricing_note_error,
-            ),
-            status_code=303,
-        )
+    # 自主到店的包间费用与预设定价不一致时仅由前端提醒，不阻止保存。
     final_note_added = "是" if _normalize_text(note_added) == "是" else "否"
 
     new_serial = _get_monthly_serial_number(session, store_name, order_date)
@@ -19860,21 +19861,7 @@ async def update_self_arrival_game(
     else:
         final_room_fee = 0.0
 
-    pricing_note_error = _room_price_mismatch_note_error(room_obj, final_room_fee, final_table_note)
-    if pricing_note_error:
-        return RedirectResponse(
-            url=_build_formed_redirect_url(
-                store=store_name,
-                source_filter=FORMED_SOURCE_SELF_ARRIVAL,
-                pay_status=pay_status,
-                date_filter=date_filter,
-                start_date=start_date,
-                end_date=end_date,
-                payment_method_filter=payment_method_filter,
-                error=pricing_note_error,
-            ),
-            status_code=303,
-        )
+    # 自主到店的包间费用与预设定价不一致时仅由前端提醒，不阻止保存。
     final_note_added = "是" if _normalize_text(note_added) == "是" else "否"
 
     old_month_key = (game.record_date.year, game.record_date.month) if game.record_date else None

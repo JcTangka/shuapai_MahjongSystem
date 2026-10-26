@@ -2501,14 +2501,18 @@
         hint.classList.remove('d-none');
     }
 
-    function validateSelectedRoomPriceRemark(selectId, feeId, tableNoteId) {
+    function validateSelectedRoomPriceRemark(selectId, feeId, tableNoteId, warningOnly = false) {
         const presetPrice = selectedRoomPresetPrice(selectId);
         if (presetPrice === null) return true;
         const actualFee = Number(document.getElementById(feeId)?.value || 0);
         const tableNote = (document.getElementById(tableNoteId)?.value || '').trim();
         if (Number.isFinite(actualFee)
-            && Math.round(actualFee * 100) !== Math.round(presetPrice * 100)
-            && !tableNote) {
+            && Math.round(actualFee * 100) !== Math.round(presetPrice * 100)) {
+            if (warningOnly) {
+                alert(`提醒：实际填写费用（¥${actualFee.toFixed(2)}）与包间预设定价（¥${presetPrice.toFixed(2)}）不一致，本次仍可继续保存`);
+                return true;
+            }
+            if (tableNote) return true;
             alert(`实际填写费用（¥${actualFee.toFixed(2)}）与包间预设定价（¥${presetPrice.toFixed(2)}）不一致，请填写整桌备注后再保存`);
             return false;
         }
@@ -2717,7 +2721,8 @@
         if (!validateSelectedRoomPriceRemark(
             `self_arrival_${mode}_room_name`,
             `self_arrival_${mode}_room_fee`,
-            `self_arrival_${mode}_table_note`
+            `self_arrival_${mode}_table_note`,
+            true
         )) {
             return false;
         }

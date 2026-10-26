@@ -599,7 +599,7 @@
                                     <label class="form-label fw-bold">支付方式</label>
                                     <select class="form-select" name="payment_method" id="paymentMethodInput">
                                         <option value="">暂不指定</option>
-                                        <option value="代客收款">代客收款</option>
+                                        <option value="代客收款" selected>代客收款</option>
                                         <option value="代客验券">代客验券</option>
                                         <option value="用户小程序自定">用户小程序自定</option>
                                     </select>
@@ -1083,8 +1083,17 @@ ${blacklistButton}
             hint.classList.add('d-none');
             return;
         }
-        hint.textContent = `包间定价：¥${presetPrice.toFixed(2)}（仅供提示，请再次填写费用）`;
+        hint.textContent = `包间定价：¥${presetPrice.toFixed(2)}（已自动填入费用，可按实际情况调整）`;
         hint.classList.remove('d-none');
+    }
+
+    function handleRoomSelectionChange() {
+        const presetPrice = selectedRoomPresetPrice('roomNameInput');
+        const feeInput = document.getElementById('roomFeeInput');
+        if (presetPrice !== null && feeInput) {
+            feeInput.value = presetPrice.toFixed(2);
+        }
+        updateRoomPriceHint();
     }
 
     function validateRoomPriceRemark() {
@@ -1192,7 +1201,8 @@ ${blacklistButton}
 
         for (let i = 1; i <= 4; i++) {
             const name = (document.getElementById(`player_${i}`).value || '').trim();
-            const wechat = (document.getElementById(`player_${i}_wechat`).value || '').trim();
+            const wechatInput = document.getElementById(`player_${i}_wechat`);
+            const wechat = (wechatInput.value || '').trim();
             const note = (document.getElementById(`player_${i}_note`).value || '').trim();
 
             if ((name && !wechat) || (!name && wechat)) {
@@ -1517,7 +1527,7 @@ ${blacklistButton}
 
         const roomNameInput = document.getElementById('roomNameInput');
         if (roomNameInput) {
-            roomNameInput.addEventListener('change', updateRoomPriceHint);
+            roomNameInput.addEventListener('change', handleRoomSelectionChange);
             updateRoomPriceHint();
         }
 
