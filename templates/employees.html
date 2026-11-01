@@ -3601,7 +3601,7 @@
                     <i class="bi bi-person-lines-fill text-primary me-1"></i>员工本月订单量对比
                 </div>
                 <div class="small text-muted mt-1">
-                    仅展示本月订单量大于 0 的员工；销冠按私域组局单量 ÷ 实际上班日数评选；上班日优先取排班和已生效机动顶班，无此类记录时取本人已有带店日期，休息、公休及已生效请假不计入。红色竖线为个人提成关键节点：660、710、760、810、860……。
+                    仅展示本月订单量大于 0 的员工；销冠按私域组局单量 ÷ 有效上班日数评选；上班日优先取排班和已生效机动顶班，无此类记录时取本人已有带店日期，并且只有当天私域组局不少于 {{ whiteboard_data.min_private_orders_per_workday }} 单才计入分母；休息、公休及已生效请假不计入。红色竖线为个人提成关键节点：660、710、760、810、860……。
                 </div>
                 <div class="small text-muted mt-2 d-flex align-items-center gap-3 flex-wrap">
                     <span class="whiteboard-order-legend">
@@ -3613,7 +3613,7 @@
                 </div>
             </div>
             {% if whiteboard_data.sales_champion and whiteboard_data.sales_champion.average_order_count %}
-            <div class="whiteboard-champion" title="仅按私域组局计算：私域组局单量 ÷ 实际上班日数；休息、公休及已生效请假不计入分母。">
+            <div class="whiteboard-champion" title="仅按私域组局计算：私域组局单量 ÷ 有效上班日数；只有当天私域组局不少于 {{ whiteboard_data.min_private_orders_per_workday }} 单的上班日才计入分母。">
                 <i class="bi bi-trophy-fill"></i>
                 <div>
                     <div class="small fw-bold">当前销冠{% if whiteboard_data.sales_champion.is_tie %}（并列）{% endif %}</div>
@@ -3683,7 +3683,7 @@
                 <div class="col-md-2">
                     <div class="d-flex align-items-center justify-content-md-between gap-2 flex-wrap">
                         <div class="whiteboard-workday-average"
-                             title="{% if row.workday_count %}私域组局 {{ row.private_order_count }} 单 ÷ {{ row.workday_count }} 个上班日（{{ row.workday_source }}）{% else %}没有可计入分母的有效上班排班{% endif %}">
+                             title="{% if row.workday_count %}私域组局 {{ row.private_order_count }} 单 ÷ {{ row.workday_count }} 个有效上班日（{{ row.workday_source }}）；另有 {{ row.low_private_workday_count }} 天因当日私域组局少于 {{ whiteboard_data.min_private_orders_per_workday }} 单未计入{% else %}没有当日私域组局达到 {{ whiteboard_data.min_private_orders_per_workday }} 单的有效上班日{% endif %}">
                             <div class="whiteboard-workday-average-label">私域上班日日均</div>
                             <div class="whiteboard-workday-average-value">
                                 {% if row.private_daily_average is not none %}
@@ -3694,9 +3694,9 @@
                             </div>
                             <div class="whiteboard-workday-average-detail">
                                 {% if row.workday_count %}
-                                    {{ row.private_order_count }} 单 ÷ {{ row.workday_count }} 天
+                                    {{ row.private_order_count }} 单 ÷ {{ row.workday_count }} 天{% if row.low_private_workday_count %}｜不足 {{ whiteboard_data.min_private_orders_per_workday }} 单未计 {{ row.low_private_workday_count }} 天{% endif %}
                                 {% else %}
-                                    无有效上班班次
+                                    无达到 {{ whiteboard_data.min_private_orders_per_workday }} 单的有效上班日
                                 {% endif %}
                             </div>
                             {% if not row.is_sales_champion_eligible %}

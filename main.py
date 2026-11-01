@@ -111,6 +111,7 @@ HOURLY_SUBSIDY_RATE = 12.5
 HOURLY_SUBSIDY_MAX_HOURS = 18
 LOGISTICS_BASE_SALARY = 2300.0
 FOREMAN_BASE_SALARY = 4000.0
+WHITEBOARD_MIN_PRIVATE_ORDERS_PER_WORKDAY = 10
 
 EMPLOYEE_TYPE_OPTIONS = [
     ("regular", "普通"),
@@ -3503,6 +3504,26 @@ def _build_period_target_nodes(
     return nodes
 
 
+def _filter_employee_workdays_by_private_order_minimum(
+        candidate_dates_map: Dict[str, set[date]],
+        daily_private_order_count_map: Dict[Tuple[str, date], int],
+        minimum_order_count: int = WHITEBOARD_MIN_PRIVATE_ORDERS_PER_WORKDAY,
+) -> Tuple[Dict[str, set[date]], Dict[str, int]]:
+    qualified_dates_map = {}
+    excluded_count_map = {}
+    for employee_name, work_dates in candidate_dates_map.items():
+        qualified_dates = {
+            work_date
+            for work_date in work_dates
+            if daily_private_order_count_map.get(
+                (employee_name, work_date), 0
+            ) >= minimum_order_count
+        }
+        qualified_dates_map[employee_name] = qualified_dates
+        excluded_count_map[employee_name] = len(work_dates) - len(qualified_dates)
+    return qualified_dates_map, excluded_count_map
+
+
 def _build_employee_whiteboard_data(
         session: Session,
         year: int,
@@ -3552,6 +3573,7 @@ def _build_employee_whiteboard_data(
     store_order_count_map = {}
     employee_order_count_map = {}
     employee_private_order_count_map = {}
+    employee_daily_private_order_count_map = {}
     employee_self_arrival_order_count_map = {}
     employee_store_order_count_map = {}
 
@@ -3571,6 +3593,10 @@ def _build_employee_whiteboard_data(
             else:
                 employee_private_order_count_map[who_did] = (
                     employee_private_order_count_map.get(who_did, 0) + 1
+                )
+                daily_private_key = (who_did, g.record_date)
+                employee_daily_private_order_count_map[daily_private_key] = (
+                    employee_daily_private_order_count_map.get(daily_private_key, 0) + 1
                 )
             if store_name:
                 employee_store_key = (who_did, store_name)
@@ -3867,6 +3893,17 @@ def _build_employee_whiteboard_data(
                     duty_fallback_employee_names.add(employee_name)
                 current_date += timedelta(days=1)
 
+    # 候选上班日还必须满足当日私域组局订单数不少于阈值，才计入日日均分母。
+    employee_candidate_workday_count_map = {
+        employee_name: len(work_dates)
+        for employee_name, work_dates in employee_workday_dates_map.items()
+    }
+    employee_workday_dates_map, employee_low_private_workday_count_map = (
+        _filter_employee_workdays_by_private_order_minimum(
+            employee_workday_dates_map,
+            employee_daily_private_order_count_map,
+        )
+    )
     employee_workday_count_map = {
         employee_name: len(work_dates)
         for employee_name, work_dates in employee_workday_dates_map.items()
@@ -3896,6 +3933,8 @@ def _build_employee_whiteboard_data(
             "private_order_count": private_order_count,
             "self_arrival_order_count": employee_self_arrival_order_count_map.get(employee_name, 0),
             "workday_count": workday_count,
+            "candidate_workday_count": employee_candidate_workday_count_map.get(employee_name, 0),
+            "low_private_workday_count": employee_low_private_workday_count_map.get(employee_name, 0),
             "private_daily_average": private_daily_average,
             "employee_type": employee_type,
             "is_sales_champion_eligible": employee_type != "flexible",
@@ -4042,6 +4081,7 @@ def _build_employee_whiteboard_data(
         "commission_nodes": commission_node_rows,
         "employee_axis_max": employee_axis_max,
         "sales_champion": sales_champion,
+        "min_private_orders_per_workday": WHITEBOARD_MIN_PRIVATE_ORDERS_PER_WORKDAY,
 
         "attendance_rows": attendance_display_rows,
         "attendance_count": len(attendance_display_rows),
