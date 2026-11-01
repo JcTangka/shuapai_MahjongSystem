@@ -10174,6 +10174,8 @@ def _store_duty_customer_check_window(clicked_at: datetime) -> Tuple[datetime, d
 
 
 STORE_WECHAT_RESTRICTION_PENDING_REMARK = "因门店微信受限待补拉"
+# 旧库要求 expected_recovery_at 非空；新建手动事件写入哨兵值，但业务判断只看 closed_at。
+STORE_WECHAT_RESTRICTION_MANUAL_EXPECTED_RECOVERY = datetime(9999, 12, 31, 23, 59, 59)
 
 
 def _active_store_wechat_restriction_map(
@@ -10189,7 +10191,10 @@ def _active_store_wechat_restriction_map(
         select(StoreWechatRestrictionEvent).where(
             StoreWechatRestrictionEvent.store_name.in_(clean_store_names),
             StoreWechatRestrictionEvent.started_at <= current_time,
-            StoreWechatRestrictionEvent.expected_recovery_at > current_time,
+            or_(
+                StoreWechatRestrictionEvent.closed_at.is_(None),
+                StoreWechatRestrictionEvent.closed_at > current_time,
+            ),
         ).order_by(
             StoreWechatRestrictionEvent.started_at.desc(),
             StoreWechatRestrictionEvent.id.desc(),
@@ -10222,7 +10227,10 @@ def _store_wechat_restriction_pending_contacts(
         StoreWechatRestrictionEvent.started_at < range_end,
     ]
     if contact_start:
-        event_filters.append(StoreWechatRestrictionEvent.expected_recovery_at > contact_start)
+        event_filters.append(or_(
+            StoreWechatRestrictionEvent.closed_at.is_(None),
+            StoreWechatRestrictionEvent.closed_at > contact_start,
+        ))
     events = session.exec(
         select(StoreWechatRestrictionEvent).where(*event_filters).order_by(
             StoreWechatRestrictionEvent.started_at,
@@ -10233,7 +10241,7 @@ def _store_wechat_restriction_pending_contacts(
     intervals_by_store = {}
     for event in events:
         interval_start = max(event.started_at, contact_start) if contact_start else event.started_at
-        interval_end = min(event.expected_recovery_at, range_end)
+        interval_end = min(event.closed_at or range_end, range_end)
         if interval_start >= interval_end:
             continue
         intervals_by_store.setdefault(_normalize_text(event.store_name), []).append(
@@ -10254,10 +10262,23 @@ def _store_wechat_restriction_pending_contacts(
     )
 
     def matching_event(store_name: str, contact_at: datetime) -> Optional[StoreWechatRestrictionEvent]:
-        for interval_start, interval_end, event in intervals_by_store.get(store_name, []):
-            if interval_start <= contact_at < interval_end:
-                return event
-        return None
+        matching_events = [
+            event
+            for interval_start, interval_end, event in intervals_by_store.get(store_name, [])
+            if interval_start <= contact_at < interval_end
+        ]
+        if not matching_events:
+            return None
+
+        # 同一天关闭后重新开启时，事件都可能从当天 00:00 起算而产生重叠。
+        # 一个顾客只能归属一个事件；重叠时以最后创建（最新）的事件为准。
+        return max(
+            matching_events,
+            key=lambda event: (
+                event.created_at or event.started_at,
+                event.id or 0,
+            ),
+        )
 
     clean_employee_name = _normalize_text(employee_name)
     game_filters = [
@@ -23417,16 +23438,17 @@ async def read_customers(
             "contact_has_more": (list_offset + len(contact_customer_list)) < len(full_contact_customer_list),
             "active_store_wechat_restrictions": [
                 {
+                    "event_id": event.id,
                     "store_name": store_name,
                     "started_at_text": event.started_at.strftime("%Y-%m-%d %H:%M"),
-                    "expected_recovery_at_text": event.expected_recovery_at.strftime("%Y-%m-%d %H:%M"),
                 }
                 for store_name, event in sorted(active_restriction_map.items())
             ],
-            "store_wechat_restriction_default_start": contact_page_now.replace(
-                second=0,
-                microsecond=0,
-            ).strftime("%Y-%m-%dT%H:%M"),
+            "available_store_wechat_restriction_open_stores": [
+                store_name
+                for store_name in store_list
+                if store_name not in active_restriction_map
+            ],
             "list_offset": list_offset,
             "list_page_size": LIST_PAGE_SIZE,
         })
@@ -25015,9 +25037,7 @@ def _sync_contact_followup_to_store_link(
 
 @app.post("/contact-customers/store-wechat-restrictions/add")
 async def add_store_wechat_restriction(
-        store_name: str = Form(...),
-        started_at: str = Form(...),
-        expected_recovery_at: str = Form(...),
+        store_names: Optional[List[str]] = Form(None),
         store: str = Form(""),
         contact_date_filter: str = Form("today"),
         contact_start_date: str = Form(""),
@@ -25047,56 +25067,120 @@ async def add_store_wechat_restriction(
             status_code=303,
         )
 
-    clean_store_name = _normalize_text(store_name)
-    if clean_store_name not in set(get_active_store_name_list(session)):
-        return redirect_with(error="请选择有效的门店")
-
-    try:
-        restriction_start = datetime.fromisoformat(_normalize_text(started_at))
-        expected_recovery = datetime.fromisoformat(_normalize_text(expected_recovery_at))
-    except Exception:
-        return redirect_with(error="开始时间或预计恢复时间格式不正确")
+    valid_store_names = set(get_active_store_name_list(session))
+    clean_store_names = []
+    for value in store_names or []:
+        clean_value = _normalize_text(value)
+        if clean_value and clean_value not in clean_store_names:
+            clean_store_names.append(clean_value)
+    if not clean_store_names:
+        return redirect_with(error="请至少选择一个需要开启微信受限的门店")
+    invalid_store_names = [name for name in clean_store_names if name not in valid_store_names]
+    if invalid_store_names:
+        return redirect_with(error=f"以下门店无效或已停用：{'、'.join(invalid_store_names)}")
 
     now = datetime.now()
-    if restriction_start > now + timedelta(minutes=1):
-        return redirect_with(error="开始时间不能晚于当前时间，保存后应立即生效")
-    if expected_recovery <= now:
-        return redirect_with(error="预计恢复时间必须晚于当前时间")
-    if restriction_start >= expected_recovery:
-        return redirect_with(error="预计恢复时间必须晚于开始时间")
-
-    overlapping = session.exec(
-        select(StoreWechatRestrictionEvent).where(
-            StoreWechatRestrictionEvent.store_name == clean_store_name,
-            StoreWechatRestrictionEvent.started_at < expected_recovery,
-            StoreWechatRestrictionEvent.expected_recovery_at > restriction_start,
-        )
-    ).first()
-    if overlapping:
-        return redirect_with(
-            error=(
-                f"{clean_store_name}在所选时段已有微信受限事件："
-                f"{overlapping.started_at.strftime('%Y-%m-%d %H:%M')} 至 "
-                f"{overlapping.expected_recovery_at.strftime('%Y-%m-%d %H:%M')}"
-            )
-        )
-
-    session.add(StoreWechatRestrictionEvent(
-        store_name=clean_store_name,
-        started_at=restriction_start,
-        expected_recovery_at=expected_recovery,
-        created_by_user_id=user.id,
-        created_by_name=user.display_name,
-        created_at=now,
-        updated_at=now,
-    ))
-    session.commit()
-    return redirect_with(
-        success=(
-            f"已添加{clean_store_name}微信受限，"
-            f"预计 {expected_recovery.strftime('%Y-%m-%d %H:%M')} 自动恢复"
-        )
+    restriction_start = datetime.combine(now.date(), time.min)
+    active_store_names = set(
+        _active_store_wechat_restriction_map(session, clean_store_names, now)
     )
+    opened_store_names = [name for name in clean_store_names if name not in active_store_names]
+    if not opened_store_names:
+        return redirect_with(error="所选门店当前均已处于微信受限状态")
+
+    for store_name in opened_store_names:
+        session.add(StoreWechatRestrictionEvent(
+            store_name=store_name,
+            started_at=restriction_start,
+            expected_recovery_at=STORE_WECHAT_RESTRICTION_MANUAL_EXPECTED_RECOVERY,
+            created_by_user_id=user.id,
+            created_by_name=user.display_name,
+            created_at=now,
+            updated_at=now,
+        ))
+    session.commit()
+    skipped_text = (
+        f"；已跳过当前已受限门店：{'、'.join(sorted(active_store_names))}"
+        if active_store_names else ""
+    )
+    return redirect_with(success=f"已开启微信受限：{'、'.join(opened_store_names)}{skipped_text}")
+
+
+@app.post("/contact-customers/store-wechat-restrictions/close")
+async def close_store_wechat_restriction(
+        store_names: Optional[List[str]] = Form(None),
+        store: str = Form(""),
+        contact_date_filter: str = Form("today"),
+        contact_start_date: str = Form(""),
+        contact_end_date: str = Form(""),
+        contact_store_filter: str = Form("all"),
+        contact_employee: str = Form("all"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user),
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    redirect_employee = contact_employee if user.role == "admin" else _normalize_text(user.display_name)
+
+    def redirect_with(*, success: str = "", error: str = "") -> RedirectResponse:
+        return RedirectResponse(
+            url=_build_contact_customers_url(
+                store,
+                contact_date_filter,
+                contact_start_date,
+                contact_end_date,
+                contact_store_filter,
+                redirect_employee,
+                success=success,
+                error=error,
+            ),
+            status_code=303,
+        )
+
+    clean_store_names = []
+    for value in store_names or []:
+        clean_value = _normalize_text(value)
+        if clean_value and clean_value not in clean_store_names:
+            clean_store_names.append(clean_value)
+    if not clean_store_names:
+        return redirect_with(error="请至少选择一个需要关闭微信受限的门店")
+
+    now = datetime.now()
+    active_events = session.exec(
+        select(StoreWechatRestrictionEvent).where(
+            StoreWechatRestrictionEvent.store_name.in_(clean_store_names),
+            StoreWechatRestrictionEvent.started_at <= now,
+            StoreWechatRestrictionEvent.closed_at.is_(None),
+        ).order_by(
+            StoreWechatRestrictionEvent.store_name,
+            StoreWechatRestrictionEvent.started_at,
+            StoreWechatRestrictionEvent.id,
+        )
+    ).all()
+    if not active_events:
+        return redirect_with(error="所选门店当前没有可关闭的微信受限事件")
+
+    closed_store_names = []
+    for event in active_events:
+        event.closed_at = now
+        event.closed_by_user_id = user.id
+        event.closed_by_name = user.display_name
+        event.updated_at = now
+        session.add(event)
+        store_name = _normalize_text(event.store_name)
+        if store_name and store_name not in closed_store_names:
+            closed_store_names.append(store_name)
+    session.commit()
+
+    not_active_store_names = [
+        name for name in clean_store_names if name not in set(closed_store_names)
+    ]
+    skipped_text = (
+        f"；未找到进行中事件：{'、'.join(not_active_store_names)}"
+        if not_active_store_names else ""
+    )
+    return redirect_with(success=f"已关闭微信受限：{'、'.join(closed_store_names)}{skipped_text}")
 
 
 @app.post("/contact-customers/followup/save")

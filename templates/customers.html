@@ -900,12 +900,18 @@
                 </a>
             </div>
 
-            <div class="col-lg-3 col-md-6 ms-lg-auto text-lg-end">
+            <div class="col-lg-6 col-md-12 ms-lg-auto d-flex gap-2 justify-content-lg-end flex-wrap">
                 <button type="button"
                         class="btn btn-outline-danger rounded-pill px-4"
                         data-bs-toggle="modal"
                         data-bs-target="#addStoreWechatRestrictionModal">
                     <i class="bi bi-exclamation-octagon me-1"></i>添加门店微信受限
+                </button>
+                <button type="button"
+                        class="btn btn-outline-success rounded-pill px-4"
+                        data-bs-toggle="modal"
+                        data-bs-target="#closeStoreWechatRestrictionModal">
+                    <i class="bi bi-check-circle me-1"></i>关闭门店微信受限
                 </button>
             </div>
         </form>
@@ -915,7 +921,7 @@
             <div class="fw-bold mb-1">当前微信受限门店</div>
             {% for item in active_store_wechat_restrictions %}
             <div class="small">
-                {{ item.store_name }}：{{ item.started_at_text }} 至 {{ item.expected_recovery_at_text }}（到期自动关闭）
+                {{ item.store_name }}：{{ item.started_at_text }} 开始（等待店长手动关闭）
             </div>
             {% endfor %}
         </div>
@@ -940,39 +946,91 @@
                     <input type="hidden" name="contact_employee" value="{{ contact_employee or 'all' }}">
 
                     <div class="alert alert-warning small">
-                        保存后立即生效。受限期间产生且尚未拉群的接触顾客，会统一标记为“因门店微信受限待补拉”；到预计恢复时间后事件自动关闭。
+                        可同时选择多个门店，保存后立即生效，事件开始时间统一按点击保存当天的 00:00 计算。受限期间产生且尚未拉群的接触顾客，会统一标记为“因门店微信受限待补拉”；事件持续到店长手动关闭。
                     </div>
 
                     <div class="mb-3">
-                        <label class="form-label fw-bold">受限门店</label>
-                        <select class="form-select" name="store_name" required>
-                            {% for store_name in store_list %}
-                            <option value="{{ store_name }}" {% if store_name == current_store %}selected{% endif %}>{{ store_name }}</option>
+                        <label class="form-label fw-bold">选择需要开启受限的门店</label>
+                        <div class="row g-2">
+                            {% for store_name in available_store_wechat_restriction_open_stores %}
+                            <div class="col-sm-6">
+                                <div class="form-check border rounded p-2 ps-5 h-100">
+                                    <input class="form-check-input"
+                                           type="checkbox"
+                                           name="store_names"
+                                           value="{{ store_name }}"
+                                           id="openStoreWechatRestriction{{ loop.index }}"
+                                           {% if store_name == current_store %}checked{% endif %}>
+                                    <label class="form-check-label w-100" for="openStoreWechatRestriction{{ loop.index }}">
+                                        {{ store_name }}
+                                    </label>
+                                </div>
+                            </div>
+                            {% else %}
+                            <div class="col-12">
+                                <div class="alert alert-secondary mb-0">当前没有可开启的门店，所有启用门店均已处于微信受限状态。</div>
+                            </div>
                             {% endfor %}
-                        </select>
-                    </div>
-
-                    <div class="mb-3">
-                        <label class="form-label fw-bold">开始时间</label>
-                        <input type="datetime-local"
-                               class="form-control"
-                               name="started_at"
-                               value="{{ store_wechat_restriction_default_start or '' }}"
-                               required>
-                    </div>
-
-                    <div class="mb-3">
-                        <label class="form-label fw-bold">预计恢复时间</label>
-                        <input type="datetime-local"
-                               class="form-control"
-                               name="expected_recovery_at"
-                               min="{{ store_wechat_restriction_default_start or '' }}"
-                               required>
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
-                    <button type="submit" class="btn btn-danger">保存并立即生效</button>
+                    <button type="submit" class="btn btn-danger" {% if not available_store_wechat_restriction_open_stores %}disabled{% endif %}>保存并立即生效</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="closeStoreWechatRestrictionModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content border-0 shadow-lg">
+            <div class="modal-header bg-success text-white">
+                <h5 class="modal-title"><i class="bi bi-wechat me-2"></i>关闭门店微信受限</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form action="/contact-customers/store-wechat-restrictions/close" method="post">
+                <div class="modal-body">
+                    <input type="hidden" name="store" value="{{ current_store }}">
+                    <input type="hidden" name="contact_date_filter" value="{{ contact_date_filter or 'today' }}">
+                    <input type="hidden" name="contact_start_date" value="{{ contact_start_date or '' }}">
+                    <input type="hidden" name="contact_end_date" value="{{ contact_end_date or '' }}">
+                    <input type="hidden" name="contact_store_filter" value="{{ contact_store_filter or 'all' }}">
+                    <input type="hidden" name="contact_employee" value="{{ contact_employee or 'all' }}">
+
+                    <div class="alert alert-success small">
+                        可同时选择多个当前受限门店。保存后立即关闭事件；此前产生的待补拉顾客仍会保留，供值班人员继续集中处理。
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">选择需要关闭受限的门店</label>
+                        <div class="row g-2">
+                            {% for item in active_store_wechat_restrictions %}
+                            <div class="col-sm-6">
+                                <div class="form-check border rounded p-2 ps-5 h-100">
+                                    <input class="form-check-input"
+                                           type="checkbox"
+                                           name="store_names"
+                                           value="{{ item.store_name }}"
+                                           id="closeStoreWechatRestriction{{ loop.index }}">
+                                    <label class="form-check-label w-100" for="closeStoreWechatRestriction{{ loop.index }}">
+                                        {{ item.store_name }}
+                                        <span class="d-block small text-muted">{{ item.started_at_text }} 开始</span>
+                                    </label>
+                                </div>
+                            </div>
+                            {% else %}
+                            <div class="col-12">
+                                <div class="alert alert-secondary mb-0">当前没有进行中的门店微信受限事件。</div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-success" {% if not active_store_wechat_restrictions %}disabled{% endif %}>保存并立即关闭</button>
                 </div>
             </form>
         </div>

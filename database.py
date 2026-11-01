@@ -381,13 +381,17 @@ class ContactCustomerFollowup(SQLModel, table=True):
 
 
 class StoreWechatRestrictionEvent(SQLModel, table=True):
-    """门店微信整体受限事件；到预计恢复时间后按时间条件自动失效。"""
+    """门店微信整体受限事件；由店长手动开启和关闭。"""
     __tablename__ = "storewechatrestrictionevent"
 
     id: Optional[int] = Field(default=None, primary_key=True)
     store_name: str = Field(index=True)
     started_at: datetime = Field(index=True)
+    # 兼容旧库的非空字段；新事件不再使用该字段判断是否恢复。
     expected_recovery_at: datetime = Field(index=True)
+    closed_at: Optional[datetime] = Field(default=None, index=True)
+    closed_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    closed_by_name: Optional[str] = Field(default=None, index=True)
 
     created_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
     created_by_name: str = Field(index=True)
@@ -1965,7 +1969,7 @@ def migrate_contact_customer_followup_table():
 
 
 def migrate_store_wechat_restriction_event_table():
-    """创建门店微信整体受限事件表。"""
+    """创建门店微信整体受限事件表，并兼容迁移为手动关闭。"""
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS storewechatrestrictionevent (
@@ -1973,17 +1977,52 @@ def migrate_store_wechat_restriction_event_table():
                 store_name TEXT NOT NULL,
                 started_at DATETIME NOT NULL,
                 expected_recovery_at DATETIME NOT NULL,
+                closed_at DATETIME,
+                closed_by_user_id INTEGER,
+                closed_by_name TEXT,
                 created_by_user_id INTEGER,
                 created_by_name TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(created_by_user_id) REFERENCES user(id)
+                FOREIGN KEY(created_by_user_id) REFERENCES user(id),
+                FOREIGN KEY(closed_by_user_id) REFERENCES user(id)
             )
         """))
+        columns = conn.execute(text(
+            "PRAGMA table_info(storewechatrestrictionevent)"
+        )).fetchall()
+        column_names = {col[1] for col in columns}
+        closed_at_added = "closed_at" not in column_names
+        if closed_at_added:
+            conn.execute(text(
+                "ALTER TABLE storewechatrestrictionevent ADD COLUMN closed_at DATETIME"
+            ))
+        if "closed_by_user_id" not in column_names:
+            conn.execute(text(
+                "ALTER TABLE storewechatrestrictionevent ADD COLUMN closed_by_user_id INTEGER"
+            ))
+        if "closed_by_name" not in column_names:
+            conn.execute(text(
+                "ALTER TABLE storewechatrestrictionevent ADD COLUMN closed_by_name TEXT"
+            ))
+        if closed_at_added:
+            # 仅把迁移时已经超过预计恢复时间的历史事件标记为关闭；
+            # 尚未到期的旧事件转为手动关闭，避免部署时突然失效。
+            conn.execute(text("""
+                UPDATE storewechatrestrictionevent
+                SET closed_at = expected_recovery_at,
+                    closed_by_name = '系统（历史预计恢复时间）',
+                    updated_at = COALESCE(updated_at, expected_recovery_at)
+                WHERE closed_at IS NULL
+                  AND DATETIME(expected_recovery_at) <= CURRENT_TIMESTAMP
+            """))
         for col_name in [
             "store_name",
             "started_at",
             "expected_recovery_at",
+            "closed_at",
+            "closed_by_user_id",
+            "closed_by_name",
             "created_by_user_id",
             "created_by_name",
             "created_at",
