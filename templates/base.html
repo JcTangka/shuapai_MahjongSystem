@@ -419,6 +419,23 @@
 {% endif %}
 
 
+    <div class="modal fade" id="storeWechatPendingNoticeModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-danger text-white">
+                    <h5 class="modal-title"><i class="bi bi-wechat me-2"></i>门店微信待补拉提示</h5>
+                </div>
+                <div class="modal-body text-start py-4 fs-5 text-danger fw-bold"
+                     id="storeWechatPendingNoticeMsg"
+                     style="white-space: pre-line;"></div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-danger w-100" data-bs-dismiss="modal">我已知晓</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
     <div class="modal fade" id="globalErrorModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content">
@@ -484,6 +501,7 @@
             const dutyNoticeTitle = urlParams.get('duty_notice_title');
             const dutyNoticeAckValue = urlParams.get('duty_notice_ack_value');
             const dutySelfCheckClickedAt = urlParams.get('duty_self_check_clicked_at');
+            const storeWechatPendingNotice = urlParams.get('store_wechat_pending_notice');
 
             // 2. 如果有错误信息，就弹窗
             if (error) {
@@ -527,6 +545,18 @@
                 cleanUrl.searchParams.delete('duty_notice_title');
                 cleanUrl.searchParams.delete('duty_notice_ack_value');
                 cleanUrl.searchParams.delete('duty_self_check_clicked_at');
+                window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search);
+            }
+
+            if (storeWechatPendingNotice) {
+                document.getElementById('storeWechatPendingNoticeMsg').textContent = storeWechatPendingNotice;
+                var storeWechatPendingModal = new bootstrap.Modal(
+                    document.getElementById('storeWechatPendingNoticeModal')
+                );
+                storeWechatPendingModal.show();
+
+                const cleanUrl = new URL(window.location.href);
+                cleanUrl.searchParams.delete('store_wechat_pending_notice');
                 window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search);
             }
 

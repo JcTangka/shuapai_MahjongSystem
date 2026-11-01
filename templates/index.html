@@ -567,7 +567,7 @@
 
                             <div class="alert alert-warning mt-3 mb-0 py-2">
                                 <i class="bi bi-exclamation-triangle me-1"></i>
-                                规则：昵称和微信号必须成对填写；微信号为6到20位，以英文字母或下划线开头，仅可包含英文字母、数字、下划线和减号；允许同一用户重复填写，但同一微信号不能对应不同昵称。
+                                规则：昵称和微信号必须成对填写；微信号为6到20位，以英文字母、下划线或减号开头，仅可包含英文字母、数字、下划线和减号；允许同一用户重复填写，但同一微信号不能对应不同昵称。
                             </div>
                         </div>
                     </div>
@@ -1224,8 +1224,8 @@ ${blacklistButton}
             if (wechat) {
                 const unchangedLegacy = wechatInput.dataset.originalValue !== undefined
                     && wechat === wechatInput.dataset.originalValue;
-                if (!/^[A-Za-z_][A-Za-z0-9_-]{5,19}$/.test(wechat) && !unchangedLegacy) {
-                    const message = `参与人 ${i} 微信号格式不正确：必须为6到20位，以英文字母或下划线开头，且只能包含英文字母、数字、下划线和减号`;
+                if (!/^[A-Za-z_-][A-Za-z0-9_-]{5,19}$/.test(wechat) && !unchangedLegacy) {
+                    const message = `参与人 ${i} 微信号格式不正确：必须为6到20位，以英文字母、下划线或减号开头，且只能包含英文字母、数字、下划线和减号`;
                     markInvalidPair(i);
                     highlightIndices([i], message);
                     alert(message);

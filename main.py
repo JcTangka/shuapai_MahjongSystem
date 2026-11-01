@@ -36,7 +36,8 @@ from database import (GameRecord, GamePaymentItem, Store, Room, User,
                       ShiftSchedule, MobileHandoverRule, MaintenanceRecord, upsert_shift, get_month_shifts_map, get_month_date_range, normalize_shift_type,
                       get_manager_performance_stats, get_shift_performance_stats,
                       HandoverTodo, HandoverTodoCustomerLink, FormedGameHandoverLink,SelfArrivalRecord,
-                      PublicTrafficLead, ContactCustomerFollowup, CancelledGameContactSnapshot,
+                      PublicTrafficLead, ContactCustomerFollowup, StoreWechatRestrictionEvent,
+                      CancelledGameContactSnapshot,
                       SelfArrivalCustomer, NewCustomerPullRecord,
                       EmployeeDutySession, DailyStoreWorkItem,
                       CommonIssue, CommonIssueReasonSolution,
@@ -3755,23 +3756,120 @@ def _build_employee_whiteboard_data(
     for row in all_employee_store_rows:
         employee_store_rows_by_employee.setdefault(row["employee_name"], []).append(row)
 
-    # ===== 2. 员工订单量 =====
+    # ===== 2. 员工订单量 / 私域上班日日均 =====
     employee_rows = []
 
     # 当前月份应该展示的员工名：在职员工 + 本月仍展示的已停用员工
     visible_employee_names = set(_get_visible_employee_names_for_month(session, year, month))
-    # 销冠必须直接复用“员工本月订单量对比”的统计结果，避免按当天再次截断后出现单量不一致。
-    max_champion_order_count = max(employee_order_count_map.values() or [0])
-    champion_names = sorted([
-        employee_name
-        for employee_name, order_count in employee_order_count_map.items()
-        if order_count == max_champion_order_count and order_count > 0
-    ])
-    sales_champion = {
-        "names": champion_names,
-        "display_name": "、".join(champion_names) if champion_names else "",
-        "order_count": max_champion_order_count if champion_names else 0,
-        "is_tie": len(champion_names) > 1,
+
+    # 当前月只统计截至今天的排班；过去月份统计整月，未来月份没有已发生的上班日。
+    workday_cutoff = min(date.today(), month_end)
+    employee_workday_dates_map = {}
+    duty_fallback_employee_names = set()
+    if workday_cutoff >= month_start:
+        effective_leave_statuses = {
+            "approved",
+            "approved_with_flexible",
+            "replacement_accepted",
+            "force_leave_deducted",
+        }
+        effective_leave_dates = set()
+        leave_rows = session.exec(
+            select(EmployeeLeaveRequest).where(
+                EmployeeLeaveRequest.status.in_(list(effective_leave_statuses)),
+                _leave_request_overlaps_range_condition(month_start, workday_cutoff),
+            )
+        ).all()
+        for leave in leave_rows:
+            employee_name = _normalize_text(leave.employee_name_snapshot)
+            if not employee_name:
+                continue
+            for leave_date in _iter_leave_request_dates(leave):
+                if month_start <= leave_date <= workday_cutoff:
+                    effective_leave_dates.add((employee_name, leave_date))
+
+        working_shift_types = {
+            "early",
+            "mid",
+            "bigmid",
+            SHIFT_TYPE_NIGHT_1,
+            SHIFT_TYPE_NIGHT_2,
+            SHIFT_TYPE_FLEXIBLE,
+        }
+        shift_rows = session.exec(
+            select(ShiftSchedule).where(
+                ShiftSchedule.work_date >= month_start,
+                ShiftSchedule.work_date <= workday_cutoff,
+            )
+        ).all()
+        for shift in shift_rows:
+            employee_name = _normalize_text(shift.operator_name)
+            shift_type = normalize_shift_type(shift.shift_type or "off")
+            shift_key = (employee_name, shift.work_date)
+            if (
+                employee_name
+                and shift_type in working_shift_types
+                and shift_key not in effective_leave_dates
+            ):
+                employee_workday_dates_map.setdefault(employee_name, set()).add(shift.work_date)
+
+        # 机动顶班日期以已生效请假中的实际顶班人快照为准，并与排班日期去重。
+        for leave in leave_rows:
+            if leave.status != "approved_with_flexible":
+                continue
+            for work_date in _iter_leave_request_dates(leave):
+                if work_date < month_start or work_date > workday_cutoff:
+                    continue
+                replacement = _flexible_replacement_entry_for_date(leave, work_date)
+                replacement_name = _normalize_text((replacement or {}).get("employee_name"))
+                replacement_shift_type = normalize_shift_type(
+                    str((replacement or {}).get("shift_type") or "off")
+                )
+                if (
+                    replacement_name
+                    and replacement_shift_type in working_shift_types
+                    and (replacement_name, work_date) not in effective_leave_dates
+                ):
+                    employee_workday_dates_map.setdefault(replacement_name, set()).add(work_date)
+
+        # 没有排班/顶班记录的员工，以本人已存在的带店日期作为上班日兜底。
+        duty_range_start = datetime.combine(month_start, time.min)
+        duty_range_end = datetime.combine(workday_cutoff, time.max)
+        duty_fallback_candidate_names = {
+            employee_name
+            for employee_name in employee_order_count_map
+            if not employee_workday_dates_map.get(employee_name)
+        }
+        duty_rows = session.exec(
+            select(EmployeeDutySession).where(
+                EmployeeDutySession.action_type == DUTY_ACTION_STORE,
+                EmployeeDutySession.started_at <= duty_range_end,
+                or_(
+                    EmployeeDutySession.ended_at.is_(None),
+                    EmployeeDutySession.ended_at >= duty_range_start,
+                ),
+            )
+        ).all()
+        for duty in duty_rows:
+            employee_name = _normalize_text(duty.employee_name)
+            if (
+                not employee_name
+                or employee_name not in duty_fallback_candidate_names
+                or not duty.started_at
+            ):
+                continue
+            duty_start = max(duty.started_at.date(), month_start)
+            duty_end = min((duty.ended_at or duty_range_end).date(), workday_cutoff)
+            current_date = duty_start
+            while current_date <= duty_end:
+                if (employee_name, current_date) not in effective_leave_dates:
+                    employee_workday_dates_map.setdefault(employee_name, set()).add(current_date)
+                    duty_fallback_employee_names.add(employee_name)
+                current_date += timedelta(days=1)
+
+    employee_workday_count_map = {
+        employee_name: len(work_dates)
+        for employee_name, work_dates in employee_workday_dates_map.items()
     }
 
     # who_did 里可能存在历史名字，所以这里以实际有订单的人为准，0 单不展示
@@ -3780,17 +3878,71 @@ def _build_employee_whiteboard_data(
             continue
 
         is_visible_employee = employee_name in visible_employee_names
+        employee_user = user_by_display_name.get(employee_name)
+        employee_type = (
+            _employee_salary_type_for_month(session, employee_user, year, month)
+            if employee_user else ""
+        )
+        private_order_count = employee_private_order_count_map.get(employee_name, 0)
+        workday_count = employee_workday_count_map.get(employee_name, 0)
+        private_daily_average = (
+            round(private_order_count / workday_count, 2)
+            if workday_count > 0 else None
+        )
 
         employee_rows.append({
             "employee_name": employee_name,
             "order_count": order_count,
-            "private_order_count": employee_private_order_count_map.get(employee_name, 0),
+            "private_order_count": private_order_count,
             "self_arrival_order_count": employee_self_arrival_order_count_map.get(employee_name, 0),
+            "workday_count": workday_count,
+            "private_daily_average": private_daily_average,
+            "employee_type": employee_type,
+            "is_sales_champion_eligible": employee_type != "flexible",
+            "workday_source": (
+                "带店记录"
+                if employee_name in duty_fallback_employee_names
+                else "排班/机动顶班"
+            ),
             "is_visible_employee": is_visible_employee,
             "store_rows": employee_store_rows_by_employee.get(employee_name, []),
             "store_row_count": len(employee_store_rows_by_employee.get(employee_name, [])),
             "active_duty_store_names": sorted(active_duty_store_names_by_employee.get(employee_name, set())),
         })
+
+    # 销冠按“私域组局单量 / 实际上班日数”评选；无有效上班排班者不参与排名。
+    champion_candidates = [
+        row for row in employee_rows
+        if row["workday_count"] > 0 and row["private_order_count"] > 0
+        if row["is_sales_champion_eligible"]
+    ]
+    champion_reference = max(
+        champion_candidates,
+        key=lambda row: row["private_order_count"] / row["workday_count"],
+        default=None,
+    )
+    if champion_reference:
+        champion_names = sorted([
+            row["employee_name"]
+            for row in champion_candidates
+            if (
+                row["private_order_count"] * champion_reference["workday_count"]
+                == champion_reference["private_order_count"] * row["workday_count"]
+            )
+        ])
+        champion_average = round(
+            champion_reference["private_order_count"] / champion_reference["workday_count"],
+            2,
+        )
+    else:
+        champion_names = []
+        champion_average = 0.0
+    sales_champion = {
+        "names": champion_names,
+        "display_name": "、".join(champion_names) if champion_names else "",
+        "average_order_count": champion_average,
+        "is_tie": len(champion_names) > 1,
+    }
 
     employee_rows.sort(key=lambda x: x["order_count"], reverse=True)
 
@@ -5029,6 +5181,83 @@ MOBILE_HANDOVER_RULE_SHIFT_TYPES = {
     "off", SHIFT_TYPE_PUBLIC_REST, "early", "mid", "bigmid",
     SHIFT_TYPE_NIGHT_1, SHIFT_TYPE_NIGHT_2,
 }
+MOBILE_HANDOVER_TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
+def _normalize_mobile_handover_time(value: object) -> str:
+    clean_value = _normalize_text(str(value or ""))
+    return clean_value if MOBILE_HANDOVER_TIME_PATTERN.fullmatch(clean_value) else ""
+
+
+def _mobile_handover_time_minutes(value: str) -> int:
+    hour_text, minute_text = value.split(":", 1)
+    return int(hour_text) * 60 + int(minute_text)
+
+
+def _mobile_handover_assignment_intervals(row: dict) -> List[Tuple[int, int]]:
+    start_time = _normalize_mobile_handover_time(row.get("start_time"))
+    end_time = _normalize_mobile_handover_time(row.get("end_time"))
+    if not start_time and not end_time:
+        return [(0, 24 * 60)]
+    if not start_time or not end_time or start_time == end_time:
+        return []
+    start_minutes = _mobile_handover_time_minutes(start_time)
+    end_minutes = _mobile_handover_time_minutes(end_time)
+    if start_minutes < end_minutes:
+        return [(start_minutes, end_minutes)]
+    return [(start_minutes, 24 * 60), (0, end_minutes)]
+
+
+def _mobile_handover_assignment_time_label(row: dict) -> str:
+    start_time = _normalize_mobile_handover_time(row.get("start_time"))
+    end_time = _normalize_mobile_handover_time(row.get("end_time"))
+    if not start_time and not end_time:
+        return "整个班次"
+    if start_time and end_time:
+        suffix = "（跨午夜）" if start_time > end_time else ""
+        return f"{start_time}-{end_time}{suffix}"
+    return "无效时段"
+
+
+def _validate_mobile_handover_assignments(
+        rows: object,
+        branch_label: str,
+) -> str:
+    if not isinstance(rows, list):
+        return ""
+    rows_by_shift: Dict[str, List[Tuple[int, dict]]] = {}
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        shift_type = normalize_shift_type(_normalize_text(str(row.get("shift_type") or "")))
+        if shift_type not in MOBILE_HANDOVER_RULE_SHIFT_TYPES:
+            return f"{branch_label}第 {index} 行班次无效"
+
+        raw_start = _normalize_text(str(row.get("start_time") or ""))
+        raw_end = _normalize_text(str(row.get("end_time") or ""))
+        if bool(raw_start) != bool(raw_end):
+            return f"{branch_label}第 {index} 行必须同时填写开始时间和结束时间"
+        if raw_start or raw_end:
+            start_time = _normalize_mobile_handover_time(raw_start)
+            end_time = _normalize_mobile_handover_time(raw_end)
+            if not start_time or not end_time:
+                return f"{branch_label}第 {index} 行时间格式不正确"
+            if start_time == end_time:
+                return f"{branch_label}第 {index} 行开始时间和结束时间不能相同"
+        rows_by_shift.setdefault(shift_type, []).append((index, row))
+
+    for shift_type, shift_rows in rows_by_shift.items():
+        seen_intervals: List[Tuple[int, int, int]] = []
+        for index, row in shift_rows:
+            for interval_start, interval_end in _mobile_handover_assignment_intervals(row):
+                for seen_start, seen_end, seen_index in seen_intervals:
+                    if interval_start < seen_end and seen_start < interval_end:
+                        shift_label = SHIFT_LABEL_MAP.get(shift_type, shift_type)
+                        return (
+                            f"{branch_label}的{shift_label}第 {seen_index} 行与第 {index} 行时间段重叠"
+                        )
+                seen_intervals.append((interval_start, interval_end, index))
+    return ""
 
 
 def _decode_mobile_handover_assignments(raw_json: Optional[str]) -> List[dict]:
@@ -5046,12 +5275,27 @@ def _decode_mobile_handover_assignments(raw_json: Optional[str]) -> List[dict]:
         shift_type = normalize_shift_type(_normalize_text(str(row.get("shift_type") or "")))
         if shift_type not in MOBILE_HANDOVER_RULE_SHIFT_TYPES:
             continue
+        raw_start = _normalize_text(str(row.get("start_time") or ""))
+        raw_end = _normalize_text(str(row.get("end_time") or ""))
+        if not raw_start and not raw_end:
+            start_time = ""
+            end_time = ""
+        else:
+            start_time = _normalize_mobile_handover_time(raw_start)
+            end_time = _normalize_mobile_handover_time(raw_end)
+            if not start_time or not end_time or start_time == end_time:
+                continue
         store_names = []
         for value in row.get("store_names") or []:
             store_name = _normalize_text(str(value))
             if store_name and store_name not in store_names:
                 store_names.append(store_name)
-        result.append({"shift_type": shift_type, "store_names": store_names})
+        result.append({
+            "shift_type": shift_type,
+            "start_time": start_time,
+            "end_time": end_time,
+            "store_names": store_names,
+        })
     return result
 
 
@@ -5068,6 +5312,16 @@ def _normalize_mobile_handover_assignments(
         shift_type = normalize_shift_type(_normalize_text(str(row.get("shift_type") or "")))
         if shift_type not in MOBILE_HANDOVER_RULE_SHIFT_TYPES:
             continue
+        raw_start = _normalize_text(str(row.get("start_time") or ""))
+        raw_end = _normalize_text(str(row.get("end_time") or ""))
+        if not raw_start and not raw_end:
+            start_time = ""
+            end_time = ""
+        else:
+            start_time = _normalize_mobile_handover_time(raw_start)
+            end_time = _normalize_mobile_handover_time(raw_end)
+            if not start_time or not end_time or start_time == end_time:
+                continue
         store_names = []
         raw_store_names = row.get("store_names") or []
         if not isinstance(raw_store_names, list):
@@ -5076,7 +5330,12 @@ def _normalize_mobile_handover_assignments(
             store_name = _normalize_text(str(value))
             if store_name in active_store_names and store_name not in store_names:
                 store_names.append(store_name)
-        result.append({"shift_type": shift_type, "store_names": store_names})
+        result.append({
+            "shift_type": shift_type,
+            "start_time": start_time,
+            "end_time": end_time,
+            "store_names": store_names,
+        })
     return result
 
 
@@ -5110,17 +5369,49 @@ def _game_business_datetime_label(game: GameRecord) -> str:
     return f"{business_dt.date().isoformat()}（时间未填写）"
 
 
-def _mobile_handover_allowed_stores(rule: MobileHandoverRule, duty_mode: str, shift_type: str) -> List[str]:
+def _mobile_handover_matching_assignments(
+        rule: MobileHandoverRule,
+        duty_mode: str,
+        shift_type: str,
+        registered_at: Optional[datetime] = None,
+) -> List[dict]:
     raw_json = (
         rule.active_assignments_json
         if duty_mode == MOBILE_HANDOVER_DUTY_ACTIVE
         else rule.inactive_assignments_json
     )
-    allowed = []
     normalized_shift = normalize_shift_type(shift_type or "off")
+    registered_minutes = (
+        registered_at.hour * 60 + registered_at.minute
+        if registered_at else None
+    )
+    matched = []
     for row in _decode_mobile_handover_assignments(raw_json):
         if row["shift_type"] != normalized_shift:
             continue
+        intervals = _mobile_handover_assignment_intervals(row)
+        if registered_minutes is not None and not any(
+            interval_start <= registered_minutes < interval_end
+            for interval_start, interval_end in intervals
+        ):
+            continue
+        matched.append(row)
+    return matched
+
+
+def _mobile_handover_allowed_stores(
+        rule: MobileHandoverRule,
+        duty_mode: str,
+        shift_type: str,
+        registered_at: Optional[datetime] = None,
+) -> List[str]:
+    allowed = []
+    for row in _mobile_handover_matching_assignments(
+        rule,
+        duty_mode,
+        shift_type,
+        registered_at,
+    ):
         for store_name in row["store_names"]:
             if store_name not in allowed:
                 allowed.append(store_name)
@@ -5216,7 +5507,18 @@ def _build_mobile_handover_anomaly_rows(
                     duty_mode = MOBILE_HANDOVER_DUTY_ACTIVE
                     break
 
-        allowed_store_names = _mobile_handover_allowed_stores(active_rule, duty_mode, shift_type)
+        matched_assignments = _mobile_handover_matching_assignments(
+            active_rule,
+            duty_mode,
+            shift_type,
+            registered_at,
+        )
+        allowed_store_names = _mobile_handover_allowed_stores(
+            active_rule,
+            duty_mode,
+            shift_type,
+            registered_at,
+        )
         actual_store_name = _normalize_text(game.store_name)
         if actual_store_name in allowed_store_names:
             continue
@@ -5232,6 +5534,10 @@ def _build_mobile_handover_anomaly_rows(
             "duty_mode": duty_mode,
             "actual_store_name": actual_store_name,
             "allowed_store_names": allowed_store_names,
+            "rule_time_labels": [
+                _mobile_handover_assignment_time_label(row)
+                for row in matched_assignments
+            ],
             "order_url": "/formed-games?" + urlencode({
                 "store": actual_store_name,
                 "focus_game_id": game.id,
@@ -5245,13 +5551,22 @@ def _build_mobile_handover_anomaly_rows(
     return active_rule, anomaly_rows
 
 
-WECHAT_ID_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{5,19}$")
-WECHAT_ID_RULE_MESSAGE = "微信号必须为6到20位，以英文字母或下划线开头，且只能包含英文字母、数字、下划线和减号"
+WECHAT_ID_PATTERN = re.compile(r"^[A-Za-z_-][A-Za-z0-9_-]{5,19}$")
+WECHAT_ID_RULE_MESSAGE = "微信号必须为6到20位，以英文字母、下划线或减号开头，且只能包含英文字母、数字、下划线和减号"
 PHONE_11_DIGIT_PATTERN = re.compile(r"^[0-9]{11}$")
 
 
 def _is_valid_wechat_id(value: Optional[str]) -> bool:
     return bool(WECHAT_ID_PATTERN.fullmatch(_normalize_text(value)))
+
+
+def _is_customer_quick_fill_candidate(customer: Optional[Customer]) -> bool:
+    """Only active customers with a valid WeChat ID may appear in quick-fill lists."""
+    return bool(
+        customer
+        and not bool(getattr(customer, "is_deleted", False))
+        and _is_valid_wechat_id(customer.wechat_id)
+    )
 
 
 def _validate_wechat_id_value(
@@ -5832,16 +6147,26 @@ def _new_customer_pull_is_success(record: NewCustomerPullRecord) -> bool:
     )
 
 
-def _new_customer_pull_is_privacy_complete(record: NewCustomerPullRecord) -> bool:
+NEW_CUSTOMER_PULL_REMARK_CHOICE_MAP = {
+    "privacy_settings": "隐私设置",
+    "mahjong_friend_not_in_small_group": "麻友未拉进小群",
+    "couple_2v2_not_in_small_group": "情侣局2V2未拉进小群",
+}
+NEW_CUSTOMER_PULL_CURRENT_SHIFT_ONLY_REMARKS = frozenset(
+    NEW_CUSTOMER_PULL_REMARK_CHOICE_MAP.values()
+)
+
+
+def _new_customer_pull_is_current_shift_only_complete(record: NewCustomerPullRecord) -> bool:
     return bool(
         _normalize_text(record.customer_nickname)
-        and _normalize_text(record.remark) == "隐私设置"
+        and _normalize_text(record.remark) in NEW_CUSTOMER_PULL_CURRENT_SHIFT_ONLY_REMARKS
     )
 
 
 def _new_customer_pull_is_handover_complete(record: NewCustomerPullRecord) -> bool:
     return bool(
-        _new_customer_pull_is_privacy_complete(record)
+        _new_customer_pull_is_current_shift_only_complete(record)
         or _new_customer_pull_is_success(record)
         or (
             _normalize_text(record.customer_nickname)
@@ -5907,6 +6232,7 @@ def _new_customer_pull_replacement_conflict_message(
 
 
 def _sync_new_customer_pull_records_for_game(session: Session, game: GameRecord):
+    """同步常规/溢出牌局中的万能替身号到“我的待拉新”。"""
     if not game or not game.id:
         return
 
@@ -5918,8 +6244,8 @@ def _sync_new_customer_pull_records_for_game(session: Session, game: GameRecord)
     order_dt = _parse_order_start_dt(game.order_start_time) or _game_reservation_dt(game)
     source = _normalize_text(game.record_source) or FORMED_SOURCE_NORMAL
     is_valid_source = (
-        _normalize_text(game.status) == "formed"
-        and source in FORMED_SOURCE_OPTIONS
+        _normalize_text(game.status) in {"unformed", "formed"}
+        and source in {FORMED_SOURCE_NORMAL, FORMED_SOURCE_OVERFLOW}
     )
 
     removable_slots = set()
@@ -5927,6 +6253,7 @@ def _sync_new_customer_pull_records_for_game(session: Session, game: GameRecord)
         for idx in range(1, 5):
             player_name = getattr(game, f"player_{idx}", None)
             player_wechat = getattr(game, f"player_{idx}_wechat", None)
+            player_note = _normalize_text(getattr(game, f"player_{idx}_note", None))
             if not _is_pull_placeholder_player(player_name, player_wechat):
                 if _is_concrete_pull_player(player_name, player_wechat):
                     row = existing_by_slot.get(idx)
@@ -5949,6 +6276,9 @@ def _sync_new_customer_pull_records_for_game(session: Session, game: GameRecord)
                     customer_wechat_id="",
                     created_at=datetime.now(),
                 )
+
+            if player_note:
+                row.customer_nickname = player_note
 
             row.pull_employee = _normalize_text(game.who_did) or _normalize_text(game.updated_by) or ""
             row.store_name = _normalize_text(game.store_name)
@@ -6899,6 +7229,7 @@ def build_game_recommendations(
         "brand_blacklisted": 0,
         "player_blacklist_conflict": 0,
         "deleted_customer": 0,
+        "invalid_wechat": 0,
     }
 
     latest_snapshot = session.get(RecommendationPoolSnapshotState, 1)
@@ -7009,6 +7340,9 @@ def build_game_recommendations(
         customer = customer_by_id.get(row.customer_id)
         if not customer or bool(getattr(customer, "is_deleted", False)):
             excluded_counts["deleted_customer"] += 1
+            continue
+        if not _is_customer_quick_fill_candidate(customer):
+            excluded_counts["invalid_wechat"] += 1
             continue
         wechat_id = _normalize_text(customer.wechat_id)
         if wechat_id in existing_player_wechats:
@@ -7894,16 +8228,31 @@ def get_brand_store_dashboard_stats(
     ])
     private_order_count = order_count - self_arrival_order_count
 
-    # 门店维度玩法统计：与订单总数使用同一批 period_games，包含溢出单和自主到店。
+    # 门店维度按玩法和大小统计常规单、溢出单，排除自主到店。
     game_type_count_map = {}
     if is_store:
         for game in period_games:
+            if _normalize_text(game.record_source) == FORMED_SOURCE_SELF_ARRIVAL:
+                continue
             game_type_name = _normalize_text(game.game_type) or "未填写玩法"
-            game_type_count_map[game_type_name] = game_type_count_map.get(game_type_name, 0) + 1
-    game_type_rows = sorted(
-        game_type_count_map.items(),
-        key=lambda item: (-item[1], item[0]),
+            stakes_name = _normalize_text(game.stakes) or "未填写大小"
+            group_key = (game_type_name, stakes_name)
+            game_type_count_map[group_key] = game_type_count_map.get(group_key, 0) + 1
+    game_type_totals = {}
+    for (game_type_name, stakes_name), count in game_type_count_map.items():
+        game_type_totals[game_type_name] = game_type_totals.get(game_type_name, 0) + count
+    game_type_labels = sorted(game_type_totals, key=lambda name: (-game_type_totals[name], name))
+    game_type_stakes = sorted(
+        {stakes for _, stakes in game_type_count_map},
+        key=lambda stakes: (tuple(int(value) for value in re.findall(r"\d+", stakes)), stakes),
     )
+    game_type_datasets = [
+        {
+            "label": stakes,
+            "data": [game_type_count_map.get((name, stakes), 0) for name in game_type_labels],
+        }
+        for stakes in game_type_stakes
+    ]
 
     # ========= 6. 当前时间区间内顾客成功组局次数 =========
     # 这里继续按全部 formed 统计，包含溢出单
@@ -8063,8 +8412,9 @@ def get_brand_store_dashboard_stats(
             "revenue_total_compare_date_ranges": revenue_total_compare_chart["date_ranges"],
             "private_order_trend": private_order_trend,
             "self_arrival_order_trend": self_arrival_order_trend,
-            "game_type_labels": [item[0] for item in game_type_rows],
-            "game_type_counts": [item[1] for item in game_type_rows],
+            "game_type_labels": game_type_labels,
+            "game_type_counts": [game_type_totals[name] for name in game_type_labels],
+            "game_type_datasets": game_type_datasets,
             "customer_funnel": [
                 customer_total,
                 new_customer_count,
@@ -8312,6 +8662,7 @@ def get_customer_options_by_store(session: Session, store_name: str) -> List[dic
             "is_deposit_exempt": c.id in exempt_customer_ids,
         }
         for c in customers
+        if _is_customer_quick_fill_candidate(c)
     ]
 
 
@@ -9264,7 +9615,8 @@ def _build_root_redirect_url(
         store: Optional[str] = "",
         *,
         error: str = "",
-        success: str = ""
+        success: str = "",
+        store_wechat_pending_notice: str = "",
 ) -> str:
     params = {}
     clean_store = _normalize_text(store)
@@ -9274,6 +9626,8 @@ def _build_root_redirect_url(
         params["error"] = error
     if success:
         params["success"] = success
+    if store_wechat_pending_notice:
+        params["store_wechat_pending_notice"] = store_wechat_pending_notice
     return "/?" + urlencode(params) if params else "/"
 
 
@@ -9475,6 +9829,7 @@ STORE_DUTY_ORDER_SOURCE_LABELS = {
 }
 
 STORE_DUTY_ACK_FORM_VALUE = "order_followup_warning"
+STORE_DUTY_WECHAT_RESTRICTION_ACK_FORM_VALUE = "store_wechat_restriction_notice"
 STORE_DUTY_HANDOVER_ACK_FORM_VALUE = "handover_sync_notice"
 STORE_DUTY_DEPOSIT_ACK_FORM_VALUE = "deposit_notice"
 STORE_DUTY_SPECIAL_ROOM_FEE_ACK_FORM_VALUE = "special_room_fee_notice"
@@ -9483,6 +9838,11 @@ STORE_DUTY_PRIVATE_DEPOSIT_PIN_ACK_FORM_VALUE = "private_deposit_pin_notice"
 STORE_DUTY_OFFLINE_CANCEL_ACK_FORM_VALUE = "offline_cancel_notice"
 
 STORE_DUTY_NON_BLOCKING_SELF_CHECKS = (
+    (
+        STORE_DUTY_WECHAT_RESTRICTION_ACK_FORM_VALUE,
+        "门店微信受限待补拉提示",
+        None,
+    ),
     (STORE_DUTY_HANDOVER_ACK_FORM_VALUE, "待办及信息同步提示", None),
     (
         STORE_DUTY_DEPOSIT_ACK_FORM_VALUE,
@@ -9773,6 +10133,259 @@ def _store_duty_customer_check_window(clicked_at: datetime) -> Tuple[datetime, d
     return window_start, clicked_at + timedelta(microseconds=1)
 
 
+STORE_WECHAT_RESTRICTION_PENDING_REMARK = "因门店微信受限待补拉"
+
+
+def _active_store_wechat_restriction_map(
+        session: Session,
+        store_names: List[str],
+        at_time: Optional[datetime] = None,
+) -> Dict[str, StoreWechatRestrictionEvent]:
+    clean_store_names = sorted({_normalize_text(name) for name in store_names if _normalize_text(name)})
+    if not clean_store_names:
+        return {}
+    current_time = at_time or datetime.now()
+    rows = session.exec(
+        select(StoreWechatRestrictionEvent).where(
+            StoreWechatRestrictionEvent.store_name.in_(clean_store_names),
+            StoreWechatRestrictionEvent.started_at <= current_time,
+            StoreWechatRestrictionEvent.expected_recovery_at > current_time,
+        ).order_by(
+            StoreWechatRestrictionEvent.started_at.desc(),
+            StoreWechatRestrictionEvent.id.desc(),
+        )
+    ).all()
+    result = {}
+    for row in rows:
+        result.setdefault(_normalize_text(row.store_name), row)
+    return result
+
+
+def _store_wechat_restriction_pending_contacts(
+        session: Session,
+        store_names: List[str],
+        *,
+        as_of: Optional[datetime] = None,
+        contact_start: Optional[datetime] = None,
+        contact_end: Optional[datetime] = None,
+        employee_name: str = "",
+) -> Dict[Tuple[str, str], dict]:
+    """返回受限时段内产生、且对应门店尚未勾选私域群聊邀请的顾客。"""
+    clean_store_names = sorted({_normalize_text(name) for name in store_names if _normalize_text(name)})
+    if not clean_store_names:
+        return {}
+
+    current_time = as_of or datetime.now()
+    range_end = min(contact_end, current_time) if contact_end else current_time
+    event_filters = [
+        StoreWechatRestrictionEvent.store_name.in_(clean_store_names),
+        StoreWechatRestrictionEvent.started_at < range_end,
+    ]
+    if contact_start:
+        event_filters.append(StoreWechatRestrictionEvent.expected_recovery_at > contact_start)
+    events = session.exec(
+        select(StoreWechatRestrictionEvent).where(*event_filters).order_by(
+            StoreWechatRestrictionEvent.started_at,
+            StoreWechatRestrictionEvent.id,
+        )
+    ).all()
+
+    intervals_by_store = {}
+    for event in events:
+        interval_start = max(event.started_at, contact_start) if contact_start else event.started_at
+        interval_end = min(event.expected_recovery_at, range_end)
+        if interval_start >= interval_end:
+            continue
+        intervals_by_store.setdefault(_normalize_text(event.store_name), []).append(
+            (interval_start, interval_end, event)
+        )
+    if not intervals_by_store:
+        return {}
+
+    scan_start = min(
+        interval_start
+        for intervals in intervals_by_store.values()
+        for interval_start, _, _ in intervals
+    )
+    scan_end = max(
+        interval_end
+        for intervals in intervals_by_store.values()
+        for _, interval_end, _ in intervals
+    )
+
+    def matching_event(store_name: str, contact_at: datetime) -> Optional[StoreWechatRestrictionEvent]:
+        for interval_start, interval_end, event in intervals_by_store.get(store_name, []):
+            if interval_start <= contact_at < interval_end:
+                return event
+        return None
+
+    clean_employee_name = _normalize_text(employee_name)
+    game_filters = [
+        GameRecord.record_source != FORMED_SOURCE_SELF_ARRIVAL,
+        GameRecord.status.in_(["unformed", "formed"]),
+        GameRecord.record_date >= scan_start.date(),
+        GameRecord.record_date <= scan_end.date(),
+        GameRecord.store_name.in_(clean_store_names),
+    ]
+    if clean_employee_name:
+        game_filters.append(GameRecord.who_did == clean_employee_name)
+    games = session.exec(select(GameRecord).where(*game_filters)).all()
+
+    pending_candidates = {}
+    for game in games:
+        store_name = _normalize_text(game.store_name)
+        contact_at = _game_reservation_dt(game)
+        event = matching_event(store_name, contact_at)
+        if not event:
+            continue
+        for idx in range(1, 5):
+            nickname = _normalize_text(getattr(game, f"player_{idx}", None))
+            wechat_id = _normalize_text(getattr(game, f"player_{idx}_wechat", None))
+            if not nickname or not wechat_id or _is_pull_placeholder_player(nickname, wechat_id):
+                continue
+            key = (store_name, wechat_id)
+            existing = pending_candidates.get(key)
+            if not existing or contact_at < existing["contact_at"]:
+                pending_candidates[key] = {
+                    "store_name": store_name,
+                    "wechat_id": wechat_id,
+                    "nickname": nickname,
+                    "employee_name": _normalize_text(game.who_did),
+                    "contact_at": contact_at,
+                    "restriction_event_id": event.id,
+                }
+
+    snapshot_filters = [
+        CancelledGameContactSnapshot.store_name.in_(clean_store_names),
+        CancelledGameContactSnapshot.reservation_time >= scan_start,
+        CancelledGameContactSnapshot.reservation_time < scan_end,
+    ]
+    if clean_employee_name:
+        snapshot_filters.append(CancelledGameContactSnapshot.employee_name == clean_employee_name)
+    snapshots = session.exec(
+        select(CancelledGameContactSnapshot).where(*snapshot_filters)
+    ).all()
+    for snapshot in snapshots:
+        store_name = _normalize_text(snapshot.store_name)
+        contact_at = snapshot.reservation_time
+        event = matching_event(store_name, contact_at)
+        nickname = _normalize_text(snapshot.nickname)
+        wechat_id = _normalize_text(snapshot.wechat_id)
+        if (
+            not event
+            or not nickname
+            or not wechat_id
+            or _is_pull_placeholder_player(nickname, wechat_id)
+        ):
+            continue
+        key = (store_name, wechat_id)
+        existing = pending_candidates.get(key)
+        if not existing or contact_at < existing["contact_at"]:
+            pending_candidates[key] = {
+                "store_name": store_name,
+                "wechat_id": wechat_id,
+                "nickname": nickname,
+                "employee_name": _normalize_text(snapshot.employee_name),
+                "contact_at": contact_at,
+                "restriction_event_id": event.id,
+            }
+
+    if not pending_candidates:
+        return {}
+
+    wechat_ids = sorted({wechat_id for _, wechat_id in pending_candidates})
+    customers = session.exec(
+        select(Customer).where(Customer.wechat_id.in_(wechat_ids))
+    ).all()
+    customer_id_by_wechat = {
+        _normalize_text(customer.wechat_id): customer.id
+        for customer in customers
+        if customer.id is not None and _normalize_text(customer.wechat_id)
+    }
+    customer_ids = sorted({customer_id for customer_id in customer_id_by_wechat.values() if customer_id})
+    completed_store_customer_keys = set()
+    if customer_ids:
+        links = session.exec(
+            select(CustomerStoreLink).where(
+                CustomerStoreLink.customer_id.in_(customer_ids),
+                CustomerStoreLink.store_name.in_(clean_store_names),
+                CustomerStoreLink.in_group_chat == True,
+            )
+        ).all()
+        completed_store_customer_keys = {
+            (_normalize_text(link.store_name), link.customer_id)
+            for link in links
+        }
+
+    return {
+        key: item
+        for key, item in pending_candidates.items()
+        if (
+            key[0],
+            customer_id_by_wechat.get(key[1]),
+        ) not in completed_store_customer_keys
+    }
+
+
+def _build_store_wechat_restriction_duty_notice(
+        session: Session,
+        duty: EmployeeDutySession,
+        clicked_at: datetime,
+) -> str:
+    store_names = _decode_duty_store_names(duty.store_names_json)
+    if not store_names:
+        return ""
+    active_map = _active_store_wechat_restriction_map(session, store_names, clicked_at)
+    window_start, window_end = _store_duty_customer_check_window(clicked_at)
+    shift_pending = _store_wechat_restriction_pending_contacts(
+        session,
+        store_names,
+        as_of=clicked_at,
+        contact_start=window_start,
+        contact_end=window_end,
+        employee_name=duty.employee_name,
+    )
+    all_pending = _store_wechat_restriction_pending_contacts(
+        session,
+        store_names,
+        as_of=clicked_at,
+    )
+    lines = []
+    for store_name in store_names:
+        if store_name in active_map:
+            count = sum(1 for item_store, _ in shift_pending if item_store == store_name)
+            lines.append(f"{store_name}微信受限中，本班新增待补拉顾客 {count} 人。")
+            continue
+        count = sum(1 for item_store, _ in all_pending if item_store == store_name)
+        if count:
+            lines.append(f"{store_name}微信已恢复，当前仍有待补拉顾客 {count} 人。")
+    return "\n".join(lines)
+
+
+def _build_recovered_store_wechat_pending_notice(
+        session: Session,
+        store_names: List[str],
+        at_time: Optional[datetime] = None,
+) -> str:
+    current_time = at_time or datetime.now()
+    active_store_names = set(
+        _active_store_wechat_restriction_map(session, store_names, current_time)
+    )
+    pending = _store_wechat_restriction_pending_contacts(
+        session,
+        store_names,
+        as_of=current_time,
+    )
+    lines = []
+    for store_name in store_names:
+        if store_name in active_store_names:
+            continue
+        count = sum(1 for item_store, _ in pending if item_store == store_name)
+        if count:
+            lines.append(f"{store_name}微信已恢复，当前有 {count} 位顾客待补拉，请集中处理。")
+    return "\n".join(lines)
+
+
 def _run_store_duty_contact_customer_self_check(
         session: Session,
         duty: EmployeeDutySession,
@@ -9834,10 +10447,20 @@ def _run_store_duty_contact_customer_self_check(
             select(ContactCustomerFollowup).where(ContactCustomerFollowup.wechat_id.in_(wechat_ids))
         ).all()
     }
+    restriction_pending = _store_wechat_restriction_pending_contacts(
+        session,
+        store_names,
+        as_of=clicked_at,
+        contact_start=window_start,
+        contact_end=window_end,
+        employee_name=employee_name,
+    )
     incomplete_items = []
     for (store_name, wechat_id), nickname in sorted(contacts.items()):
         followup = followup_by_wechat.get(wechat_id)
         if followup and (followup.in_group_chat or _normalize_text(followup.remark)):
+            continue
+        if (store_name, wechat_id) in restriction_pending:
             continue
         incomplete_items.append(f"{store_name}｜{nickname}｜{wechat_id}")
 
@@ -9890,7 +10513,7 @@ def _run_store_duty_new_customer_pull_self_check(
 
     if incomplete_items:
         result["blocking_messages"].append(
-            "以下‘我的待拉新’尚未按隐私设置、拉新成功或未通过好友申请任一方式处理，无法结束带店：\n"
+            "以下‘我的待拉新’尚未按隐私设置/麻友未拉进小群/情侣局2V2未拉进小群、拉新成功或未通过好友申请任一方式处理，无法结束带店：\n"
             + _format_store_duty_customer_check_items(incomplete_items)
         )
     return result
@@ -9970,18 +10593,21 @@ def _get_next_store_duty_non_blocking_self_check(
             break
 
     next_index = acknowledged_index + 1
-    if next_index >= len(STORE_DUTY_NON_BLOCKING_SELF_CHECKS):
-        return None
+    while next_index < len(STORE_DUTY_NON_BLOCKING_SELF_CHECKS):
+        ack_value, title, message = STORE_DUTY_NON_BLOCKING_SELF_CHECKS[next_index]
+        if ack_value == STORE_DUTY_WECHAT_RESTRICTION_ACK_FORM_VALUE:
+            message = _build_store_wechat_restriction_duty_notice(session, duty, clicked_at)
+        elif ack_value == STORE_DUTY_HANDOVER_ACK_FORM_VALUE:
+            message = _build_store_duty_handover_notice(session, duty, clicked_at)
 
-    ack_value, title, message = STORE_DUTY_NON_BLOCKING_SELF_CHECKS[next_index]
-    if ack_value == STORE_DUTY_HANDOVER_ACK_FORM_VALUE:
-        message = _build_store_duty_handover_notice(session, duty, clicked_at)
-
-    return {
-        "ack_value": ack_value,
-        "title": title,
-        "message": message or "",
-    }
+        if message:
+            return {
+                "ack_value": ack_value,
+                "title": title,
+                "message": message,
+            }
+        next_index += 1
+    return None
 
 
 def _run_store_duty_self_checks(
@@ -10540,7 +11166,7 @@ def _run_recommendation_snapshot_refresh(reason: str = "scheduled", force_full: 
         print(
             f"智能推荐三维池快照刷新完成（{reason}，范围：{start_date}）："
             f"扫描牌局 {result['scanned_game_count']}，"
-            f"活跃顾客 {result['active_customer_count']}，"
+            f"入池顾客门店组合 {result['active_customer_count']}，"
             f"池成员 {result['pool_snapshot_count']}"
         )
     except Exception as exc:
@@ -10921,8 +11547,17 @@ async def start_employee_store_duty(
     session.add(duty)
     session.commit()
 
+    pending_notice = _build_recovered_store_wechat_pending_notice(
+        session,
+        clean_store_names,
+        now,
+    )
     response = RedirectResponse(
-        url=f"/?store={clean_store_names[0]}&success=已开始带店",
+        url=_build_root_redirect_url(
+            clean_store_names[0],
+            success="已开始带店",
+            store_wechat_pending_notice=pending_notice,
+        ),
         status_code=303
     )
     response.set_cookie(
@@ -11002,13 +11637,32 @@ async def update_employee_store_duty_stores(
     removed_text = f"；已移出：{'、'.join(removed_store_names)}" if removed_store_names else ""
     added_store_names = [name for name in clean_store_names if name not in old_store_names]
     added_text = f"；已新增：{'、'.join(added_store_names)}" if added_store_names else ""
+    store_wechat_notice_parts = []
+    if removed_store_names:
+        removed_scope_duty = _build_duty_scope_session(active, removed_store_names)
+        removed_notice = _build_store_wechat_restriction_duty_notice(
+            session,
+            removed_scope_duty,
+            clicked_at,
+        )
+        if removed_notice:
+            store_wechat_notice_parts.append(removed_notice)
+    if added_store_names:
+        added_notice = _build_recovered_store_wechat_pending_notice(
+            session,
+            added_store_names,
+            clicked_at,
+        )
+        if added_notice:
+            store_wechat_notice_parts.append(added_notice)
     warning_text = ""
     if release_warning_messages:
         warning_text = "\n提醒：\n" + "\n".join(release_warning_messages)
     return RedirectResponse(
         url=_build_root_redirect_url(
             clean_store_names[0],
-            success=f"负责门店已更新，当前负责：{'、'.join(clean_store_names)}{removed_text}{added_text}{warning_text}"
+            success=f"负责门店已更新，当前负责：{'、'.join(clean_store_names)}{removed_text}{added_text}{warning_text}",
+            store_wechat_pending_notice="\n".join(store_wechat_notice_parts),
         ),
         status_code=303
     )
@@ -17777,6 +18431,11 @@ async def customer_search(
             )
         )
     ).all()
+    matched_customers = [
+        customer
+        for customer in matched_customers
+        if _is_customer_quick_fill_candidate(customer)
+    ]
 
     # 若指定门店，则只保留和该门店有关联的顾客
     if store_name:
@@ -18097,6 +18756,7 @@ async def add_game(
         operator=user,
         old_noted_players_snapshot=[]
     )
+    _sync_new_customer_pull_records_for_game(session, new_game)
     sync_customer_recommendation_time_bucket_stats_for_changed_games(session, new_game)
     session.commit()
 
@@ -21676,6 +22336,7 @@ async def deposit_exempt_customers_page(
         request: Request,
         store: Optional[str] = None,
         filter_store: str = "all",
+        keyword: str = "",
         success: str = "",
         error: str = "",
         session: Session = Depends(get_session),
@@ -21688,6 +22349,8 @@ async def deposit_exempt_customers_page(
     store = resolve_store_from_request(request, session, store)
     if filter_store not in {"all", *store_list}:
         filter_store = "all"
+    keyword = _normalize_text(keyword)
+    keyword_key = keyword.casefold()
 
     exemptions = session.exec(
         select(CustomerDepositExemption).where(
@@ -21723,20 +22386,37 @@ async def deposit_exempt_customers_page(
         customer_store_names = stores_by_customer_id.get(customer.id, [])
         if filter_store != "all" and filter_store not in customer_store_names:
             continue
+        nickname = _normalize_text(customer.nickname)
+        wechat_id = _normalize_text(customer.wechat_id)
+        if (
+            keyword_key
+            and keyword_key not in nickname.casefold()
+            and keyword_key not in wechat_id.casefold()
+        ):
+            continue
         exemption_list.append({
             "customer_id": customer.id,
-            "nickname": customer.nickname or "",
-            "wechat_id": customer.wechat_id or "",
+            "nickname": nickname,
+            "wechat_id": wechat_id,
             "store_names": customer_store_names,
             "created_at": exemption.created_at,
             "created_by": exemption.created_by or "",
         })
+
+    if keyword_key:
+        exemption_list.sort(key=lambda item: (
+            0 if item["wechat_id"].casefold() == keyword_key else 1,
+            0 if item["nickname"].casefold() == keyword_key else 1,
+            0 if item["wechat_id"].casefold().startswith(keyword_key) else 1,
+            0 if item["nickname"].casefold().startswith(keyword_key) else 1,
+        ))
 
     return templates.TemplateResponse("deposit_exempt_customers.html", {
         "request": request,
         "page_name": "deposit_exempt_customers",
         "current_store": store,
         "filter_store": filter_store,
+        "keyword": keyword,
         "store_list": store_list,
         "current_user": user,
         "exemption_list": exemption_list,
@@ -21773,6 +22453,11 @@ async def deposit_exempt_customer_options(
             Customer.is_deleted == False,
         ).order_by(Customer.id)
     ).all()
+    customers = [
+        customer
+        for customer in customers
+        if _is_customer_quick_fill_candidate(customer)
+    ]
     keyword = _normalize_text(keyword).casefold()
     if keyword:
         customers = [
@@ -22519,6 +23204,20 @@ async def read_customers(
             if contact_employee != "all" and contact_employee not in employee_names:
                 contact_employee = "all"
 
+        contact_page_now = datetime.now()
+        active_restriction_map = _active_store_wechat_restriction_map(
+            session,
+            store_list,
+            contact_page_now,
+        )
+        restriction_pending_keys = set(
+            _store_wechat_restriction_pending_contacts(
+                session,
+                store_list,
+                as_of=contact_page_now,
+            )
+        )
+
         games = session.exec(
             select(GameRecord).where(
                 GameRecord.record_source != FORMED_SOURCE_SELF_ARRIVAL,
@@ -22637,17 +23336,30 @@ async def read_customers(
                 new_contact_count += 1
 
             followup = followup_by_wechat.get(item["wechat_id"])
+            restriction_pending = (item["store_name"], item["wechat_id"]) in restriction_pending_keys
             full_contact_customer_list.append({
                 "employee_name": item["employee_name"],
                 "store_name": item["store_name"],
                 "nickname": item["nickname"],
                 "wechat_id": item["wechat_id"],
                 "is_new": not is_old,
-                "in_group_chat": bool(followup.in_group_chat) if followup else False,
+                "in_group_chat": (
+                    False
+                    if restriction_pending
+                    else bool(followup.in_group_chat) if followup else False
+                ),
                 "remark": (followup.remark or "") if followup else "",
+                "restriction_pending": restriction_pending,
+                "restriction_remark": (
+                    STORE_WECHAT_RESTRICTION_PENDING_REMARK
+                    if restriction_pending else ""
+                ),
             })
 
-        full_contact_customer_list.sort(key=lambda item: 0 if item["is_new"] else 1)
+        full_contact_customer_list.sort(key=lambda item: (
+            0 if not item["in_group_chat"] else 1,
+            0 if item["is_new"] else 1,
+        ))
         contact_customer_list = full_contact_customer_list[list_offset:list_offset + list_limit]
 
         return templates.TemplateResponse("customers.html", {
@@ -22663,6 +23375,18 @@ async def read_customers(
             "contact_new_customer_count": new_contact_count,
             "contact_loaded_count": list_offset + len(contact_customer_list),
             "contact_has_more": (list_offset + len(contact_customer_list)) < len(full_contact_customer_list),
+            "active_store_wechat_restrictions": [
+                {
+                    "store_name": store_name,
+                    "started_at_text": event.started_at.strftime("%Y-%m-%d %H:%M"),
+                    "expected_recovery_at_text": event.expected_recovery_at.strftime("%Y-%m-%d %H:%M"),
+                }
+                for store_name, event in sorted(active_restriction_map.items())
+            ],
+            "store_wechat_restriction_default_start": contact_page_now.replace(
+                second=0,
+                microsecond=0,
+            ).strftime("%Y-%m-%dT%H:%M"),
             "list_offset": list_offset,
             "list_page_size": LIST_PAGE_SIZE,
         })
@@ -24249,6 +24973,92 @@ def _sync_contact_followup_to_store_link(
     return created_store_link, True
 
 
+@app.post("/contact-customers/store-wechat-restrictions/add")
+async def add_store_wechat_restriction(
+        store_name: str = Form(...),
+        started_at: str = Form(...),
+        expected_recovery_at: str = Form(...),
+        store: str = Form(""),
+        contact_date_filter: str = Form("today"),
+        contact_start_date: str = Form(""),
+        contact_end_date: str = Form(""),
+        contact_store_filter: str = Form("all"),
+        contact_employee: str = Form("all"),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user),
+):
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    redirect_employee = contact_employee if user.role == "admin" else _normalize_text(user.display_name)
+
+    def redirect_with(*, success: str = "", error: str = "") -> RedirectResponse:
+        return RedirectResponse(
+            url=_build_contact_customers_url(
+                store,
+                contact_date_filter,
+                contact_start_date,
+                contact_end_date,
+                contact_store_filter,
+                redirect_employee,
+                success=success,
+                error=error,
+            ),
+            status_code=303,
+        )
+
+    clean_store_name = _normalize_text(store_name)
+    if clean_store_name not in set(get_active_store_name_list(session)):
+        return redirect_with(error="请选择有效的门店")
+
+    try:
+        restriction_start = datetime.fromisoformat(_normalize_text(started_at))
+        expected_recovery = datetime.fromisoformat(_normalize_text(expected_recovery_at))
+    except Exception:
+        return redirect_with(error="开始时间或预计恢复时间格式不正确")
+
+    now = datetime.now()
+    if restriction_start > now + timedelta(minutes=1):
+        return redirect_with(error="开始时间不能晚于当前时间，保存后应立即生效")
+    if expected_recovery <= now:
+        return redirect_with(error="预计恢复时间必须晚于当前时间")
+    if restriction_start >= expected_recovery:
+        return redirect_with(error="预计恢复时间必须晚于开始时间")
+
+    overlapping = session.exec(
+        select(StoreWechatRestrictionEvent).where(
+            StoreWechatRestrictionEvent.store_name == clean_store_name,
+            StoreWechatRestrictionEvent.started_at < expected_recovery,
+            StoreWechatRestrictionEvent.expected_recovery_at > restriction_start,
+        )
+    ).first()
+    if overlapping:
+        return redirect_with(
+            error=(
+                f"{clean_store_name}在所选时段已有微信受限事件："
+                f"{overlapping.started_at.strftime('%Y-%m-%d %H:%M')} 至 "
+                f"{overlapping.expected_recovery_at.strftime('%Y-%m-%d %H:%M')}"
+            )
+        )
+
+    session.add(StoreWechatRestrictionEvent(
+        store_name=clean_store_name,
+        started_at=restriction_start,
+        expected_recovery_at=expected_recovery,
+        created_by_user_id=user.id,
+        created_by_name=user.display_name,
+        created_at=now,
+        updated_at=now,
+    ))
+    session.commit()
+    return redirect_with(
+        success=(
+            f"已添加{clean_store_name}微信受限，"
+            f"预计 {expected_recovery.strftime('%Y-%m-%d %H:%M')} 自动恢复"
+        )
+    )
+
+
 @app.post("/contact-customers/followup/save")
 async def save_contact_customer_followup(
         request: Request,
@@ -24272,6 +25082,13 @@ async def save_contact_customer_followup(
     now = datetime.now()
     today = date.today()
     active_store_names = set(get_active_store_name_list(session))
+    restriction_pending_keys = set(
+        _store_wechat_restriction_pending_contacts(
+            session,
+            sorted(active_store_names),
+            as_of=now,
+        )
+    )
     added_to_store_count = 0
     synced_store_link_count = 0
 
@@ -24289,14 +25106,16 @@ async def save_contact_customer_followup(
         row_key = contact_row_keys[idx] if idx < len(contact_row_keys) else str(idx)
         in_group_chat = form.get(f"in_group_chat_{row_key}") == "1"
         remark = _normalize_text(form.get(f"remark_{row_key}"))
+        contact_store_name = _normalize_text(contact_store_names[idx] if idx < len(contact_store_names) else "")
+        is_restriction_pending = (contact_store_name, wechat_id) in restriction_pending_keys
 
         followup.in_group_chat = in_group_chat
-        followup.remark = remark or None
+        if not is_restriction_pending:
+            followup.remark = remark or None
         followup.updated_at = now
         followup.updated_by = user.display_name
         session.add(followup)
 
-        contact_store_name = _normalize_text(contact_store_names[idx] if idx < len(contact_store_names) else "")
         contact_nickname = _normalize_text(contact_nicknames[idx] if idx < len(contact_nicknames) else "") or "未知昵称"
         created_store_link, synced_store_link = _sync_contact_followup_to_store_link(
             session,
@@ -24419,8 +25238,9 @@ async def save_new_customer_pull_records(
         row.in_group_chat = form.get(f"in_group_chat_{record_id}") == "1"
         remark_choice = _normalize_text(form.get(f"remark_choice_{record_id}"))
         custom_remark = _normalize_text(form.get(f"remark_{record_id}"))
-        if remark_choice == "privacy_settings":
-            row.remark = "隐私设置"
+        preset_remark = NEW_CUSTOMER_PULL_REMARK_CHOICE_MAP.get(remark_choice)
+        if preset_remark:
+            row.remark = preset_remark
         elif remark_choice == "custom":
             row.remark = custom_remark or None
         elif custom_remark:
@@ -24430,8 +25250,8 @@ async def save_new_customer_pull_records(
             form.get(f"friend_request_not_approved_current_shift_{record_id}") == "1"
         )
         is_success = _new_customer_pull_is_success(row)
-        if is_success or _new_customer_pull_is_privacy_complete(row):
-            # 已通过隐私设置或拉新成功完成处理，不再延续到下一次同店班次。
+        if is_success or _new_customer_pull_is_current_shift_only_complete(row):
+            # 已通过指定备注原因或拉新成功完成处理，不再延续到下一次同店班次。
             row.friend_request_not_approved_current_shift = False
         if is_success:
             # 拉新成功后按“我的接触顾客”相同口径进入对应门店组局散客池。
@@ -25492,7 +26312,7 @@ async def brand_store_data_page(
         "private_order_trend_json": json.dumps(stats["charts"]["private_order_trend"], ensure_ascii=False),
         "self_arrival_order_trend_json": json.dumps(stats["charts"]["self_arrival_order_trend"], ensure_ascii=False),
         "game_type_labels_json": json.dumps(stats["charts"]["game_type_labels"], ensure_ascii=False),
-        "game_type_counts_json": json.dumps(stats["charts"]["game_type_counts"], ensure_ascii=False),
+        "game_type_datasets_json": json.dumps(stats["charts"]["game_type_datasets"], ensure_ascii=False),
         "customer_funnel_json": json.dumps(stats["charts"]["customer_funnel"], ensure_ascii=False),
     })
 
@@ -25964,6 +26784,22 @@ async def save_mobile_handover_rules(
             )
 
         rule.name = _normalize_text(str(raw_rule.get("name") or ""))[:60] or f"规则{index}"
+        for assignment_key, branch_label in (
+            ("active_assignments", "有激活岗"),
+            ("inactive_assignments", "无激活岗"),
+        ):
+            validation_error = _validate_mobile_handover_assignments(
+                raw_rule.get(assignment_key),
+                f"{rule.name}—{branch_label}",
+            )
+            if validation_error:
+                return RedirectResponse(
+                    url=(
+                        f"/schedule?year={year}&month={month}"
+                        f"&error={quote(validation_error)}"
+                    ),
+                    status_code=303,
+                )
         active_assignments = _normalize_mobile_handover_assignments(
             raw_rule.get("active_assignments"), active_store_names
         )
@@ -26043,7 +26879,7 @@ async def maintenance_records_page(
         customer_map[s_name] = []
         for cid in sorted(list(cust_ids)):
             cust = customer_dict.get(cid)
-            if cust:
+            if _is_customer_quick_fill_candidate(cust):
                 customer_map[s_name].append({
                     "id": cust.id,
                     "nickname": cust.nickname,
@@ -27270,7 +28106,11 @@ async def api_handover_customer_search(
             )
         )
 
-    customers = session.exec(stmt).all()
+    customers = [
+        customer
+        for customer in session.exec(stmt).all()
+        if _is_customer_quick_fill_candidate(customer)
+    ]
     exempt_customer_ids = _deposit_exempt_customer_ids(session)
 
     # 排序：完全匹配优先，昵称短优先，最新优先

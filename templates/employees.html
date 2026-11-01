@@ -376,6 +376,33 @@
         color: #dc2626;
     }
 
+    .whiteboard-workday-average {
+        min-width: 92px;
+        line-height: 1.15;
+    }
+
+    .whiteboard-workday-average-label {
+        color: #64748b;
+        font-size: 0.7rem;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+
+    .whiteboard-workday-average-value {
+        color: #1d4ed8;
+        font-size: 0.9rem;
+        font-weight: 900;
+        white-space: nowrap;
+        margin-top: 3px;
+    }
+
+    .whiteboard-workday-average-detail {
+        color: #94a3b8;
+        font-size: 0.68rem;
+        white-space: nowrap;
+        margin-top: 2px;
+    }
+
     .whiteboard-bar-row {
         padding: 14px 0;
         border-bottom: 1px solid #eef2f7;
@@ -978,7 +1005,12 @@
                         {% if item.allowed_store_names %}
                             {{ item.allowed_store_names|join('、') }}
                         {% else %}
-                            <span class="text-danger">该分支/班次未配置门店</span>
+                            <span class="text-danger">该分支/班次/登记时段未配置门店</span>
+                        {% endif %}
+                        {% if item.rule_time_labels %}
+                            <div class="small text-muted mt-1">登记时段：{{ item.rule_time_labels|join('、') }}</div>
+                        {% else %}
+                            <div class="small text-danger mt-1">登记时间未命中已配置时段</div>
                         {% endif %}
                     </td>
                     <td>
@@ -3569,7 +3601,7 @@
                     <i class="bi bi-person-lines-fill text-primary me-1"></i>员工本月订单量对比
                 </div>
                 <div class="small text-muted mt-1">
-                    仅展示本月订单量大于 0 的员工；红色竖线为个人提成关键节点：660、710、760、810、860……。点击员工可展开查看其每个门店的目标订单完成情况。
+                    仅展示本月订单量大于 0 的员工；销冠按私域组局单量 ÷ 实际上班日数评选；上班日优先取排班和已生效机动顶班，无此类记录时取本人已有带店日期，休息、公休及已生效请假不计入。红色竖线为个人提成关键节点：660、710、760、810、860……。
                 </div>
                 <div class="small text-muted mt-2 d-flex align-items-center gap-3 flex-wrap">
                     <span class="whiteboard-order-legend">
@@ -3580,14 +3612,14 @@
                     </span>
                 </div>
             </div>
-            {% if whiteboard_data.sales_champion and whiteboard_data.sales_champion.order_count %}
-            <div class="whiteboard-champion" title="与员工本月订单量对比使用同一统计口径，仅展示本月订单量第一名，不产生奖金或工资流水。">
+            {% if whiteboard_data.sales_champion and whiteboard_data.sales_champion.average_order_count %}
+            <div class="whiteboard-champion" title="仅按私域组局计算：私域组局单量 ÷ 实际上班日数；休息、公休及已生效请假不计入分母。">
                 <i class="bi bi-trophy-fill"></i>
                 <div>
                     <div class="small fw-bold">当前销冠{% if whiteboard_data.sales_champion.is_tie %}（并列）{% endif %}</div>
                     <div>
                         <span class="whiteboard-champion-name">{{ whiteboard_data.sales_champion.display_name }}</span>
-                        <span class="whiteboard-champion-count ms-2">{{ whiteboard_data.sales_champion.order_count }} 单</span>
+                        <span class="whiteboard-champion-count ms-2">{{ "%.2f"|format(whiteboard_data.sales_champion.average_order_count) }} 单/上班日</span>
                     </div>
                 </div>
             </div>
@@ -3648,12 +3680,37 @@
                     </div>
                 </div>
 
-                <div class="col-md-2 text-md-end">
-                    {% if row.order_count >= 660 %}
-                        <span class="badge bg-success">进入提成阶梯</span>
-                    {% else %}
-                        <span class="badge bg-light text-dark border">未到 660</span>
-                    {% endif %}
+                <div class="col-md-2">
+                    <div class="d-flex align-items-center justify-content-md-between gap-2 flex-wrap">
+                        <div class="whiteboard-workday-average"
+                             title="{% if row.workday_count %}私域组局 {{ row.private_order_count }} 单 ÷ {{ row.workday_count }} 个上班日（{{ row.workday_source }}）{% else %}没有可计入分母的有效上班排班{% endif %}">
+                            <div class="whiteboard-workday-average-label">私域上班日日均</div>
+                            <div class="whiteboard-workday-average-value">
+                                {% if row.private_daily_average is not none %}
+                                    {{ "%.2f"|format(row.private_daily_average) }} 单
+                                {% else %}
+                                    —
+                                {% endif %}
+                            </div>
+                            <div class="whiteboard-workday-average-detail">
+                                {% if row.workday_count %}
+                                    {{ row.private_order_count }} 单 ÷ {{ row.workday_count }} 天
+                                {% else %}
+                                    无有效上班班次
+                                {% endif %}
+                            </div>
+                            {% if not row.is_sales_champion_eligible %}
+                            <div class="small text-muted">&#26426;&#21160;&#23703;&#19981;&#21442;&#19982;&#38144;&#20896;&#35780;&#23450;</div>
+                            {% endif %}
+                        </div>
+                        <div class="text-md-end">
+                            {% if row.order_count >= 660 %}
+                                <span class="badge bg-success">进入提成阶梯</span>
+                            {% else %}
+                                <span class="badge bg-light text-dark border">未到 660</span>
+                            {% endif %}
+                        </div>
+                    </div>
                 </div>
             </div>
 

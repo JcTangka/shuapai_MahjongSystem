@@ -380,6 +380,21 @@ class ContactCustomerFollowup(SQLModel, table=True):
     updated_by: Optional[str] = Field(default=None, index=True)
 
 
+class StoreWechatRestrictionEvent(SQLModel, table=True):
+    """门店微信整体受限事件；到预计恢复时间后按时间条件自动失效。"""
+    __tablename__ = "storewechatrestrictionevent"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    store_name: str = Field(index=True)
+    started_at: datetime = Field(index=True)
+    expected_recovery_at: datetime = Field(index=True)
+
+    created_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    created_by_name: str = Field(index=True)
+    created_at: datetime = Field(default_factory=datetime.now, index=True)
+    updated_at: datetime = Field(default_factory=datetime.now, index=True)
+
+
 class CancelledGameContactSnapshot(SQLModel, table=True):
     """未组齐牌局撤销前的接触顾客快照，仅用于“我的接触顾客”。"""
     __tablename__ = "cancelledgamecontactsnapshot"
@@ -1705,6 +1720,7 @@ def create_db_and_tables():
     migrate_customer_deposit_exemption_table()
     migrate_customer_complaint_record_table()
     migrate_contact_customer_followup_table()
+    migrate_store_wechat_restriction_event_table()
     migrate_cancelled_game_contact_snapshot_table()
     migrate_self_arrival_customer_table()
     migrate_new_customer_pull_record_table()
@@ -1948,6 +1964,36 @@ def migrate_contact_customer_followup_table():
         """))
 
 
+def migrate_store_wechat_restriction_event_table():
+    """创建门店微信整体受限事件表。"""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS storewechatrestrictionevent (
+                id INTEGER PRIMARY KEY,
+                store_name TEXT NOT NULL,
+                started_at DATETIME NOT NULL,
+                expected_recovery_at DATETIME NOT NULL,
+                created_by_user_id INTEGER,
+                created_by_name TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(created_by_user_id) REFERENCES user(id)
+            )
+        """))
+        for col_name in [
+            "store_name",
+            "started_at",
+            "expected_recovery_at",
+            "created_by_user_id",
+            "created_by_name",
+            "created_at",
+        ]:
+            conn.execute(text(f"""
+                CREATE INDEX IF NOT EXISTS ix_storewechatrestrictionevent_{col_name}
+                ON storewechatrestrictionevent ({col_name})
+            """))
+
+
 def migrate_cancelled_game_contact_snapshot_table():
     """创建未组齐牌局撤销前的接触顾客快照表；不回填历史撤销数据。"""
     with engine.begin() as conn:
@@ -2159,7 +2205,6 @@ RECOMMENDATION_DATE_TYPE_WORKDAY = "workday"
 RECOMMENDATION_DATE_TYPE_WEEKEND = "weekend"
 RECOMMENDATION_DATE_TYPE_HOLIDAY = "holiday"
 RECOMMENDATION_SNAPSHOT_WINDOW_DAYS = 30
-RECOMMENDATION_RECENT_ACTIVE_DAYS = 7
 
 def _migration_recommendation_time_bucket(played_at: datetime) -> int:
     hour = int((played_at or datetime.min).hour)
@@ -2179,6 +2224,19 @@ def _recommendation_pool_time_bucket(played_at: datetime) -> int:
     if 17 <= hour < 22:
         return 2
     return 3
+
+
+def _recommendation_top_time_pools(time_counts: Dict[int, int]) -> List[int]:
+    """Return time pools in the top two distinct positive count tiers, including ties."""
+    top_count_tiers = sorted(
+        {int(count or 0) for count in time_counts.values() if int(count or 0) > 0},
+        reverse=True,
+    )[:2]
+    return [
+        bucket
+        for bucket, count in time_counts.items()
+        if int(count or 0) in top_count_tiers
+    ]
 
 def _migration_recommendation_date_type(played_date: date, holiday_dates: set[date]) -> str:
     if played_date in holiday_dates:
@@ -2402,7 +2460,6 @@ def rebuild_recommendation_pool_snapshot(
     window_end = snapshot_at.date()
     clean_window_days = max(1, int(window_days or RECOMMENDATION_SNAPSHOT_WINDOW_DAYS))
     window_start = window_end - timedelta(days=clean_window_days - 1)
-    recent_start = window_end - timedelta(days=RECOMMENDATION_RECENT_ACTIVE_DAYS - 1)
 
     smoke_by_game_id = {
         row.game_id: row.smoke_type
@@ -2464,7 +2521,7 @@ def rebuild_recommendation_pool_snapshot(
             item["visit_count"] += 1
             if played_at > item["last_visit_at"]:
                 item["last_visit_at"] = played_at
-            # 自主到店属于真实到店，可更新30天次数、最近到店和7天活跃状态；
+            # 自主到店属于真实到店，可更新30天次数和最近到店时间；
             # 但其记录通常没有可靠的玩法、烟局信息，不用于三个偏好池的归属计算。
             if not is_preference_game:
                 continue
@@ -2487,8 +2544,6 @@ def rebuild_recommendation_pool_snapshot(
     active_customer_count = 0
     for (store_name, wechat_id), item in stats.items():
         last_visit_at = item["last_visit_at"]
-        if last_visit_at.date() < recent_start:
-            continue
 
         allowed_play_labels = []
         for play_label, play_count in item["play_counts"].items():
@@ -2508,12 +2563,7 @@ def rebuild_recommendation_pool_snapshot(
             for smoke_type, count in item["smoke_counts"].items()
             if count == max_smoke_count and count > 0
         ]
-        max_time_count = max(item["time_counts"].values())
-        time_pools = [
-            bucket
-            for bucket, count in item["time_counts"].items()
-            if count == max_time_count and count > 0
-        ]
+        time_pools = _recommendation_top_time_pools(item["time_counts"])
         if not smoke_pools or not time_pools:
             continue
 
@@ -2672,7 +2722,7 @@ def migrate_recommendation_prerequisite_tables():
     time_bucket_version_key = "recommendation_time_bucket_version"
     time_bucket_version = "5_bucket_v1"
     snapshot_version_key = "recommendation_snapshot_version"
-    snapshot_version = "recommendation_pool_v3"
+    snapshot_version = "recommendation_pool_v5"
     needs_time_bucket_rebuild = True
     needs_snapshot_full_rebuild = True
 
@@ -2793,7 +2843,7 @@ def migrate_recommendation_prerequisite_tables():
         print(
             "已构建智能推荐三维池快照 "
             f"{snapshot_result['pool_snapshot_count']} 条池成员 / "
-            f"{snapshot_result['active_customer_count']} 位近7天活跃顾客"
+            f"{snapshot_result['active_customer_count']} 个入池顾客门店组合"
         )
 
 def migrate_brand_blacklist_entry_table():

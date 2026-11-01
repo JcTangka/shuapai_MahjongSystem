@@ -1269,7 +1269,7 @@
 
                         <div class="col-md-6">
                             <label class="form-label fw-bold">微信号</label>
-                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_add_player_1_wechat" placeholder="6到20位，以字母或下划线开头">
+                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_add_player_1_wechat" placeholder="6到20位，以字母、下划线或减号开头">
                         </div>
 
                         <div class="col-md-6">
@@ -1397,7 +1397,7 @@
 
                         <div class="col-md-6">
                             <label class="form-label fw-bold">微信号</label>
-                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_edit_player_1_wechat" placeholder="6到20位，以字母或下划线开头">
+                            <input type="text" class="form-control" name="player_1_wechat" id="self_arrival_edit_player_1_wechat" placeholder="6到20位，以字母、下划线或减号开头">
                         </div>
 
                         <div class="col-md-6">
@@ -1672,7 +1672,7 @@
                         </div>
 
                         <div class="overflow-form-note mt-3">
-                            参与人规则与常规单保持一致：昵称和微信号必须成对填写；微信号为6到20位，以英文字母或下划线开头，仅可包含英文字母、数字、下划线和减号；同一局内相同微信号不能对应不同昵称。<br>
+                            参与人规则与常规单保持一致：昵称和微信号必须成对填写；微信号为6到20位，以英文字母、下划线或减号开头，仅可包含英文字母、数字、下划线和减号；同一局内相同微信号不能对应不同昵称。<br>
                             若参与人备注有内容，后端保存后会同步联动到“待办及信息同步区”。
                         </div>
                     </div>
@@ -2692,8 +2692,8 @@
         const unchangedLegacyWechat = mode === 'edit'
             && wechatInput?.dataset.originalValue !== undefined
             && wechat === wechatInput.dataset.originalValue;
-        if (wechat && !/^[A-Za-z_][A-Za-z0-9_-]{5,19}$/.test(wechat) && !unchangedLegacyWechat) {
-            alert('微信号格式不正确：必须为6到20位，以英文字母或下划线开头，且只能包含英文字母、数字、下划线和减号');
+        if (wechat && !/^[A-Za-z_-][A-Za-z0-9_-]{5,19}$/.test(wechat) && !unchangedLegacyWechat) {
+            alert('微信号格式不正确：必须为6到20位，以英文字母、下划线或减号开头，且只能包含英文字母、数字、下划线和减号');
             return false;
         }
 
@@ -2716,14 +2716,6 @@
         }
         if (mode === 'edit' && paymentMethod === '代客收款' && fee === 0 && !tableNote) {
             alert('下单方式为“代客收款”且费用为 0 时，必须填写整桌备注');
-            return false;
-        }
-        if (!validateSelectedRoomPriceRemark(
-            `self_arrival_${mode}_room_name`,
-            `self_arrival_${mode}_room_fee`,
-            `self_arrival_${mode}_table_note`,
-            true
-        )) {
             return false;
         }
 
@@ -2844,8 +2836,8 @@
                 const unchangedLegacy = mode === 'edit'
                     && wechatInput?.dataset.originalValue !== undefined
                     && wechat === wechatInput.dataset.originalValue;
-                if (!/^[A-Za-z_][A-Za-z0-9_-]{5,19}$/.test(wechat) && !unchangedLegacy) {
-                    const message = `参与人 ${i} 微信号格式不正确：必须为6到20位，以英文字母或下划线开头，且只能包含英文字母、数字、下划线和减号`;
+                if (!/^[A-Za-z_-][A-Za-z0-9_-]{5,19}$/.test(wechat) && !unchangedLegacy) {
+                    const message = `参与人 ${i} 微信号格式不正确：必须为6到20位，以英文字母、下划线或减号开头，且只能包含英文字母、数字、下划线和减号`;
                     highlightOverflowIndices(mode, [i], message);
                     alert(message);
                     return false;
@@ -3473,8 +3465,8 @@
             if (wechat) {
                 const unchangedLegacy = wechatInput?.dataset.originalValue !== undefined
                     && wechat === wechatInput.dataset.originalValue;
-                if (!/^[A-Za-z_][A-Za-z0-9_-]{5,19}$/.test(wechat) && !unchangedLegacy) {
-                    const message = `参与人 ${i} 微信号格式不正确：必须为6到20位，以英文字母或下划线开头，且只能包含英文字母、数字、下划线和减号`;
+                if (!/^[A-Za-z_-][A-Za-z0-9_-]{5,19}$/.test(wechat) && !unchangedLegacy) {
+                    const message = `参与人 ${i} 微信号格式不正确：必须为6到20位，以英文字母、下划线或减号开头，且只能包含英文字母、数字、下划线和减号`;
                     highlightFormedIndices([i], message);
                     alert(message);
                     return false;

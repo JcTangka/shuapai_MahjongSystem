@@ -340,7 +340,7 @@
       </div>
       <div class="modal-body">
         <div class="alert alert-info py-2">
-          只允许启用一套规则。系统按订单登记时是否存在进行中的带店记录，自动使用该规则的“有激活岗”或“无激活岗”分支；异常记录会随排班、规则和订单实时变化。
+          只允许启用一套规则。每个班次可以增加多个时间段，每个时间段可以多选门店。系统按订单登记时是否存在进行中的带店记录，自动使用该规则的“有激活岗”或“无激活岗”分支，并按订单登记时间匹配班次时段。开始、结束时间都留空表示整个班次；开始时间晚于结束时间表示跨午夜；同一班次的时段不能重叠。异常记录会随排班、规则和订单实时变化。
         </div>
         <div class="form-check mb-3">
           <input class="form-check-input" type="radio" name="enabledMobileRule" id="disableAllMobileRules" value="none">
@@ -549,33 +549,113 @@
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 
-  const createRulePairRow = (assignment = {}) => {
+  const createRuleTimeRow = (assignment = {}) => {
     const row = document.createElement("div");
-    row.className = "row g-2 align-items-start mobile-rule-pair-row mb-2";
+    row.className = "row g-3 align-items-start mobile-rule-time-row mb-3";
     const selectedStores = new Set(assignment.store_names || []);
     row.innerHTML = `
       <div class="col-md-3">
-        <select class="form-select mobile-rule-shift">
-          ${mobileRuleShiftOptions.map(([value, label]) => `<option value="${escapeHtml(value)}" ${value === assignment.shift_type ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
-        </select>
+        <label class="form-label small mb-1">开始时间</label>
+        <input type="time" class="form-control mobile-rule-start-time" value="${escapeHtml(assignment.start_time || "")}" aria-label="开始时间">
       </div>
-      <div class="col-md-8">
-        <select class="form-select mobile-rule-stores" multiple aria-label="可负责门店">
+      <div class="col-md-3">
+        <label class="form-label small mb-1">结束时间</label>
+        <input type="time" class="form-control mobile-rule-end-time" value="${escapeHtml(assignment.end_time || "")}" aria-label="结束时间">
+      </div>
+      <div class="col-md-5">
+        <label class="form-label small mb-1">该时段负责门店（可多选）</label>
+        <select class="form-select mobile-rule-stores" multiple size="4" aria-label="该时段可负责门店">
           ${mobileRuleStores.map((storeName) => `<option value="${escapeHtml(storeName)}" ${selectedStores.has(storeName) ? "selected" : ""}>${escapeHtml(storeName)}</option>`).join("")}
         </select>
         <div class="form-text">按住 Ctrl 可多选门店。</div>
       </div>
-      <div class="col-md-1 d-grid">
-        <button type="button" class="btn btn-outline-danger mobile-rule-remove-pair" title="删除班次门店对">
+      <div class="col-md-1 d-grid pt-md-4">
+        <button type="button" class="btn btn-outline-danger mobile-rule-remove-time" title="删除该时间段">
           <i class="bi bi-trash"></i>
         </button>
       </div>`;
-    row.querySelector(".mobile-rule-remove-pair").addEventListener("click", () => row.remove());
     return row;
   };
 
-  const appendPair = (card, branch, assignment = {}) => {
-    card.querySelector(`[data-rule-branch="${branch}"]`).appendChild(createRulePairRow(assignment));
+  const appendTimeRow = (shiftBlock, assignment = {}) => {
+    const segmentContainer = shiftBlock.querySelector("[data-shift-segments]");
+    const row = createRuleTimeRow(assignment);
+    row.querySelector(".mobile-rule-remove-time").addEventListener("click", () => {
+      if (segmentContainer.querySelectorAll(".mobile-rule-time-row").length <= 1) {
+        window.alert("每个班次至少保留一个时间段；如果不需要该班次，请删除整个班次。");
+        return;
+      }
+      row.remove();
+    });
+    segmentContainer.appendChild(row);
+  };
+
+  const createRuleShiftBlock = (shiftType = "", assignments = [{}]) => {
+    const block = document.createElement("div");
+    block.className = "card border-primary-subtle mobile-rule-shift-block mb-3";
+    block.innerHTML = `
+      <div class="card-header bg-light d-flex align-items-end justify-content-between gap-3 flex-wrap">
+        <div style="min-width: 220px; max-width: 320px;" class="flex-grow-1">
+          <label class="form-label small fw-bold mb-1">班次</label>
+          <select class="form-select mobile-rule-shift">
+            ${mobileRuleShiftOptions.map(([value, label]) => `<option value="${escapeHtml(value)}" ${value === shiftType ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+          </select>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline-danger mobile-rule-remove-shift">
+          <i class="bi bi-trash me-1"></i>删除班次
+        </button>
+      </div>
+      <div class="card-body pb-2">
+        <div data-shift-segments></div>
+        <button type="button" class="btn btn-sm btn-outline-primary mobile-rule-add-time">
+          <i class="bi bi-plus me-1"></i>增加时间段
+        </button>
+      </div>`;
+    const shiftSelect = block.querySelector(".mobile-rule-shift");
+    shiftSelect.dataset.previousValue = shiftSelect.value;
+    shiftSelect.addEventListener("change", () => {
+      const branchContainer = block.closest("[data-rule-branch]");
+      const duplicate = Array.from(branchContainer.querySelectorAll(".mobile-rule-shift"))
+        .some((otherSelect) => otherSelect !== shiftSelect && otherSelect.value === shiftSelect.value);
+      if (duplicate) {
+        window.alert("同一分支内，一个班次只能添加一次；请在该班次中继续增加时间段。");
+        shiftSelect.value = shiftSelect.dataset.previousValue;
+        return;
+      }
+      shiftSelect.dataset.previousValue = shiftSelect.value;
+    });
+    block.querySelector(".mobile-rule-add-time").addEventListener("click", () => appendTimeRow(block));
+    block.querySelector(".mobile-rule-remove-shift").addEventListener("click", () => block.remove());
+    (assignments.length ? assignments : [{}]).forEach((assignment) => appendTimeRow(block, assignment));
+    return block;
+  };
+
+  const appendShiftBlock = (card, branch, shiftType = "", assignments = [{}]) => {
+    const branchContainer = card.querySelector(`[data-rule-branch="${branch}"]`);
+    const usedShiftTypes = new Set(
+      Array.from(branchContainer.querySelectorAll(".mobile-rule-shift")).map((select) => select.value)
+    );
+    const requestedShift = shiftType || mobileRuleShiftOptions.find(([value]) => !usedShiftTypes.has(value))?.[0];
+    if (!requestedShift || usedShiftTypes.has(requestedShift)) {
+      window.alert("该分支中的班次已全部添加；请在对应班次内增加时间段。");
+      return;
+    }
+    branchContainer.appendChild(createRuleShiftBlock(requestedShift, assignments));
+  };
+
+  const groupAssignmentsByShift = (assignments = []) => {
+    const groups = [];
+    const groupMap = new Map();
+    assignments.forEach((assignment) => {
+      const shiftType = assignment.shift_type || mobileRuleShiftOptions[0]?.[0] || "off";
+      if (!groupMap.has(shiftType)) {
+        const group = {shiftType, assignments: []};
+        groupMap.set(shiftType, group);
+        groups.push(group);
+      }
+      groupMap.get(shiftType).assignments.push(assignment);
+    });
+    return groups;
   };
 
   const refreshRuleCardState = () => {
@@ -602,26 +682,26 @@
         <button type="button" class="btn btn-sm btn-outline-danger mobile-rule-remove">删除规则</button>
       </div>
       <div class="card-body">
-        <div class="row g-3">
-          <div class="col-lg-6">
+        <div class="row g-4">
+          <div class="col-12">
             <div class="fw-bold mb-2"><i class="bi bi-person-check text-success me-1"></i>有激活岗</div>
             <div data-rule-branch="active"></div>
-            <button type="button" class="btn btn-sm btn-outline-secondary mobile-rule-add-pair" data-branch="active">
-              <i class="bi bi-plus me-1"></i>增加班次门店对
+            <button type="button" class="btn btn-sm btn-outline-secondary mobile-rule-add-shift" data-branch="active">
+              <i class="bi bi-plus me-1"></i>增加班次
             </button>
           </div>
-          <div class="col-lg-6">
+          <div class="col-12 border-top pt-3">
             <div class="fw-bold mb-2"><i class="bi bi-person-dash text-secondary me-1"></i>无激活岗</div>
             <div data-rule-branch="inactive"></div>
-            <button type="button" class="btn btn-sm btn-outline-secondary mobile-rule-add-pair" data-branch="inactive">
-              <i class="bi bi-plus me-1"></i>增加班次门店对
+            <button type="button" class="btn btn-sm btn-outline-secondary mobile-rule-add-shift" data-branch="inactive">
+              <i class="bi bi-plus me-1"></i>增加班次
             </button>
           </div>
         </div>
       </div>`;
 
-    card.querySelectorAll(".mobile-rule-add-pair").forEach((button) => {
-      button.addEventListener("click", () => appendPair(card, button.dataset.branch));
+    card.querySelectorAll(".mobile-rule-add-shift").forEach((button) => {
+      button.addEventListener("click", () => appendShiftBlock(card, button.dataset.branch));
     });
     card.querySelector(".mobile-rule-remove").addEventListener("click", () => {
       if (document.querySelectorAll(".mobile-rule-card").length <= 1) {
@@ -636,8 +716,12 @@
 
     const activeRows = rule.active_assignments || [];
     const inactiveRows = rule.inactive_assignments || [];
-    (activeRows.length ? activeRows : [{}]).forEach((item) => appendPair(card, "active", item));
-    (inactiveRows.length ? inactiveRows : [{}]).forEach((item) => appendPair(card, "inactive", item));
+    const activeGroups = groupAssignmentsByShift(activeRows);
+    const inactiveGroups = groupAssignmentsByShift(inactiveRows);
+    (activeGroups.length ? activeGroups : [{shiftType: mobileRuleShiftOptions[0]?.[0] || "off", assignments: [{}]}])
+      .forEach((group) => appendShiftBlock(card, "active", group.shiftType, group.assignments));
+    (inactiveGroups.length ? inactiveGroups : [{shiftType: mobileRuleShiftOptions[0]?.[0] || "off", assignments: [{}]}])
+      .forEach((group) => appendShiftBlock(card, "inactive", group.shiftType, group.assignments));
     refreshRuleCardState();
   };
 
@@ -653,11 +737,74 @@
 
     mobileRuleForm.addEventListener("submit", (event) => {
       const cards = Array.from(document.querySelectorAll(".mobile-rule-card"));
+      const branchLabels = {active: "有激活岗", inactive: "无激活岗"};
+      const timeToMinutes = (value) => {
+        const [hour, minute] = value.split(":").map(Number);
+        return hour * 60 + minute;
+      };
+      const timeIntervals = (startTime, endTime) => {
+        if (!startTime && !endTime) {
+          return [[0, 24 * 60]];
+        }
+        const start = timeToMinutes(startTime);
+        const end = timeToMinutes(endTime);
+        return start < end ? [[start, end]] : [[start, 24 * 60], [0, end]];
+      };
+      for (const card of cards) {
+        const ruleName = card.querySelector(".mobile-rule-name").value.trim() || "未命名规则";
+        for (const branch of ["active", "inactive"]) {
+          const shiftBlocks = Array.from(card.querySelectorAll(`[data-rule-branch="${branch}"] .mobile-rule-shift-block`));
+          const shiftTypes = new Set();
+          for (const shiftBlock of shiftBlocks) {
+            const shiftSelect = shiftBlock.querySelector(".mobile-rule-shift");
+            const shiftType = shiftSelect.value;
+            const shiftLabel = shiftSelect.selectedOptions[0]?.textContent || shiftType;
+            if (shiftTypes.has(shiftType)) {
+              event.preventDefault();
+              window.alert(`${ruleName}—${branchLabels[branch]}中${shiftLabel}重复，请合并到同一个班次内。`);
+              return;
+            }
+            shiftTypes.add(shiftType);
+            const rows = Array.from(shiftBlock.querySelectorAll(".mobile-rule-time-row"));
+            const seenIntervals = [];
+            for (const [rowIndex, row] of rows.entries()) {
+              const startTime = row.querySelector(".mobile-rule-start-time").value;
+              const endTime = row.querySelector(".mobile-rule-end-time").value;
+              if (Boolean(startTime) !== Boolean(endTime)) {
+                event.preventDefault();
+                window.alert(`${ruleName}—${branchLabels[branch]}的${shiftLabel}第 ${rowIndex + 1} 个时间段必须同时填写开始时间和结束时间。`);
+                return;
+              }
+              if (startTime && startTime === endTime) {
+                event.preventDefault();
+                window.alert(`${ruleName}—${branchLabels[branch]}的${shiftLabel}第 ${rowIndex + 1} 个时间段开始时间和结束时间不能相同。`);
+                return;
+              }
+              for (const [intervalStart, intervalEnd] of timeIntervals(startTime, endTime)) {
+                const conflict = seenIntervals.find((item) => intervalStart < item.end && item.start < intervalEnd);
+                if (conflict) {
+                  event.preventDefault();
+                  window.alert(`${ruleName}—${branchLabels[branch]}的${shiftLabel}第 ${conflict.rowIndex + 1} 个与第 ${rowIndex + 1} 个时间段重叠。`);
+                  return;
+                }
+                seenIntervals.push({start: intervalStart, end: intervalEnd, rowIndex});
+              }
+            }
+          }
+        }
+      }
       const payload = cards.map((card) => {
-        const readBranch = (branch) => Array.from(card.querySelectorAll(`[data-rule-branch="${branch}"] .mobile-rule-pair-row`)).map((row) => ({
-          shift_type: row.querySelector(".mobile-rule-shift").value,
-          store_names: Array.from(row.querySelector(".mobile-rule-stores").selectedOptions).map((option) => option.value),
-        }));
+        const readBranch = (branch) => Array.from(
+          card.querySelectorAll(`[data-rule-branch="${branch}"] .mobile-rule-shift-block`)
+        ).flatMap((shiftBlock) => {
+          const shiftType = shiftBlock.querySelector(".mobile-rule-shift").value;
+          return Array.from(shiftBlock.querySelectorAll(".mobile-rule-time-row")).map((row) => ({
+            shift_type: shiftType,
+            start_time: row.querySelector(".mobile-rule-start-time").value,
+            end_time: row.querySelector(".mobile-rule-end-time").value,
+            store_names: Array.from(row.querySelector(".mobile-rule-stores").selectedOptions).map((option) => option.value),
+          }));
+        });
         return {
           id: card.dataset.ruleId || null,
           name: card.querySelector(".mobile-rule-name").value.trim(),

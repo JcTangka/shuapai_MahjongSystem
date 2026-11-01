@@ -472,11 +472,15 @@
     {% if dimension == 'store' %}
     <div class="chart-box mt-4">
       <div class="fw-bold mb-1">玩法统计</div>
-      <div class="section-subtitle mb-3">统计当前周期内该门店各玩法的已组齐桌数</div>
+      <div class="section-subtitle mb-3">按玩法分组，各分数大小以小柱并排展示当前周期内该门店的已组齐桌数（常规单＋溢出单，不含自主到店）</div>
       {% if stats.charts.game_type_labels %}
-      <canvas id="gameTypeChart" height="120"></canvas>
+      <div style="overflow-x: auto;">
+        <div id="gameTypeChartContainer" style="position: relative; height: 400px;">
+          <canvas id="gameTypeChart"></canvas>
+        </div>
+      </div>
       {% else %}
-      <div class="text-muted text-center py-5">当前周期暂无玩法订单</div>
+      <div class="text-muted text-center py-5">当前周期暂无可统计的私域玩法订单</div>
       {% endif %}
     </div>
     {% endif %}
@@ -496,7 +500,7 @@
   const privateOrderTrend = {{ private_order_trend_json | safe }};
   const selfArrivalOrderTrend = {{ self_arrival_order_trend_json | safe }};
   const gameTypeLabels = {{ game_type_labels_json | safe }};
-  const gameTypeCounts = {{ game_type_counts_json | safe }};
+  const gameTypeDatasets = {{ game_type_datasets_json | safe }};
   const customerFunnel = {{ customer_funnel_json | safe }};
   const compareMode = "{{ compare_mode }}";
 
@@ -742,38 +746,68 @@
       "rgba(220, 38, 38, 0.72)",
       "rgba(8, 145, 178, 0.72)"
     ];
+    // 为每根小柱留出标签宽度；类别较多时横向滚动。
+    document.getElementById("gameTypeChartContainer").style.minWidth =
+      Math.max(600, gameTypeLabels.length * gameTypeDatasets.length * 64 + 80) + "px";
+    const gameTypeBarLabels = {
+      id: "gameTypeBarLabels",
+      afterDatasetsDraw(chart) {
+        const { ctx } = chart;
+        ctx.save();
+        ctx.fillStyle = "#1f2937";
+        ctx.font = "600 11px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        chart.data.datasets.forEach((dataset, datasetIndex) => {
+          if (!chart.isDatasetVisible(datasetIndex)) return;
+          chart.getDatasetMeta(datasetIndex).data.forEach((bar, index) => {
+            const count = Number(dataset.data[index]) || 0;
+            if (count <= 0) return;
+            ctx.fillText(dataset.label, bar.x, bar.y - 20);
+            ctx.fillText(count + "桌", bar.x, bar.y - 5);
+          });
+        });
+        ctx.restore();
+      }
+    };
     new Chart(gameTypeCanvas, {
+      plugins: [gameTypeBarLabels],
       type: "bar",
       data: {
         labels: gameTypeLabels,
-        datasets: [{
-          label: "桌数",
-          data: gameTypeCounts,
-          backgroundColor: gameTypeLabels.map((_, index) => gameTypeColors[index % gameTypeColors.length]),
-          borderColor: gameTypeLabels.map((_, index) => gameTypeColors[index % gameTypeColors.length].replace("0.72", "1")),
+        datasets: gameTypeDatasets.map((dataset, index) => ({
+          ...dataset,
+          backgroundColor: gameTypeColors[index % gameTypeColors.length],
+          borderColor: gameTypeColors[index % gameTypeColors.length].replace("0.72", "1"),
           borderWidth: 1
-        }]
+        }))
       },
       options: {
         responsive: true,
+        maintainAspectRatio: false,
+        layout: { padding: { top: 36 } },
+        interaction: { mode: "index", intersect: false },
         plugins: {
-          legend: {
-            display: false
-          },
+          legend: { display: true },
           tooltip: {
+            filter: function(context) { return context.parsed.y > 0; },
             callbacks: {
               label: function(context) {
-                return context.parsed.y + " 桌";
+                return context.dataset.label + context.label + "：" + context.parsed.y + " 桌";
+              },
+              footer: function(items) {
+                return "合计：" + items.reduce((sum, item) => sum + item.parsed.y, 0) + " 桌";
               }
             }
           }
         },
         scales: {
+          x: { stacked: false },
           y: {
+            stacked: false,
             beginAtZero: true,
-            ticks: {
-              precision: 0
-            }
+            grace: "15%",
+            ticks: { precision: 0 }
           }
         }
       }

@@ -173,12 +173,15 @@
                     <td><input type="hidden" name="record_id" value="{{ item.id }}"><input type="text" class="form-control form-control-sm pull-status-text {% if is_exempt %}deposit-exempt-mark{% endif %}" name="customer_nickname_{{ item.id }}" value="{{ item.customer_nickname }}" data-row-id="{{ item.id }}"></td>
                     <td><input type="text" class="form-control form-control-sm pull-status-text {% if is_exempt %}deposit-exempt-mark{% endif %}" name="customer_wechat_id_{{ item.id }}" value="{{ item.customer_wechat_id }}" data-row-id="{{ item.id }}"></td>
                     <td style="min-width: 180px;">
-                        {% set is_custom_remark = item.remark and item.remark != '隐私设置' %}
+                        {% set current_shift_only_remarks = ['隐私设置', '麻友未拉进小群', '情侣局2V2未拉进小群'] %}
+                        {% set is_custom_remark = item.remark and item.remark not in current_shift_only_remarks %}
                         <select class="form-select form-select-sm pull-remark-choice"
                                 name="remark_choice_{{ item.id }}"
                                 data-row-id="{{ item.id }}">
                             <option value="" {% if not item.remark %}selected{% endif %}>请选择</option>
                             <option value="privacy_settings" {% if item.remark == '隐私设置' %}selected{% endif %}>隐私设置</option>
+                            <option value="mahjong_friend_not_in_small_group" {% if item.remark == '麻友未拉进小群' %}selected{% endif %}>麻友未拉进小群</option>
+                            <option value="couple_2v2_not_in_small_group" {% if item.remark == '情侣局2V2未拉进小群' %}selected{% endif %}>情侣局2V2未拉进小群</option>
                             <option value="custom" {% if is_custom_remark %}selected{% endif %}>自定义备注</option>
                         </select>
                         <textarea class="form-control form-control-sm mt-2 pull-custom-remark {% if not is_custom_remark %}d-none{% endif %}"
@@ -774,6 +777,7 @@
                     <i class="bi bi-arrow-clockwise me-1"></i>重置
                 </a>
             </div>
+
         </form>
     </div>
 </div>
@@ -895,7 +899,83 @@
                     <i class="bi bi-arrow-clockwise me-1"></i>重置
                 </a>
             </div>
+
+            <div class="col-lg-3 col-md-6 ms-lg-auto text-lg-end">
+                <button type="button"
+                        class="btn btn-outline-danger rounded-pill px-4"
+                        data-bs-toggle="modal"
+                        data-bs-target="#addStoreWechatRestrictionModal">
+                    <i class="bi bi-exclamation-octagon me-1"></i>添加门店微信受限
+                </button>
+            </div>
         </form>
+
+        {% if active_store_wechat_restrictions %}
+        <div class="alert alert-danger mt-3 mb-0">
+            <div class="fw-bold mb-1">当前微信受限门店</div>
+            {% for item in active_store_wechat_restrictions %}
+            <div class="small">
+                {{ item.store_name }}：{{ item.started_at_text }} 至 {{ item.expected_recovery_at_text }}（到期自动关闭）
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="modal fade" id="addStoreWechatRestrictionModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content border-0 shadow-lg">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title"><i class="bi bi-wechat me-2"></i>添加门店微信受限</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form action="/contact-customers/store-wechat-restrictions/add" method="post">
+                <div class="modal-body">
+                    <input type="hidden" name="store" value="{{ current_store }}">
+                    <input type="hidden" name="contact_date_filter" value="{{ contact_date_filter or 'today' }}">
+                    <input type="hidden" name="contact_start_date" value="{{ contact_start_date or '' }}">
+                    <input type="hidden" name="contact_end_date" value="{{ contact_end_date or '' }}">
+                    <input type="hidden" name="contact_store_filter" value="{{ contact_store_filter or 'all' }}">
+                    <input type="hidden" name="contact_employee" value="{{ contact_employee or 'all' }}">
+
+                    <div class="alert alert-warning small">
+                        保存后立即生效。受限期间产生且尚未拉群的接触顾客，会统一标记为“因门店微信受限待补拉”；到预计恢复时间后事件自动关闭。
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">受限门店</label>
+                        <select class="form-select" name="store_name" required>
+                            {% for store_name in store_list %}
+                            <option value="{{ store_name }}" {% if store_name == current_store %}selected{% endif %}>{{ store_name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">开始时间</label>
+                        <input type="datetime-local"
+                               class="form-control"
+                               name="started_at"
+                               value="{{ store_wechat_restriction_default_start or '' }}"
+                               required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">预计恢复时间</label>
+                        <input type="datetime-local"
+                               class="form-control"
+                               name="expected_recovery_at"
+                               min="{{ store_wechat_restriction_default_start or '' }}"
+                               required>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-danger">保存并立即生效</button>
+                </div>
+            </form>
+        </div>
     </div>
 </div>
 
@@ -966,7 +1046,13 @@
                         <td class="fw-bold {% if item_is_exempt %}deposit-exempt-mark{% endif %}">{{ item.wechat_id }}</td>
                         <td>{{ item.store_name or '-' }}</td>
                         <td>
+                            {% if item.restriction_pending %}
+                            <textarea class="form-control form-control-sm text-danger fw-bold border-danger"
+                                      rows="1"
+                                      disabled>{{ item.restriction_remark }}</textarea>
+                            {% else %}
                             <textarea class="form-control form-control-sm" name="remark_{{ row_index }}" rows="1" placeholder="填写备注">{{ item.remark }}</textarea>
+                            {% endif %}
                         </td>
                         <td>
                             <input type="hidden" name="wechat_id" value="{{ item.wechat_id }}">
@@ -1182,7 +1268,7 @@
                     <div class="mb-3">
                         <label class="form-label fw-bold">微信号</label>
                         <input type="text" name="wechat_id" class="form-control" required>
-                        <div class="form-text">6到20位，以英文字母或下划线开头，仅可包含英文字母、数字、下划线和减号。</div>
+                        <div class="form-text">6到20位，以英文字母、下划线或减号开头，仅可包含英文字母、数字、下划线和减号。</div>
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-bold">意向门店</label>
@@ -1273,7 +1359,7 @@
                     <div class="mb-3">
                         <label class="form-label fw-bold">微信号 (唯一标识)</label>
                         <input type="text" name="wechat_id" class="form-control" required>
-                        <div class="form-text">6到20位，以英文字母或下划线开头，仅可包含英文字母、数字、下划线和减号。</div>
+                        <div class="form-text">6到20位，以英文字母、下划线或减号开头，仅可包含英文字母、数字、下划线和减号。</div>
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-bold">性别</label>
