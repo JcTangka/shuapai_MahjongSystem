@@ -1173,7 +1173,7 @@ class EmployeeLeaveRequest(SQLModel, table=True):
 
     # 系统根据 ShiftSchedule 自动读取并保存快照
     shift_type: str = Field(default="off", index=True)    # early / mid / bigmid / night1 / night2 / off / public_rest
-    leave_type: str = Field(default="leave", index=True)  # leave / public_rest
+    leave_type: str = Field(default="leave", index=True)  # leave / retro_leave / public_rest
     shift_snapshot_json: Optional[str] = None             # 公休区间内原始班次快照
 
     reason: str
@@ -1281,8 +1281,8 @@ class EmployeeAttendanceRecord(SQLModel, table=True):
     员工考勤事件表。
 
     说明：
-    1. 记录请假、迟到、旷工、工作失误等事实；
-    2. 请假一般由 EmployeeLeaveRequest 审批通过后自动生成；
+    1. 记录请假、补假、迟到、旷工、工作失误等事实；
+    2. 请假和补假一般由 EmployeeLeaveRequest 审批通过后自动生成；
     3. 迟到、旷工、工作失误由管理员手动登记；
     4. 若产生扣款，需要同步生成 SalaryFlowRecord。
     """
@@ -1295,7 +1295,7 @@ class EmployeeAttendanceRecord(SQLModel, table=True):
 
     event_date: date = Field(index=True)
 
-    # leave / late / absent / mistake / other
+    # leave / retro_leave / late / absent / mistake / other
     event_type: str = Field(index=True)
 
     # 当天班次快照：early / mid / bigmid / night1 / night2 / off
@@ -1365,7 +1365,7 @@ class SalaryFlowRecord(SQLModel, table=True):
     # deduction / attendance / manual_adjustment / replacement_work / settlement
     flow_category: str = Field(index=True)
 
-    # 小类：monthly_base_salary / leave_deduct / late_deduct / personal_order_commission 等
+    # 小类：monthly_base_salary / leave_deduct / retro_leave_deduct / late_deduct / personal_order_commission 等
     flow_type: str = Field(index=True)
 
     # 正数=加钱，负数=扣钱
@@ -1476,7 +1476,7 @@ class MonthlySalarySettlement(SQLModel, table=True):
     team_id: Optional[int] = Field(default=None, foreign_key="employeeteam.id", index=True)
     team_name_snapshot: Optional[str] = None
 
-    # draft / confirmed / paid / locked
+    # draft / pending_employee_confirmation / confirmed / paid / locked
     status: str = Field(default="draft", index=True)
 
     calculated_at: Optional[datetime] = Field(default=None, index=True)
@@ -1485,6 +1485,8 @@ class MonthlySalarySettlement(SQLModel, table=True):
     employee_confirmed_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
     employee_confirmed_by_name: Optional[str] = None
     employee_confirmed_at: Optional[datetime] = Field(default=None, index=True)
+    # 管理员每次发送/重发待确认工资时清空；员工打开“我的工资”后写入。
+    employee_confirmation_viewed_at: Optional[datetime] = Field(default=None, index=True)
 
     confirmed_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
     confirmed_by_name: Optional[str] = None
@@ -4037,6 +4039,12 @@ def migrate_monthly_salary_settlement_table():
                 ADD COLUMN employee_confirmed_at DATETIME
             """))
 
+        if "employee_confirmation_viewed_at" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE monthlysalarysettlement
+                ADD COLUMN employee_confirmation_viewed_at DATETIME
+            """))
+
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS ix_monthlysalarysettlement_employee_confirmed
             ON monthlysalarysettlement (employee_confirmed)
@@ -4049,6 +4057,10 @@ def migrate_monthly_salary_settlement_table():
             CREATE INDEX IF NOT EXISTS ix_monthlysalarysettlement_employee_confirmed_at
             ON monthlysalarysettlement (employee_confirmed_at)
         """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_monthlysalarysettlement_employee_confirmation_viewed_at
+            ON monthlysalarysettlement (employee_confirmation_viewed_at)
+        """))
 
         if employee_confirmed_added:
             conn.execute(text("""
@@ -4058,6 +4070,35 @@ def migrate_monthly_salary_settlement_table():
                     employee_confirmed_at = COALESCE(employee_confirmed_at, confirmed_at, paid_at, calculated_at, updated_at)
                 WHERE status IN ('confirmed', 'paid', 'locked')
                   AND employee_confirmed = 0
+            """))
+
+        # 新版简化流程中，员工确认即为最终确认并锁定。
+        # 兼容旧流程里“员工已确认、仍等待管理员确认”的 draft 记录。
+        conn.execute(text("""
+            UPDATE monthlysalarysettlement
+            SET status = 'confirmed'
+            WHERE status = 'draft'
+              AND employee_confirmed = 1
+        """))
+
+        salary_flow_table_exists = conn.execute(text("""
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table' AND name='salaryflowrecord'
+        """)).fetchone()
+        if salary_flow_table_exists:
+            conn.execute(text("""
+                UPDATE salaryflowrecord
+                SET is_locked = 1
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM monthlysalarysettlement settlement
+                    WHERE settlement.user_id = salaryflowrecord.user_id
+                      AND settlement.salary_year = salaryflowrecord.salary_year
+                      AND settlement.salary_month = salaryflowrecord.salary_month
+                      AND settlement.employee_confirmed = 1
+                      AND settlement.status IN ('confirmed', 'paid', 'locked')
+                )
             """))
 
 
@@ -4548,4 +4589,3 @@ sqlite_file_name = "mahjong.db"
 sqlite_url = f"sqlite:///{sqlite_file_name}"
 
 engine = create_engine(sqlite_url)
-

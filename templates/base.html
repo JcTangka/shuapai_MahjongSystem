@@ -64,6 +64,17 @@
         /* 图标与文字间距 */
         #sidebar .nav-link i { margin-right: 10px; }
 
+        .salary-nav-notification-dot {
+            display: inline-block;
+            width: 9px;
+            height: 9px;
+            margin-left: 8px;
+            border-radius: 50%;
+            background-color: #ff4d4f;
+            box-shadow: 0 0 0 2px rgba(255, 77, 79, 0.18);
+            vertical-align: middle;
+        }
+
         /* === 顶部导航栏 === */
         #top-navbar {
             background-color: #1890ff; /* 品牌主色调 */
@@ -224,6 +235,11 @@
                 <li>
                     <a href="/employees?store={{ current_store }}" class="nav-link {% if page_name == 'employees' %}active{% endif %}">
                         <i class="bi bi-person-badge"></i> 员工管理
+                        {% if has_unviewed_salary_confirmation %}
+                            <span class="salary-nav-notification-dot"
+                                  title="有工资待确认"
+                                  aria-label="有工资待确认"></span>
+                        {% endif %}
                     </a>
                 </li>
                 <li>

@@ -69,7 +69,19 @@ pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 # 挂载静态文件和模板
 app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+def _global_template_context(request: Request) -> dict:
+    """所有继承 base.html 的页面共用的导航提示状态。"""
+    return {
+        "has_unviewed_salary_confirmation": bool(
+            getattr(request.state, "has_unviewed_salary_confirmation", False)
+        )
+    }
+
+
+templates = Jinja2Templates(
+    directory="templates",
+    context_processors=[_global_template_context]
+)
 
 SHIFT_TYPE_FLEXIBLE = "flexible"
 SHIFT_TYPE_NIGHT_LEGACY = "night"
@@ -129,9 +141,11 @@ ALLOWED_OPERATOR_EMPLOYEE_TYPES = {value for value, _ in EMPLOYEE_TYPE_OPTIONS}
 REGULAR_LIKE_EMPLOYEE_TYPES = {"regular", "probation"}
 LEAVE_TYPE_OPTIONS = [
     ("leave", "请假"),
+    ("retro_leave", "补假"),
     ("public_rest", "公休"),
 ]
 LEAVE_TYPE_LABEL_MAP = {value: label for value, label in LEAVE_TYPE_OPTIONS}
+LEAVE_DEDUCTIBLE_TYPES = {"leave", "retro_leave"}
 PUBLIC_REST_INELIGIBLE_EMPLOYEE_TYPES = {"logistics", "flexible", "probation", "hourly"}
 
 
@@ -350,6 +364,10 @@ def _find_other_employee_leave_request_on_dates(
         user_id: int,
         exclude_leave_id: Optional[int] = None
 ) -> Optional[Tuple[date, EmployeeLeaveRequest]]:
+    applicant = session.get(User, user_id)
+    if _is_logistics_employee(applicant):
+        return None
+
     for work_date in sorted(set(dates)):
         rows = session.exec(
             select(EmployeeLeaveRequest).where(
@@ -364,6 +382,8 @@ def _find_other_employee_leave_request_on_dates(
             if exclude_leave_id and item.id == exclude_leave_id:
                 continue
             if item.user_id == user_id:
+                continue
+            if _is_logistics_employee(session.get(User, item.user_id)):
                 continue
             return work_date, item
     return None
@@ -850,7 +870,7 @@ def _create_leave_deduct_salary_flow(
         salary_month=leave_req.leave_date.month,
         flow_date=leave_req.leave_date,
         flow_category="attendance",
-        flow_type="leave_deduct",
+        flow_type=("retro_leave_deduct" if leave_req.leave_type == "retro_leave" else "leave_deduct"),
         amount=round(-abs(float(amount or 0)), 2),
         title=title,
         description=description,
@@ -891,7 +911,7 @@ def _create_replacement_pay_salary_flow(
         description=(
             f"{replacement_user.display_name} 同意为 {leave_req.employee_name_snapshot} "
             f"{leave_req.leave_date} {_shift_type_label(leave_req.shift_type)} 顶班，"
-            f"按请假人当天班次一倍日薪发放顶班补贴：{abs(float(amount or 0)):.2f} 元。"
+            f"按{_leave_type_label(leave_req.leave_type)}人当天班次一倍日薪发放顶班补贴：{abs(float(amount or 0)):.2f} 元。"
         ),
         source_type="leave_request",
         source_id=leave_req.id,
@@ -922,6 +942,7 @@ def _finalize_leave_for_applicant(
     """Create the applicant attendance record and salary deduction for an approved leave."""
     now = datetime.now()
     is_public_rest_leave = _is_public_rest_leave(leave_req)
+    leave_label = _leave_type_label(leave_req.leave_type)
     leave_req.status = status
     leave_req.final_deduct_amount = round(final_deduct, 2)
     leave_req.updated_at = now
@@ -930,7 +951,7 @@ def _finalize_leave_for_applicant(
         user_id=leave_req.user_id,
         employee_name_snapshot=leave_req.employee_name_snapshot,
         event_date=leave_req.leave_date,
-        event_type="leave",
+        event_type="retro_leave" if leave_req.leave_type == "retro_leave" else "leave",
         shift_type=leave_req.shift_type,
         reason=leave_req.reason,
         remark=attendance_remark,
@@ -960,12 +981,12 @@ def _finalize_leave_for_applicant(
             employee_name=leave_req.employee_name_snapshot,
             leave_req=leave_req,
             amount=final_deduct,
-            title="请假扣款",
+            title=f"{leave_label}扣款",
             description=(
-                f"{leave_req.employee_name_snapshot} 请假，日期：{leave_req.leave_date}，"
+                f"{leave_req.employee_name_snapshot} {leave_label}，日期：{leave_req.leave_date}，"
                 f"班次：{_shift_type_label(leave_req.shift_type)}，"
                 f"顶班人：{leave_req.replacement_employee_name_snapshot or '-'}，"
-                f"扣款：{final_deduct:.2f} 元。审批通过请假不影响全勤奖。"
+                f"扣款：{final_deduct:.2f} 元。审批通过{leave_label}不影响全勤奖。"
             ),
             operator=operator,
             created_at=now
@@ -1037,17 +1058,16 @@ def _shift_type_label(shift_type: str) -> str:
     return SHIFT_LABEL_MAP.get(shift_type or "off", shift_type or "未知")
 
 
-def _leave_status_label(status: str) -> str:
-    """
-    请假状态中文展示。
-    """
+def _leave_status_label(status: str, leave_type: str = "leave") -> str:
+    """请假、公休和补假状态中文展示。"""
+    leave_label = _leave_type_label(leave_type)
     mapping = {
         "pending_admin_review": "待管理员审批",
         "pending": "待顶班确认",
-        "replacement_accepted": "顶班人已同意，请假已生效",
-        "replacement_rejected_wait_employee": "顶班人拒绝，待请假人确认",
-        "force_leave_deducted": "请假人坚持请假，扣薪",
-        "approved_with_flexible": "机动顶班，请假已生效",
+        "replacement_accepted": f"顶班人已同意，{leave_label}已生效",
+        "replacement_rejected_wait_employee": f"顶班人拒绝，待{leave_label}人确认",
+        "force_leave_deducted": f"{leave_label}人坚持{leave_label}，扣薪",
+        "approved_with_flexible": f"机动顶班，{leave_label}已生效",
         "admin_cancelled": "管理员已撤回",
         "approved": "已通过",
         "rejected": "已拒绝",
@@ -1088,7 +1108,7 @@ def _count_employee_leave_requests_for_month(
         EmployeeLeaveRequest.user_id == user_id,
         EmployeeLeaveRequest.leave_date >= month_start,
         EmployeeLeaveRequest.leave_date <= month_end,
-        EmployeeLeaveRequest.leave_type == "leave",
+        EmployeeLeaveRequest.leave_type.in_(list(LEAVE_DEDUCTIBLE_TYPES)),
         EmployeeLeaveRequest.status.in_(list(LEAVE_COUNT_ACTIVE_STATUSES))
     )
     if exclude_leave_id:
@@ -1742,7 +1762,13 @@ def _is_salary_month_paid_or_locked(
             MonthlySalarySettlement.salary_month == month
         )
     ).first()
-    return bool(settlement and settlement.status in {"paid", "locked"})
+    return bool(
+        settlement
+        and (
+            settlement.status in {"confirmed", "paid", "locked"}
+            or bool(getattr(settlement, "employee_confirmed", False))
+        )
+    )
 
 
 def _refresh_salary_settlement_totals_if_exists(
@@ -1758,7 +1784,11 @@ def _refresh_salary_settlement_totals_if_exists(
             MonthlySalarySettlement.salary_month == month
         )
     ).first()
-    if not settlement or settlement.status in {"paid", "locked"}:
+    if (
+        not settlement
+        or settlement.status in {"confirmed", "paid", "locked"}
+        or bool(getattr(settlement, "employee_confirmed", False))
+    ):
         return
 
     totals = _sum_salary_flows_for_settlement(session, user_id, year, month)
@@ -1770,6 +1800,12 @@ def _refresh_salary_settlement_totals_if_exists(
     settlement.deduction_total = totals["deduction_total"]
     settlement.manual_adjustment_total = totals["manual_adjustment_total"]
     settlement.final_salary = totals["final_salary"]
+    if settlement.status == "pending_employee_confirmation":
+        settlement.status = "draft"
+    settlement.employee_confirmed = False
+    settlement.employee_confirmed_by_user_id = None
+    settlement.employee_confirmed_by_name = None
+    settlement.employee_confirmed_at = None
     settlement.updated_at = datetime.now()
     session.add(settlement)
 
@@ -1935,7 +1971,7 @@ def _leave_request_payload(item: EmployeeLeaveRequest) -> dict:
         "reason": item.reason or "",
         "remark": item.remark or "",
         "status": item.status,
-        "status_label": _leave_status_label(item.status),
+        "status_label": _leave_status_label(item.status, item.leave_type),
         "estimated_deduct_amount": round(float(item.estimated_deduct_amount or 0), 2),
         "final_deduct_amount": round(float(item.final_deduct_amount or 0), 2),
         "month_leave_count_snapshot": int(getattr(item, "month_leave_count_snapshot", 1) or 1),
@@ -1963,6 +1999,7 @@ def _attendance_event_type_label(event_type: str) -> str:
     """
     mapping = {
         "leave": "请假",
+        "retro_leave": "补假",
         "shift_swap": "换班",
         "late": "迟到",
         "absent": "旷工",
@@ -2060,6 +2097,7 @@ def _salary_flow_type_label(flow_type: str) -> str:
 
         # 兼容后续自动流水
         "leave_deduct": "请假扣款",
+        "retro_leave_deduct": "补假扣款",
         "late_deduct": "迟到扣款",
         "absent_deduct": "旷工扣款",
         "monthly_base_salary": "月基础工资",
@@ -2252,35 +2290,34 @@ def _build_salary_settlement_notice_flows(
 # =========================
 
 def _salary_settlement_status_label(status: str) -> str:
-    """
-    月度工资结算状态中文展示。
-
-    当前工资结算三态：
-    - draft：草稿，可重算，可继续调整；
-    - confirmed：已确认，不直接重算，可发放，可退回草稿；
-    - paid：已发放并锁定，不可重算，不可删除当月工资流水。
-
-    兼容旧状态：
-    - locked：旧版单独锁定状态，仍按“已发放并锁定”展示。
-    """
+    """月度工资结算状态中文展示。"""
     mapping = {
         "draft": "草稿",
-        "confirmed": "已确认",
+        "pending_employee_confirmation": "等待员工确认",
+        "confirmed": "员工已确认并锁定",
+        # 兼容旧流程和旧数据
         "paid": "已发放并锁定",
-
-        # 兼容旧数据
         "locked": "已发放并锁定",
     }
     return mapping.get(status or "draft", status or "未知")
 
 
-def _can_employee_confirm_salary(year: int, month: int, today: Optional[date] = None) -> bool:
-    """
-    员工确认工资开放时间：所选月份最后一天及之后。
-    """
-    today = today or date.today()
-    month_last_day = date(year, month, calendar.monthrange(year, month)[1])
-    return today >= month_last_day
+def _get_unviewed_salary_confirmations(
+        session: Session,
+        user_id: int
+) -> List[MonthlySalarySettlement]:
+    """查询已发送、但员工尚未打开工资页的结算记录。"""
+    return session.exec(
+        select(MonthlySalarySettlement).where(
+            MonthlySalarySettlement.user_id == user_id,
+            MonthlySalarySettlement.status == "pending_employee_confirmation",
+            MonthlySalarySettlement.employee_confirmation_viewed_at == None
+        ).order_by(
+            MonthlySalarySettlement.salary_year.desc(),
+            MonthlySalarySettlement.salary_month.desc(),
+            MonthlySalarySettlement.id.desc()
+        )
+    ).all()
 
 
 def _build_my_salary_data(
@@ -2310,7 +2347,16 @@ def _build_my_salary_data(
         select(EmployeeProfile).where(EmployeeProfile.user_id == user.id)
     ).first()
 
-    # ===== 2. 查询员工本月可见工资流水 =====
+    # ===== 2. 查询员工本月工资结算汇总 =====
+    settlement = session.exec(
+        select(MonthlySalarySettlement).where(
+            MonthlySalarySettlement.user_id == user.id,
+            MonthlySalarySettlement.salary_year == year,
+            MonthlySalarySettlement.salary_month == month
+        )
+    ).first()
+    # ===== 3. 查询员工本月可见工资流水 =====
+    # 草稿状态也允许员工查看；“等待员工确认”只控制能否确认和导航红点。
     salary_flows = session.exec(
         select(SalaryFlowRecord).where(
             SalaryFlowRecord.user_id == user.id,
@@ -2322,15 +2368,6 @@ def _build_my_salary_data(
             SalaryFlowRecord.id.desc()
         )
     ).all()
-
-    # ===== 3. 查询员工本月工资结算汇总 =====
-    settlement = session.exec(
-        select(MonthlySalarySettlement).where(
-            MonthlySalarySettlement.user_id == user.id,
-            MonthlySalarySettlement.salary_year == year,
-            MonthlySalarySettlement.salary_month == month
-        )
-    ).first()
 
     # ===== 4. 汇总工资流水 =====
     income_total = 0.0
@@ -2405,8 +2442,15 @@ def _build_my_salary_data(
         # 月度结算
         "settlement": settlement,
         "has_settlement": settlement is not None,
-        "settlement_status_label": _salary_settlement_status_label(settlement.status) if settlement else "未结算",
-        "can_employee_confirm_salary": _can_employee_confirm_salary(year, month),
+        "settlement_status_label": (
+            _salary_settlement_status_label(settlement.status)
+            if settlement else "暂未生成结算"
+        ),
+        "can_employee_confirm_salary": bool(
+            settlement
+            and settlement.status == "pending_employee_confirmation"
+            and not getattr(settlement, "employee_confirmed", False)
+        ),
     }
 
 # =========================
@@ -2941,7 +2985,7 @@ def _salary_settlement_payload(
         "employee_confirmed": bool(getattr(item, "employee_confirmed", False)),
         "employee_confirmed_by_name": getattr(item, "employee_confirmed_by_name", None) or "",
         "employee_confirmed_at": item.employee_confirmed_at.strftime("%Y-%m-%d %H:%M:%S") if getattr(item, "employee_confirmed_at", None) else "",
-        "can_admin_confirm": item.status == "draft" and bool(getattr(item, "employee_confirmed", False)),
+        "can_request_employee_confirmation": item.status in {"draft", "pending_employee_confirmation"},
 
         "calculated_at": item.calculated_at.strftime("%Y-%m-%d %H:%M:%S") if item.calculated_at else "",
         "confirmed_by_name": item.confirmed_by_name or "",
@@ -2978,10 +3022,11 @@ def _calculate_salary_for_one_employee(
         )
     ).first()
 
-    # 只有草稿工资允许重算。
-    # 已确认工资如果要重算，必须先退回草稿；
-    # 已发放并锁定工资永远不允许重算。
-    if settlement and settlement.status in {"confirmed", "paid", "locked"}:
+    # 草稿和等待员工确认状态允许重算；员工已确认后永久跳过重算。
+    if settlement and (
+        settlement.status in {"confirmed", "paid", "locked"}
+        or bool(getattr(settlement, "employee_confirmed", False))
+    ):
         raise ValueError(
             f"{user_obj.display_name} 的工资当前为【{_salary_settlement_status_label(settlement.status)}】，不能直接重算")
 
@@ -3287,11 +3332,10 @@ def _build_salary_settlement_data(
         for r in rows
         if r["settlement"]
     ), 2)
-    # paid 是新版“已发放并锁定”状态；
-    # locked 是旧版遗留状态，这里合并计入已归档数量。
+    # employee confirmed / paid / locked 都属于不会再参与重算的最终锁定工资。
     paid_count = len([
         r for r in rows
-        if r["settlement"] and r["settlement"].status in {"paid", "locked"}
+        if r["settlement"] and r["settlement"].status in {"confirmed", "paid", "locked"}
     ])
 
     employee_confirmed_count = len([
@@ -4867,14 +4911,15 @@ def _employee_ajax_success(
     })
 
 
-def _employee_ajax_error(message: str, status_code: int = 400):
-    """
-    员工管理 AJAX 错误响应统一格式。
-    """
-    return JSONResponse({
+def _employee_ajax_error(message: str, status_code: int = 400, extra: Optional[dict] = None):
+    """员工管理 AJAX 错误响应统一格式。"""
+    payload = {
         "ok": False,
         "message": message
-    }, status_code=status_code)
+    }
+    if extra:
+        payload.update(extra)
+    return JSONResponse(payload, status_code=status_code)
 
 def _get_visible_employee_names_for_month(
         session: Session,
@@ -11124,6 +11169,7 @@ async def enforce_resigned_employee_read_only(request: Request, call_next):
 
 @app.middleware("http")
 async def enforce_employee_duty_release(request: Request, call_next):
+    request.state.has_unviewed_salary_confirmation = False
     path = request.url.path
     allowed_prefixes = ("/static",)
     allowed_paths = {
@@ -11155,6 +11201,10 @@ async def enforce_employee_duty_release(request: Request, call_next):
         user = session.get(User, user_id_int)
         if not user or not _employee_can_authenticate(user):
             return await call_next(request)
+        if user.role != "admin":
+            request.state.has_unviewed_salary_confirmation = bool(
+                _get_unviewed_salary_confirmations(session, user.id)
+            )
         if _is_resigned_read_only_user(user):
             return await call_next(request)
         if getattr(user, "must_change_password", False):
@@ -12132,6 +12182,24 @@ async def employees_page(
     if tab not in allowed_tabs:
         tab = default_tab
 
+    # 管理员每次发送/重发待确认工资后点亮“我的工资”红点；
+    # 只有员工实际进入该页签时才视为已查看，并熄灭所有待确认工资红点。
+    has_unviewed_salary_confirmation = False
+    if user.role != "admin":
+        unviewed_salary_settlements = _get_unviewed_salary_confirmations(
+            session, user.id
+        )
+        if tab == "my_salary" and unviewed_salary_settlements:
+            viewed_at = datetime.now()
+            for salary_settlement in unviewed_salary_settlements:
+                salary_settlement.employee_confirmation_viewed_at = viewed_at
+                salary_settlement.updated_at = viewed_at
+                session.add(salary_settlement)
+            session.commit()
+        else:
+            has_unviewed_salary_confirmation = bool(unviewed_salary_settlements)
+        request.state.has_unviewed_salary_confirmation = has_unviewed_salary_confirmation
+
     # ===== 3. 员工列表数据 =====
     all_employees = session.exec(
         select(User).order_by(User.is_active.desc(), User.role, User.id)
@@ -12346,7 +12414,7 @@ async def employees_page(
                     attendance_end_date,
                     default_filter="this_month"
                 )
-            if attendance_event_type not in {"all", "leave", "late", "absent", "other", "shift_swap"}:
+            if attendance_event_type not in {"all", "leave", "retro_leave", "late", "absent", "other", "shift_swap"}:
                 attendance_event_type = "all"
 
             attendance_query = select(EmployeeAttendanceRecord)
@@ -12790,6 +12858,7 @@ async def employees_page(
         # 我的工资模块数据
         "my_salary_data": my_salary_data,
         "salary_settlement_status_label": _salary_settlement_status_label,
+        "has_unviewed_salary_confirmation": has_unviewed_salary_confirmation,
 
         # 工资结算模块数据
         "salary_settlement_data": salary_settlement_data,
@@ -13910,16 +13979,6 @@ async def employee_leave_apply(
             status_code=303
         )
 
-    today = date.today()
-
-    if leave_d <= today:
-        if _is_ajax_request(request):
-            return _employee_ajax_error("当天无法请假，请至少提前一天提交请假申请")
-        return RedirectResponse(
-            url=_build_employees_url(store, "my_leave", error="当天无法请假，请至少提前一天提交请假申请"),
-            status_code=303
-        )
-
     leave_type = _normalize_text(leave_type) or "leave"
     if leave_type not in LEAVE_TYPE_LABEL_MAP:
         if _is_ajax_request(request):
@@ -13928,6 +13987,26 @@ async def employee_leave_apply(
             url=_build_employees_url(store, "my_leave", error="请假类型不正确"),
             status_code=303
         )
+
+    today = date.today()
+    if leave_type == "retro_leave" and leave_end_d > today:
+        message = "补假只能选择今天及以前的日期"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
+    if leave_type != "retro_leave" and leave_d <= today:
+        message = "当天无法请假，请至少提前一天提交请假申请"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
+    if leave_type == "retro_leave" and any(
+            _is_salary_month_paid_or_locked(session, user.id, day.year, day.month)
+            for day in _iter_date_range(leave_d, leave_end_d)
+    ):
+        message = "所选补假日期所属月份工资已由员工确认并锁定，不能再自动扣款；请联系管理员通过工资修正处理"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
     if leave_type == "public_rest" and not _can_apply_public_rest(user):
         message = "当前员工类型不能申请公休"
         if _is_ajax_request(request):
@@ -14050,7 +14129,7 @@ async def employee_leave_apply(
                 month=work_date.month
             )
 
-        if leave_type == "leave":
+        if leave_type in LEAVE_DEDUCTIBLE_TYPES:
             month_leave_counts[key] += 1
             item["month_leave_count_snapshot"] = month_leave_counts[key]
         else:
@@ -14063,7 +14142,7 @@ async def employee_leave_apply(
             work_date.month
         )
         item["trigger_personal_store_bonus_halve"] = (
-            leave_type == "leave"
+            leave_type in LEAVE_DEDUCTIBLE_TYPES
             and item["month_leave_count_snapshot"] >= 4
             and _employee_participates_personal_store_bonus(user, leave_employee_type)
         )
@@ -14072,9 +14151,9 @@ async def employee_leave_apply(
         item["trigger_personal_store_bonus_halve"] for item in leave_items
     )
     if trigger_personal_store_bonus_halve and _normalize_text(confirm_excessive_leave) != "1":
-        message = "本月第4次及以上请假需先确认；坚持请假将导致个人门店达标奖减半"
+        message = "本月第4次及以上请假/补假需先确认；继续提交将导致个人门店达标奖减半"
         if _is_ajax_request(request):
-            return _employee_ajax_error(message, 400)
+            return _employee_ajax_error(message, 400, {"requires_excessive_leave_confirmation": True})
         return RedirectResponse(
             url=_build_employees_url(store, "my_leave", error=message),
             status_code=303
@@ -14096,7 +14175,7 @@ async def employee_leave_apply(
             remark=remark or None,
 
             status="pending_admin_review",
-            is_before_one_day=True,
+            is_before_one_day=leave_type != "retro_leave",
             estimated_deduct_amount=item["estimated_deduct"],
             final_deduct_amount=0.0,
             month_leave_count_snapshot=item["month_leave_count_snapshot"],
@@ -14127,7 +14206,7 @@ async def employee_leave_apply(
     admins = session.exec(
         select(User).where(User.role == "admin", User.is_active == True).order_by(User.id)
     ).all()
-    is_batch_leave = leave_type == "leave" and len(leave_requests) > 1
+    is_batch_leave = leave_type in LEAVE_DEDUCTIBLE_TYPES and len(leave_requests) > 1
     for leave_req in leave_requests:
         for admin in admins:
             _create_employee_notification(
@@ -14137,7 +14216,7 @@ async def employee_leave_apply(
                 title=f"待审批{_leave_type_label(leave_type)}",
                 content=(
                     f"{user.display_name} 申请 {_leave_request_period_label(leave_req)} {_leave_type_label(leave_type)}，请处理。"
-                    + (f" 本次多天请假已按上班日拆分为 {len(leave_requests)} 条单日申请。" if is_batch_leave else "")
+                    + (f" 本次多天{_leave_type_label(leave_type)}已按上班日拆分为 {len(leave_requests)} 条单日申请。" if is_batch_leave else "")
                     + (
                         f" 这是该员工本月第 {leave_req.month_leave_count_snapshot} 次请假，如审批通过，本月个人门店达标奖减半。"
                         if leave_req.trigger_personal_store_bonus_halve
@@ -14157,15 +14236,15 @@ async def employee_leave_apply(
     leave_count_delta_current_month = sum(
         1
         for leave_req in leave_requests
-        if (leave_req.leave_type or "leave") == "leave"
+        if (leave_req.leave_type or "leave") in LEAVE_DEDUCTIBLE_TYPES
         and leave_req.leave_date.year == today.year
         and leave_req.leave_date.month == today.month
     )
     skipped_note = ""
-    if leave_type == "leave" and skipped_rest_days:
+    if leave_type in LEAVE_DEDUCTIBLE_TYPES and skipped_rest_days:
         skipped_note = f"，已自动跳过 {len(skipped_rest_days)} 个休息日"
     success_message = (
-        f"申请已提交，已按 {len(leave_requests)} 个上班日拆分为单日请假{skipped_note}，等待管理员审批"
+        f"申请已提交，已按 {len(leave_requests)} 个上班日拆分为单日{_leave_type_label(leave_type)}{skipped_note}，等待管理员审批"
         if is_batch_leave or skipped_note
         else "申请已提交，等待管理员审批"
     )
@@ -14241,16 +14320,31 @@ async def employee_leave_update_pending(
             return _employee_ajax_error("结束日期格式不正确")
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="结束日期格式不正确"), status_code=303)
 
-    if leave_d <= date.today():
-        if _is_ajax_request(request):
-            return _employee_ajax_error("当天无法请假，请至少提前一天提交请假申请")
-        return RedirectResponse(url=_build_employees_url(store, "my_leave", error="当天无法请假，请至少提前一天提交请假申请"), status_code=303)
-
     leave_type = _normalize_text(leave_type) or (leave_req.leave_type or "leave")
     if leave_type not in LEAVE_TYPE_LABEL_MAP:
         if _is_ajax_request(request):
             return _employee_ajax_error("请假类型不正确")
         return RedirectResponse(url=_build_employees_url(store, "my_leave", error="请假类型不正确"), status_code=303)
+
+    today = date.today()
+    if leave_type == "retro_leave" and leave_end_d > today:
+        message = "补假只能选择今天及以前的日期"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
+    if leave_type != "retro_leave" and leave_d <= today:
+        message = "当天无法请假，请至少提前一天提交请假申请"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
+    if leave_type == "retro_leave" and any(
+            _is_salary_month_paid_or_locked(session, user.id, day.year, day.month)
+            for day in _iter_date_range(leave_d, leave_end_d)
+    ):
+        message = "所选补假日期所属月份工资已由员工确认并锁定，不能再自动扣款；请联系管理员通过工资修正处理"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "my_leave", error=message), status_code=303)
     if leave_type == "public_rest" and not _can_apply_public_rest(user):
         message = "当前员工类型不能申请公休"
         if _is_ajax_request(request):
@@ -14342,7 +14436,7 @@ async def employee_leave_update_pending(
             shift_type=shift_type
         )
     )
-    leave_req.month_leave_count_snapshot = current_month_leave_count + (1 if leave_type == "leave" else 0)
+    leave_req.month_leave_count_snapshot = current_month_leave_count + (1 if leave_type in LEAVE_DEDUCTIBLE_TYPES else 0)
     leave_employee_type = _employee_salary_type_for_month(
         session,
         user,
@@ -14350,7 +14444,7 @@ async def employee_leave_update_pending(
         leave_d.month
     )
     leave_req.trigger_personal_store_bonus_halve = (
-        leave_type == "leave"
+        leave_type in LEAVE_DEDUCTIBLE_TYPES
         and
         leave_req.month_leave_count_snapshot >= 4
         and _employee_participates_personal_store_bonus(user, leave_employee_type)
@@ -14510,14 +14604,14 @@ async def employee_leave_rest_replacement(
             final_deduct=applicant_deduct,
             status="approved",
             approval_note=approval_note,
-            attendance_remark="后勤员工请假，管理员审批通过后直接扣除固定日薪 88.5 元，不参与顶班。"
+            attendance_remark=f"后勤员工{_leave_type_label(leave_req.leave_type)}，管理员审批通过后直接扣除固定日薪 88.5 元，不参与顶班。"
         )
         _create_employee_notification(
             session=session,
             target_user=applicant,
             related_user=user,
-            title="请假已批准",
-            content=f"管理员已批准您 {leave_req.leave_date} 的请假，已按后勤固定日薪扣款 {applicant_deduct:.2f} 元。",
+            title=f"{_leave_type_label(leave_req.leave_type)}已批准",
+            content=f"管理员已批准您 {leave_req.leave_date} 的{_leave_type_label(leave_req.leave_type)}，已按后勤固定日薪扣款 {applicant_deduct:.2f} 元。",
             notification_type="leave_approved",
             source_type="leave_request",
             source_id=leave_req.id,
@@ -14879,7 +14973,7 @@ async def employee_leave_flexible_replacement(
             f"{'；'.join(f'{work_date} {selected_replacements_by_date[work_date].display_name}' for work_date in leave_dates)}；"
             f"对应排班已调整为公休，不扣除工资。"
             if is_public_rest_leave
-            else f"管理员已安排 {first_replacement.display_name} 为您顶班，您的请假已生效，扣款 {applicant_deduct:.2f} 元。"
+            else f"管理员已安排 {first_replacement.display_name} 为您顶班，您的{_leave_type_label(leave_req.leave_type)}已生效，扣款 {applicant_deduct:.2f} 元。"
         ),
         notification_type="leave_flexible_replacement",
         source_type="leave_request",
@@ -14915,7 +15009,7 @@ async def employee_leave_flexible_replacement(
             message=(
                 f"已批准公休，并按日期安排机动顶班"
                 if is_public_rest_leave
-                else f"已安排机动员工 {first_replacement.display_name} 顶班，请假已生效"
+                else f"已安排机动员工 {first_replacement.display_name} 顶班，{_leave_type_label(leave_req.leave_type)}已生效"
             ),
             action="leave_flexible_replacement_assigned",
             payload={"leave": _leave_request_payload(leave_req)}
@@ -14927,7 +15021,7 @@ async def employee_leave_flexible_replacement(
             success=(
                 f"已批准公休，并按日期安排机动顶班"
                 if is_public_rest_leave
-                else f"已安排机动员工 {first_replacement.display_name} 顶班，请假已生效"
+                else f"已安排机动员工 {first_replacement.display_name} 顶班，{_leave_type_label(leave_req.leave_type)}已生效"
             )
         ),
         status_code=303
@@ -15138,10 +15232,10 @@ async def employee_leave_replacement_accept(
         session=session,
         target_user=applicant,
         related_user=user,
-        title="顶班人已同意，请假已生效",
+        title=f"顶班人已同意，{_leave_type_label(leave_req.leave_type)}已生效",
         content=(
             f"{user.display_name} 已同意为您顶 {leave_req.leave_date} "
-            f"{_shift_type_label(leave_req.shift_type)}，您的请假已生效，"
+            f"{_shift_type_label(leave_req.shift_type)}，您的{_leave_type_label(leave_req.leave_type)}已生效，"
             f"扣款 {applicant_deduct:.2f} 元。系统已为顶班人生成顶班补贴 {replacement_pay_amount:.2f} 元。"
         ),
         notification_type="leave_replacement_accepted",
@@ -15155,13 +15249,13 @@ async def employee_leave_replacement_accept(
 
     if _is_ajax_request(request):
         return _employee_ajax_success(
-            message="已同意顶班，请假已生效",
+            message=f"已同意顶班，{_leave_type_label(leave_req.leave_type)}已生效",
             action="leave_replacement_accepted",
             payload={"leave": _leave_request_payload(leave_req)}
         )
 
     return RedirectResponse(
-        url=_build_employees_url(store, "my_leave", success="已同意顶班，请假已生效"),
+        url=_build_employees_url(store, "my_leave", success=f"已同意顶班，{_leave_type_label(leave_req.leave_type)}已生效"),
         status_code=303
     )
 
@@ -15236,7 +15330,7 @@ async def employee_leave_replacement_reject(
             title="顶班人已拒绝",
             content=(
                 f"{user.display_name} 拒绝为您顶 {leave_req.leave_date} "
-                f"{_shift_type_label(leave_req.shift_type)}。若坚持请假，您将扣除 "
+                f"{_shift_type_label(leave_req.shift_type)}。若坚持{_leave_type_label(leave_req.leave_type)}，您将扣除 "
                 f"{daily_amount * 2:.2f} 元，{user.display_name} 将扣除 {replacement_deduct:.2f} 元。"
             ),
             notification_type="leave_replacement_rejected",
@@ -15250,13 +15344,13 @@ async def employee_leave_replacement_reject(
 
     if _is_ajax_request(request):
         return _employee_ajax_success(
-            message="已拒绝顶班，已通知请假人确认是否坚持请假",
+            message=f"已拒绝顶班，已通知{_leave_type_label(leave_req.leave_type)}人确认是否坚持{_leave_type_label(leave_req.leave_type)}",
             action="leave_replacement_rejected",
             payload={"leave": _leave_request_payload(leave_req)}
         )
 
     return RedirectResponse(
-        url=_build_employees_url(store, "my_leave", success="已拒绝顶班，已通知请假人确认是否坚持请假"),
+        url=_build_employees_url(store, "my_leave", success=f"已拒绝顶班，已通知{_leave_type_label(leave_req.leave_type)}人确认是否坚持{_leave_type_label(leave_req.leave_type)}"),
         status_code=303
     )
 
@@ -15407,14 +15501,15 @@ async def employee_leave_force_after_replacement_reject(
     session.add(leave_req)
     session.flush()
 
+    leave_label = _leave_type_label(leave_req.leave_type)
     attendance = EmployeeAttendanceRecord(
         user_id=leave_req.user_id,
         employee_name_snapshot=leave_req.employee_name_snapshot,
         event_date=leave_req.leave_date,
-        event_type="leave",
+        event_type="retro_leave" if leave_req.leave_type == "retro_leave" else "leave",
         shift_type=leave_req.shift_type,
         reason=leave_req.reason,
-        remark="顶班人拒绝后，请假人坚持请假，系统自动扣薪。",
+        remark=f"顶班人拒绝后，{leave_label}人坚持{leave_label}，系统自动扣薪。",
         status="recorded",
         affect_full_attendance=False,
         deduct_amount=applicant_deduct,
@@ -15439,9 +15534,9 @@ async def employee_leave_force_after_replacement_reject(
         employee_name=leave_req.employee_name_snapshot,
         leave_req=leave_req,
         amount=applicant_deduct,
-        title="坚持请假双倍扣款",
+        title=f"坚持{leave_label}双倍扣款",
         description=(
-            f"{leave_req.employee_name_snapshot} 在顶班人 {replacement.display_name} 拒绝后坚持请假，"
+            f"{leave_req.employee_name_snapshot} 在顶班人 {replacement.display_name} 拒绝后坚持{leave_label}，"
             f"日期：{leave_req.leave_date}，班次：{_shift_type_label(leave_req.shift_type)}，"
             f"按双倍日薪扣款：{applicant_deduct:.2f} 元。"
         ),
@@ -15459,7 +15554,7 @@ async def employee_leave_force_after_replacement_reject(
         description=(
             f"{replacement.display_name} 被指定为 {leave_req.employee_name_snapshot} "
             f"{leave_req.leave_date} {_shift_type_label(leave_req.shift_type)} 顶班人后拒绝顶班，"
-            f"按请假人当天班次一倍日薪扣款：{replacement_deduct:.2f} 元。"
+            f"按{leave_label}人当天班次一倍日薪扣款：{replacement_deduct:.2f} 元。"
         ),
         operator=user,
         created_at=now
@@ -15480,7 +15575,7 @@ async def employee_leave_force_after_replacement_reject(
         related_user=user,
         title="拒绝顶班扣款已生成",
         content=(
-            f"{leave_req.employee_name_snapshot} 已坚持请假，"
+            f"{leave_req.employee_name_snapshot} 已坚持{leave_label}，"
             f"您因拒绝顶班被扣款 {replacement_deduct:.2f} 元。"
         ),
         notification_type="leave_replacement_deduct",
@@ -15494,13 +15589,13 @@ async def employee_leave_force_after_replacement_reject(
 
     if _is_ajax_request(request):
         return _employee_ajax_success(
-            message="已坚持请假，并自动生成双方扣薪流水",
+            message=f"已坚持{leave_label}，并自动生成双方扣薪流水",
             action="leave_force_deducted",
             payload={"leave": _leave_request_payload(leave_req)}
         )
 
     return RedirectResponse(
-        url=_build_employees_url(store, "my_leave", success="已坚持请假，并自动生成双方扣薪流水"),
+        url=_build_employees_url(store, "my_leave", success=f"已坚持{leave_label}，并自动生成双方扣薪流水"),
         status_code=303
     )
 
@@ -16305,6 +16400,15 @@ async def employee_salary_flow_add(
             status_code=303
         )
 
+    if _is_salary_month_paid_or_locked(session, target_user.id, flow_d.year, flow_d.month):
+        message = "该员工该月工资已由员工确认并锁定，不能新增工资调整"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error=message),
+            status_code=303
+        )
+
     flow_type = _normalize_text(flow_type)
     amount_action = _normalize_text(amount_action)
     title = _normalize_text(title)
@@ -16410,6 +16514,10 @@ async def employee_salary_flow_add(
     )
 
     session.add(salary_flow)
+    session.flush()
+    _refresh_salary_settlement_totals_if_exists(
+        session, target_user.id, flow_d.year, flow_d.month
+    )
     session.commit()
     session.refresh(salary_flow)
 
@@ -16493,6 +16601,10 @@ async def employee_salary_flow_edit(
             status_code=303
         )
 
+    old_user_id = salary_flow.user_id
+    old_year = salary_flow.salary_year
+    old_month = salary_flow.salary_month
+
     target_user = session.get(User, user_id)
     if not target_user:
         if _is_ajax_request(request):
@@ -16517,6 +16629,15 @@ async def employee_salary_flow_edit(
             return _employee_ajax_error("日期格式不正确")
         return RedirectResponse(
             url=_build_employees_url(store, "salary_flows", error="日期格式不正确"),
+            status_code=303
+        )
+
+    if _is_salary_month_paid_or_locked(session, target_user.id, flow_d.year, flow_d.month):
+        message = "目标员工该月工资已由员工确认并锁定，不能移入或编辑工资调整"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_flows", error=message),
             status_code=303
         )
 
@@ -16592,6 +16713,11 @@ async def employee_salary_flow_edit(
     salary_flow.updated_at = datetime.now()
 
     session.add(salary_flow)
+    session.flush()
+    _refresh_salary_settlement_totals_if_exists(session, old_user_id, old_year, old_month)
+    _refresh_salary_settlement_totals_if_exists(
+        session, target_user.id, flow_d.year, flow_d.month
+    )
     session.commit()
     session.refresh(salary_flow)
 
@@ -16669,16 +16795,26 @@ async def employee_salary_flow_delete(
             status_code=303
         )
 
-    if getattr(salary_flow, "is_locked", False):
+    if getattr(salary_flow, "is_locked", False) or _is_salary_month_paid_or_locked(
+        session,
+        salary_flow.user_id,
+        salary_flow.salary_year,
+        salary_flow.salary_month
+    ):
         if _is_ajax_request(request):
-            return _employee_ajax_error("该工资流水已锁定，不能删除")
+            return _employee_ajax_error("该员工该月工资已确认并锁定，不能删除")
         return RedirectResponse(
-            url=_build_employees_url(store, "salary_flows", error="该工资流水已锁定，不能删除"),
+            url=_build_employees_url(store, "salary_flows", error="该员工该月工资已确认并锁定，不能删除"),
             status_code=303
         )
 
     deleted_id = salary_flow.id
+    old_user_id = salary_flow.user_id
+    old_year = salary_flow.salary_year
+    old_month = salary_flow.salary_month
     session.delete(salary_flow)
+    session.flush()
+    _refresh_salary_settlement_totals_if_exists(session, old_user_id, old_year, old_month)
     session.commit()
 
     if _is_ajax_request(request):
@@ -16955,7 +17091,7 @@ async def employee_salary_settlement_generate_all(
     5. 写入 MonthlySalarySettlement。
 
     注意：
-    paid / locked 状态的工资不能重算。
+    员工已确认的工资按员工和月份独立锁定；全员重算会自动跳过。
     """
     if not user:
         if _is_ajax_request(request):
@@ -17010,9 +17146,8 @@ async def employee_salary_settlement_generate_all(
         for emp in active_users:
             # ===== 生成 / 重算规则 =====
             # 1. 没有结算记录：生成；
-            # 2. 草稿：允许重算；
-            # 3. 已确认：跳过，必须先退回草稿才能重算；
-            # 4. 已发放并锁定：跳过，历史归档不可重算。
+            # 2. 草稿或等待员工确认：允许重算，并退回草稿等待重新发送；
+            # 3. 员工已确认或历史已锁定：按员工独立跳过，不能重算。
             existing_settlement = session.exec(
                 select(MonthlySalarySettlement).where(
                     MonthlySalarySettlement.user_id == emp.id,
@@ -17021,7 +17156,10 @@ async def employee_salary_settlement_generate_all(
                 )
             ).first()
 
-            if existing_settlement and existing_settlement.status in {"confirmed", "paid", "locked"}:
+            if existing_settlement and (
+                existing_settlement.status in {"confirmed", "paid", "locked"}
+                or bool(getattr(existing_settlement, "employee_confirmed", False))
+            ):
                 updated_rows.append(_salary_settlement_payload(session, existing_settlement))
                 continue
 
@@ -17101,8 +17239,8 @@ async def employee_salary_settlement_social_security_update(
 
     规则：
     1. 只允许管理员操作；
-    2. 草稿 / 已确认工资可调整员工社保和代缴社保；
-    3. 已发放并锁定后不可调整；
+    2. 草稿和等待员工确认状态可调整；调整后退回草稿，需要重新发送；
+    3. 员工确认并锁定后不可调整；
     4. 应发工资、实发工资不落库，按字段实时计算展示。
     """
     if not user:
@@ -17127,11 +17265,11 @@ async def employee_salary_settlement_social_security_update(
             status_code=303
         )
 
-    if settlement.status != "draft":
+    if settlement.status not in {"draft", "pending_employee_confirmation"}:
         if _is_ajax_request(request):
-            return _employee_ajax_error("只有草稿状态的工资可以调整社保")
+            return _employee_ajax_error("员工已确认并锁定的工资不能调整社保")
         return RedirectResponse(
-            url=_build_employees_url(store, "salary_settlement", error="只有草稿状态的工资可以调整社保"),
+            url=_build_employees_url(store, "salary_settlement", error="员工已确认并锁定的工资不能调整社保"),
             status_code=303
         )
 
@@ -17151,6 +17289,7 @@ async def employee_salary_settlement_social_security_update(
         final_social_security = round(max(float(social_security_amount or 0), 0.0), 2)
         settlement.social_security_amount = final_social_security
 
+    settlement.status = "draft"
     settlement.employee_confirmed = False
     settlement.employee_confirmed_by_user_id = None
     settlement.employee_confirmed_by_name = None
@@ -17193,15 +17332,7 @@ async def employee_my_salary_confirm(
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
-    """
-    普通员工在“我的工资”中确认本月工资。
-
-    规则：
-    1. 只能确认自己的工资；
-    2. 只允许确认草稿状态工资；
-    3. 所选月份最后一天及之后开放确认；
-    4. 员工确认后，管理员端才允许执行管理员确认。
-    """
+    """员工确认管理员已发送的本月工资，并立即锁定该员工当月工资。"""
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
@@ -17231,36 +17362,54 @@ async def employee_my_salary_confirm(
             status_code=303
         )
 
-    if settlement.status != "draft":
+    if settlement.status != "pending_employee_confirmation":
         return RedirectResponse(
-            url=_my_salary_redirect(error="只有草稿状态的工资可以由员工确认"),
-            status_code=303
-        )
-
-    if not _can_employee_confirm_salary(settlement.salary_year, settlement.salary_month):
-        return RedirectResponse(
-            url=_my_salary_redirect(error="工资确认将在该月份最后一天开放"),
+            url=_my_salary_redirect(error="管理员尚未发送待确认工资，或该月工资已确认锁定"),
             status_code=303
         )
 
     now = datetime.now()
+    totals = _sum_salary_flows_for_settlement(
+        session, settlement.user_id, settlement.salary_year, settlement.salary_month
+    )
+    settlement.base_salary_total = totals["base_salary_total"]
+    settlement.personal_commission_total = totals["personal_commission_total"]
+    settlement.personal_store_bonus_total = totals["personal_store_bonus_total"]
+    settlement.team_commission_total = totals["team_commission_total"]
+    settlement.bonus_total = totals["bonus_total"]
+    settlement.deduction_total = totals["deduction_total"]
+    settlement.manual_adjustment_total = totals["manual_adjustment_total"]
+    settlement.final_salary = totals["final_salary"]
+
+    flows = session.exec(
+        select(SalaryFlowRecord).where(
+            SalaryFlowRecord.user_id == settlement.user_id,
+            SalaryFlowRecord.salary_year == settlement.salary_year,
+            SalaryFlowRecord.salary_month == settlement.salary_month
+        )
+    ).all()
+    for flow in flows:
+        flow.is_locked = True
+        flow.updated_at = now
+        session.add(flow)
+
+    settlement.status = "confirmed"
     settlement.employee_confirmed = True
     settlement.employee_confirmed_by_user_id = user.id
     settlement.employee_confirmed_by_name = user.display_name
     settlement.employee_confirmed_at = now
     settlement.updated_at = now
-
     session.add(settlement)
     session.commit()
 
     return RedirectResponse(
-        url=_my_salary_redirect(success="工资已确认，等待管理员最终确认"),
+        url=_my_salary_redirect(success="工资已确认并锁定，本月无需再次确认"),
         status_code=303
     )
 
 
 # =========================
-# V3 工资结算：确认单个员工工资
+# V3 工资结算：发送员工确认
 # =========================
 @app.post("/employees/salary-settlement/confirm/{settlement_id}")
 async def employee_salary_settlement_confirm(
@@ -17270,15 +17419,7 @@ async def employee_salary_settlement_confirm(
         session: Session = Depends(get_session),
         user: Optional[User] = Depends(get_current_user)
 ):
-    """
-    管理员确认单个员工工资。
-
-    三态流程：
-    1. draft -> confirmed；
-    2. confirmed 后不能直接重算；
-    3. 如需重算，必须先退回草稿；
-    4. paid / locked 状态不允许再次确认。
-    """
+    """管理员发送或重新发送单个员工的当月工资明细，等待员工确认。"""
     if not user:
         if _is_ajax_request(request):
             return _employee_ajax_error("请先登录", 401)
@@ -17286,9 +17427,9 @@ async def employee_salary_settlement_confirm(
 
     if user.role != "admin":
         if _is_ajax_request(request):
-            return _employee_ajax_error("只有管理员可以确认工资", 403)
+            return _employee_ajax_error("只有管理员可以发送工资明细", 403)
         return RedirectResponse(
-            url=_build_employees_url(store, "salary_settlement", error="只有管理员可以确认工资"),
+            url=_build_employees_url(store, "salary_settlement", error="只有管理员可以发送工资明细"),
             status_code=303
         )
 
@@ -17301,37 +17442,68 @@ async def employee_salary_settlement_confirm(
             status_code=303
         )
 
-    if settlement.status != "draft":
+    if (
+        settlement.status not in {"draft", "pending_employee_confirmation"}
+        or bool(getattr(settlement, "employee_confirmed", False))
+    ):
+        message = "员工已确认并锁定的工资不能重新发送或修改"
         if _is_ajax_request(request):
-            return _employee_ajax_error("只有草稿状态的工资可以确认")
+            return _employee_ajax_error(message)
         return RedirectResponse(
-            url=_build_employees_url(store, "salary_settlement", error="只有草稿状态的工资可以确认"),
+            url=_build_employees_url(store, "salary_settlement", error=message),
             status_code=303
         )
 
-    if not getattr(settlement, "employee_confirmed", False):
+    employee = session.get(User, settlement.user_id)
+    if not employee:
         if _is_ajax_request(request):
-            return _employee_ajax_error("员工尚未在“我的工资”中确认，管理员暂不能确认工资")
+            return _employee_ajax_error("工资所属员工不存在", 404)
         return RedirectResponse(
-            url=_build_employees_url(store, "salary_settlement", error="员工尚未在“我的工资”中确认，管理员暂不能确认工资"),
+            url=_build_employees_url(store, "salary_settlement", error="工资所属员工不存在"),
             status_code=303
         )
 
     now = datetime.now()
-
-    settlement.status = "confirmed"
-    settlement.confirmed_by_user_id = user.id
-    settlement.confirmed_by_name = user.display_name
-    settlement.confirmed_at = now
+    totals = _sum_salary_flows_for_settlement(
+        session, settlement.user_id, settlement.salary_year, settlement.salary_month
+    )
+    settlement.base_salary_total = totals["base_salary_total"]
+    settlement.personal_commission_total = totals["personal_commission_total"]
+    settlement.personal_store_bonus_total = totals["personal_store_bonus_total"]
+    settlement.team_commission_total = totals["team_commission_total"]
+    settlement.bonus_total = totals["bonus_total"]
+    settlement.deduction_total = totals["deduction_total"]
+    settlement.manual_adjustment_total = totals["manual_adjustment_total"]
+    settlement.final_salary = totals["final_salary"]
+    settlement.status = "pending_employee_confirmation"
+    settlement.employee_confirmed = False
+    settlement.employee_confirmed_by_user_id = None
+    settlement.employee_confirmed_by_name = None
+    settlement.employee_confirmed_at = None
+    settlement.employee_confirmation_viewed_at = None
     settlement.updated_at = now
-
     session.add(settlement)
+
+    _create_employee_notification(
+        session=session,
+        target_user=employee,
+        related_user=user,
+        title="工资明细待确认",
+        content=(
+            f"{settlement.salary_year}年{settlement.salary_month}月工资明细已更新，"
+            "请进入“我的工资”核对并确认。"
+        ),
+        notification_type="salary_confirmation",
+        source_type="salary_settlement",
+        source_id=settlement.id,
+        created_at=now
+    )
     session.commit()
     session.refresh(settlement)
 
     if _is_ajax_request(request):
         return _employee_ajax_success(
-            message="工资已确认",
+            message="工资明细已发送，等待员工确认",
             action="salary_settlement_updated",
             payload={
                 "settlement": _salary_settlement_payload(session, settlement)
@@ -17339,12 +17511,13 @@ async def employee_salary_settlement_confirm(
         )
 
     return RedirectResponse(
-        url=_build_employees_url(store, "salary_settlement", success="工资已确认"),
+        url=_build_employees_url(store, "salary_settlement", success="工资明细已发送，等待员工确认"),
         status_code=303
     )
 
+
 # =========================
-# V3 工资结算：退回草稿
+# V3 工资结算：取消待确认发送
 # =========================
 @app.post("/employees/salary-settlement/back-to-draft/{settlement_id}")
 async def employee_salary_settlement_back_to_draft(
@@ -17355,13 +17528,9 @@ async def employee_salary_settlement_back_to_draft(
         user: Optional[User] = Depends(get_current_user)
 ):
     """
-    管理员将已确认工资退回草稿。
+    管理员取消尚未由员工确认的发送状态，将其退回草稿。
 
-    规则：
-    1. 只有 confirmed 可以退回 draft；
-    2. paid / locked 不能退回；
-    3. 退回后允许重新生成 / 重算工资；
-    4. 不删除现有工资流水，后续重算时会删除旧的未锁定自动结算流水并重新生成。
+    员工一旦确认即锁定，confirmed / paid / locked 均不能退回草稿。
     """
     if not user:
         if _is_ajax_request(request):
@@ -17385,11 +17554,11 @@ async def employee_salary_settlement_back_to_draft(
             status_code=303
         )
 
-    if settlement.status != "confirmed":
+    if settlement.status != "pending_employee_confirmation":
         if _is_ajax_request(request):
-            return _employee_ajax_error("只有已确认状态的工资可以退回草稿")
+            return _employee_ajax_error("只有尚未由员工确认的待确认工资可以退回草稿")
         return RedirectResponse(
-            url=_build_employees_url(store, "salary_settlement", error="只有已确认状态的工资可以退回草稿"),
+            url=_build_employees_url(store, "salary_settlement", error="员工已确认锁定的工资不能退回草稿"),
             status_code=303
         )
 
@@ -17555,6 +17724,15 @@ async def employee_salary_settlement_lock(
             return _employee_ajax_error("工资结算记录不存在", 404)
         return RedirectResponse(
             url=_build_employees_url(store, "salary_settlement", error="工资结算记录不存在"),
+            status_code=303
+        )
+
+    if settlement.status != "confirmed" or not getattr(settlement, "employee_confirmed", False):
+        message = "员工尚未确认工资，不能通过旧锁定接口跳过确认流程"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(
+            url=_build_employees_url(store, "salary_settlement", error=message),
             status_code=303
         )
 
@@ -26654,7 +26832,7 @@ async def schedule_page(
     ).all()
     for item in leave_event_rows:
         color_class = schedule_event_color_class(1000 + (item.id or 0))
-        leave_label = "公休" if _is_public_rest_leave(item) else "请假"
+        leave_label = _leave_type_label(item.leave_type)
         shift_snapshot = _deserialize_shift_snapshot(getattr(item, "shift_snapshot_json", None))
         has_replacement = (
             item.status == "approved_with_flexible"

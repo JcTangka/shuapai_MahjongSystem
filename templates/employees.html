@@ -855,6 +855,12 @@
                 <a class="employee-tab-link {% if active_tab == 'my_salary' %}active{% endif %}"
                    href="/employees?store={{ current_store }}&tab=my_salary">
                     <i class="bi bi-wallet2"></i>我的工资
+                    {% if has_unviewed_salary_confirmation %}
+                        <span class="d-inline-block rounded-circle bg-danger ms-1"
+                              style="width: 8px; height: 8px;"
+                              title="有工资待确认"
+                              aria-label="有工资待确认"></span>
+                    {% endif %}
                 </a>
 
                 <a class="employee-tab-link {% if active_tab == 'my_leave' %}active{% endif %}"
@@ -1605,9 +1611,9 @@
                         {% elif item.status == 'replacement_accepted' %}
                             <span class="badge bg-primary">待管理员审批</span>
                         {% elif item.status == 'replacement_rejected_wait_employee' %}
-                            <span class="badge bg-warning text-dark">待请假人确认</span>
+                            <span class="badge bg-warning text-dark">待{{ leave_type_label(item.leave_type or 'leave') }}人确认</span>
                         {% elif item.status == 'force_leave_deducted' %}
-                            <span class="badge bg-dark">坚持请假，已扣薪</span>
+                            <span class="badge bg-dark">坚持{{ leave_type_label(item.leave_type or 'leave') }}，已扣薪</span>
                         {% elif item.status == 'approved_with_flexible' %}
                             <span class="badge bg-success">机动顶班，已生效</span>
                         {% elif item.status == 'approved' %}
@@ -1617,7 +1623,7 @@
                         {% elif item.status == 'rejected' %}
                             <span class="badge bg-danger">已拒绝</span>
                         {% else %}
-                            <span class="badge bg-secondary">{{ leave_status_label(item.status) }}</span>
+                            <span class="badge bg-secondary">{{ leave_status_label(item.status, item.leave_type or 'leave') }}</span>
                         {% endif %}
                     </td>
 
@@ -2043,6 +2049,7 @@
                     <option value="absent" {% if attendance_filters.event_type == 'absent' %}selected{% endif %}>旷工</option>
                     <option value="other" {% if attendance_filters.event_type == 'other' %}selected{% endif %}>其他</option>
                     <option value="leave" {% if attendance_filters.event_type == 'leave' %}selected{% endif %}>请假</option>
+                    <option value="retro_leave" {% if attendance_filters.event_type == 'retro_leave' %}selected{% endif %}>补假</option>
                     <option value="shift_swap" {% if attendance_filters.event_type == 'shift_swap' %}selected{% endif %}>换班</option>
                 </select>
             </div>
@@ -2119,6 +2126,8 @@
                             <span class="badge bg-secondary">其他</span>
                         {% elif item.event_type == 'leave' %}
                             <span class="badge bg-info text-dark">请假</span>
+                        {% elif item.event_type == 'retro_leave' %}
+                            <span class="badge bg-primary">补假</span>
                         {% else %}
                             <span class="badge bg-secondary">{{ attendance_event_type_label(item.event_type) }}</span>
                         {% endif %}
@@ -2857,11 +2866,11 @@
     <div class="col-md-6 col-xl-3">
         <div class="card employee-stat-card h-100">
             <div class="card-body">
-                <div class="employee-stat-label">已发放并锁定</div>
+                <div class="employee-stat-label">员工已确认并锁定</div>
                 <div class="employee-stat-value">
-                    {{ salary_settlement_data.paid_count }}/{{ salary_settlement_data.locked_count }}
+                    {{ salary_settlement_data.employee_confirmed_count or 0 }}
                 </div>
-                <div class="small text-muted mt-1">已归档工资数量</div>
+                <div class="small text-muted mt-1">按员工、按月份独立锁定</div>
             </div>
         </div>
     </div>
@@ -2888,14 +2897,14 @@
                     <i class="bi bi-calculator text-primary me-1"></i>生成 / 重算工资
                 </div>
                 <div class="small text-muted mt-1">
-                    只会生成或重算“草稿”工资；已确认工资需先退回草稿后才能重算；已发放并锁定工资不可重算。
+                    草稿和等待员工确认的工资可重算；员工确认后按本人和月份独立锁定，全员重算会自动跳过。
                 </div>
             </div>
 
             <form action="/employees/salary-settlement/generate-all"
                   method="post"
                   data-employee-ajax-form="1"
-                  onsubmit="return confirm('确定生成/重算 {{ salary_settlement_data.year }}年{{ salary_settlement_data.month }}月 全员工资吗？只会处理未生成或草稿状态的工资，已确认和已发放并锁定的工资会跳过。');">
+                  onsubmit="return confirm('确定生成/重算 {{ salary_settlement_data.year }}年{{ salary_settlement_data.month }}月全员工资吗？已由员工确认并锁定的个人工资会自动跳过。');">
                 <input type="hidden" name="store" value="{{ current_store or '' }}">
                 <input type="hidden" name="salary_year" value="{{ salary_settlement_data.year }}">
                 <input type="hidden" name="salary_month" value="{{ salary_settlement_data.month }}">
@@ -2986,7 +2995,7 @@
                     {% set actual_salary = payable_salary - employee_social_security_amount - social_security_amount %}
 
                     <td>
-                        {% if salary_settlement_read_only or item.status != 'draft' %}
+                        {% if salary_settlement_read_only or item.status not in ['draft', 'pending_employee_confirmation'] %}
                             <span class="fw-bold text-success">¥{{ '%.2f'|format(employee_social_security_amount) }}</span>
                         {% else %}
                             <form action="/employees/salary-settlement/social-security/{{ item.id }}"
@@ -3011,7 +3020,7 @@
                     </td>
 
                     <td>
-                        {% if salary_settlement_read_only or item.status != 'draft' %}
+                        {% if salary_settlement_read_only or item.status not in ['draft', 'pending_employee_confirmation'] %}
                             <span class="fw-bold text-danger">¥{{ '%.2f'|format(social_security_amount) }}</span>
                         {% else %}
                             <form action="/employees/salary-settlement/social-security/{{ item.id }}"
@@ -3038,8 +3047,10 @@
                     <td>
                         {% if item.status == 'draft' %}
                             <span class="badge bg-secondary">草稿</span>
+                        {% elif item.status == 'pending_employee_confirmation' %}
+                            <span class="badge bg-warning text-dark">等待员工确认</span>
                         {% elif item.status == 'confirmed' %}
-                            <span class="badge bg-primary">已确认</span>
+                            <span class="badge bg-success">员工已确认并锁定</span>
                         {% elif item.status == 'paid' %}
                             <span class="badge bg-success">已发放并锁定</span>
                         {% elif item.status == 'locked' %}
@@ -3053,56 +3064,34 @@
                         {% endif %}
                         {% if item.employee_confirmed %}
                         <div class="small text-success mt-1">
-                            员工已确认
+                            员工已确认并锁定
                             {% if item.employee_confirmed_at %}｜{{ item.employee_confirmed_at }}{% endif %}
                         </div>
+                        {% elif item.status == 'pending_employee_confirmation' %}
+                        <div class="small text-warning mt-1">已发送，等待员工确认</div>
                         {% else %}
-                        <div class="small text-muted mt-1">待员工确认</div>
+                        <div class="small text-muted mt-1">尚未发送给员工</div>
                         {% endif %}
                     </td>
 
                     {% if can_manage_salary_settlement %}
                     <td>
                         <div class="d-flex flex-column gap-1">
-                            {% if item.status == 'draft' and item.employee_confirmed %}
+                            {% if item.status in ['draft', 'pending_employee_confirmation'] %}
                             <form action="/employees/salary-settlement/confirm/{{ item.id }}"
                                   method="post"
                                   data-employee-ajax-form="1"
-                                  onsubmit="return confirm('确定最终确认【{{ emp.display_name }}】的工资吗？确认后如需重算，需要先退回草稿。');">
+                                  onsubmit="return confirm('确定将【{{ emp.display_name }}】本月最新工资明细发送给员工确认吗？');">
                                 <input type="hidden" name="store" value="{{ current_store or '' }}">
                                 <button type="submit" class="btn btn-sm btn-outline-primary w-100">
-                                    确认工资
+                                    {% if item.status == 'pending_employee_confirmation' %}重新发送等待确认{% else %}等待员工确认{% endif %}
                                 </button>
                             </form>
-                            {% elif item.status == 'draft' %}
-                            <button class="btn btn-sm btn-outline-secondary w-100" disabled>
-                                等待员工确认
+                            {% elif item.status == 'confirmed' %}
+                            <button class="btn btn-sm btn-outline-success w-100" disabled>
+                                员工已确认并锁定
                             </button>
-                            {% endif %}
-
-                            {% if item.status == 'confirmed' %}
-                            <form action="/employees/salary-settlement/paid/{{ item.id }}"
-                                  method="post"
-                                  data-employee-ajax-form="1"
-                                  onsubmit="return confirm('确定将【{{ emp.display_name }}】的工资标记为已发放并锁定吗？发放后不能重算，也不能删除当月工资流水。');">
-                                <input type="hidden" name="store" value="{{ current_store or '' }}">
-                                <button type="submit" class="btn btn-sm btn-outline-success w-100">
-                                    发放并锁定
-                                </button>
-                            </form>
-
-                            <form action="/employees/salary-settlement/back-to-draft/{{ item.id }}"
-                                  method="post"
-                                  data-employee-ajax-form="1"
-                                  onsubmit="return confirm('确定将【{{ emp.display_name }}】的工资退回草稿吗？退回后可以重新生成/重算。');">
-                                <input type="hidden" name="store" value="{{ current_store or '' }}">
-                                <button type="submit" class="btn btn-sm btn-outline-warning w-100">
-                                    退回草稿
-                                </button>
-                            </form>
-                            {% endif %}
-
-                            {% if item.status in ['paid', 'locked'] %}
+                            {% elif item.status in ['paid', 'locked'] %}
                             <button class="btn btn-sm btn-outline-secondary w-100" disabled>
                                 已发放并锁定
                             </button>
@@ -3839,6 +3828,8 @@
                             <span class="badge bg-danger">旷工</span>
                         {% elif item.event_type == 'leave' %}
                             <span class="badge bg-info text-dark">请假</span>
+                        {% elif item.event_type == 'retro_leave' %}
+                            <span class="badge bg-primary">补假</span>
                         {% elif item.event_type == 'other' %}
                             <span class="badge bg-secondary">其他</span>
                         {% else %}
@@ -3918,7 +3909,7 @@
         <i class="bi bi-receipt text-primary me-1"></i>工资结算
     </div>
     <div>
-        后续这里用于管理员生成本月工资草稿、确认工资、标记已发放、锁定工资。
+        管理员生成工资草稿后发送给员工确认；员工确认后即锁定本人当月工资。
     </div>
     <div class="employee-help-note mt-3">
         计划数据来源：MonthlySalarySettlement 汇总 SalaryFlowRecord。锁定后不建议直接改旧流水，应新增工资修正流水。
@@ -4539,12 +4530,12 @@
                     <div class="border rounded-3 p-3 bg-light h-100">
                         <div class="small text-muted">结算状态</div>
                         <div class="fs-5 fw-bold">
-                            {% if settlement.status == 'paid' %}
-                                <span class="badge bg-success fs-6">已发放</span>
-                            {% elif settlement.status == 'locked' %}
-                                <span class="badge bg-danger fs-6">已锁定</span>
+                            {% if settlement.status == 'pending_employee_confirmation' %}
+                                <span class="badge bg-warning text-dark fs-6">等待您确认</span>
                             {% elif settlement.status == 'confirmed' %}
-                                <span class="badge bg-primary fs-6">已确认</span>
+                                <span class="badge bg-success fs-6">已确认并锁定</span>
+                            {% elif settlement.status in ['paid', 'locked'] %}
+                                <span class="badge bg-success fs-6">已发放并锁定</span>
                             {% else %}
                                 <span class="badge bg-secondary fs-6">{{ my_salary_data.settlement_status_label }}</span>
                             {% endif %}
@@ -4554,8 +4545,10 @@
                                 您已确认
                                 {% if settlement.employee_confirmed_at %}｜{{ settlement.employee_confirmed_at }}{% endif %}
                             </div>
+                        {% elif settlement.status == 'pending_employee_confirmation' %}
+                            <div class="small text-warning mt-2">待您确认</div>
                         {% else %}
-                            <div class="small text-muted mt-2">待您确认</div>
+                            <div class="small text-muted mt-2">当前为草稿，可先查看</div>
                         {% endif %}
                     </div>
                 </div>
@@ -4614,39 +4607,42 @@
 
             <div class="employee-help-note mt-3">
                 <i class="bi bi-info-circle me-1"></i>
-                本月工资已生成结算记录。若后续仍有补扣、补发，应由管理员新增工资修正流水，再重新结算或在结算模块处理。
+                {% if settlement.status == 'pending_employee_confirmation' %}
+                    管理员已发送本月最新工资明细，请核对后确认。确认后该月工资立即锁定，不受管理员调整其他员工或全员重算影响。
+                {% elif settlement.employee_confirmed or settlement.status in ['confirmed', 'paid', 'locked'] %}
+                    该月工资已经确认并锁定，不受管理员调整其他员工或全员重算影响。
+                {% else %}
+                    当前为工资草稿，您可以查看工资汇总和流水；管理员点击等待员工确认按钮后，您再进行最终确认。
+                {% endif %}
             </div>
 
-            {% if settlement.status == 'draft' %}
-                <div class="mt-3 d-flex justify-content-end">
-                    {% if settlement.employee_confirmed %}
-                        <button type="button" class="btn btn-outline-success" disabled>
-                            <i class="bi bi-check-circle me-1"></i>您已确认工资
+            <div class="mt-3 d-flex justify-content-end">
+                {% if settlement.status == 'pending_employee_confirmation' and my_salary_data.can_employee_confirm_salary %}
+                    <form action="/employees/my-salary/confirm/{{ settlement.id }}"
+                          method="post"
+                          onsubmit="return confirm('确认本月工资无误吗？确认后该月工资将立即锁定，不能再次修改。');">
+                        <input type="hidden" name="store" value="{{ current_store or '' }}">
+                        <button type="submit" class="btn btn-primary">
+                            <i class="bi bi-check-circle me-1"></i>确认工资并锁定
                         </button>
-                    {% elif my_salary_data.can_employee_confirm_salary %}
-                        <form action="/employees/my-salary/confirm/{{ settlement.id }}"
-                              method="post"
-                              onsubmit="return confirm('确认本月工资无误吗？确认后管理员才能进行最终确认。');">
-                            <input type="hidden" name="store" value="{{ current_store or '' }}">
-                            <button type="submit" class="btn btn-primary">
-                                <i class="bi bi-check-circle me-1"></i>确认工资
-                            </button>
-                        </form>
-                    {% else %}
-                        <button type="button" class="btn btn-outline-secondary" disabled>
-                            <i class="bi bi-clock me-1"></i>月底开放确认
-                        </button>
-                    {% endif %}
-                </div>
-            {% endif %}
+                    </form>
+                {% elif settlement.employee_confirmed or settlement.status in ['confirmed', 'paid', 'locked'] %}
+                    <button type="button" class="btn btn-outline-success" disabled>
+                        <i class="bi bi-lock me-1"></i>您已确认，本月工资已锁定
+                    </button>
+                {% else %}
+                    <button type="button" class="btn btn-outline-secondary" disabled>
+                        <i class="bi bi-eye me-1"></i>工资草稿，可查看，暂不需要确认
+                    </button>
+                {% endif %}
+            </div>
         {% else %}
             <div class="employee-help-note">
                 <div class="fw-bold text-dark mb-1">
-                    <i class="bi bi-info-circle me-1"></i>本月暂未生成应发工资结算
+                    <i class="bi bi-info-circle me-1"></i>本月暂未生成工资结算
                 </div>
                 <div>
-                    当前页面先展示已进入系统的工资流水，例如请假扣款、迟到扣款、旷工扣款、工作失误扣款、顶班补贴、临时奖金、临时扣款等。
-                    基础工资、单量提成、全勤奖等完整工资，需要后续由管理员在“工资结算”模块统一生成。
+                    已录入且设置为员工可见的工资流水仍会在下方展示；管理员生成结算后，这里会显示工资汇总。
                 </div>
             </div>
         {% endif %}
@@ -4874,7 +4870,7 @@
         <button class="btn btn-primary"
                 data-bs-toggle="modal"
                 data-bs-target="#leaveApplyModal">
-            <i class="bi bi-plus-circle me-1"></i>请假申请
+            <i class="bi bi-plus-circle me-1"></i>请假/补假申请
         </button>
     </div>
     {% endif %}
@@ -5123,7 +5119,7 @@
                         {% elif item.status == 'replacement_rejected_wait_employee' %}
                             <span class="badge bg-warning text-dark">待您确认</span>
                         {% elif item.status == 'force_leave_deducted' %}
-                            <span class="badge bg-dark">坚持请假，已扣薪</span>
+                            <span class="badge bg-dark">坚持{{ leave_type_label(item.leave_type or 'leave') }}，已扣薪</span>
                         {% elif item.status == 'approved_with_flexible' %}
                             <span class="badge bg-success">机动顶班，已生效</span>
                         {% elif item.status == 'approved' %}
@@ -5133,7 +5129,7 @@
                         {% elif item.status == 'rejected' %}
                             <span class="badge bg-danger">已拒绝</span>
                         {% else %}
-                            <span class="badge bg-secondary">{{ leave_status_label(item.status) }}</span>
+                            <span class="badge bg-secondary">{{ leave_status_label(item.status, item.leave_type or 'leave') }}</span>
                         {% endif %}
                     </td>
 
@@ -5303,7 +5299,7 @@
         <div class="modal-content border-0 shadow-lg">
             <div class="modal-header text-white" style="background: linear-gradient(135deg, #2563eb, #1d4ed8);">
                 <h5 class="modal-title">
-                    <i class="bi bi-calendar-plus me-2"></i>请假申请
+                    <i class="bi bi-calendar-plus me-2"></i>请假/补假申请
                 </h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
@@ -5319,13 +5315,13 @@
 
                     <div class="alert alert-info">
                         <div class="fw-bold mb-1">
-                            <i class="bi bi-info-circle me-1"></i>请假规则
+                            <i class="bi bi-info-circle me-1"></i>请假/补假规则
                         </div>
                         <div class="small">
                             {% if current_user_is_logistics %}
-                            后勤员工请假至少提前一天提交；可选择多天，系统会按上班日拆成逐日申请；管理员同意后每天扣除固定日薪 88.5 元，并记录到考勤和员工流水。后勤员工不参与顶班、换班。
+                            后勤员工请假至少提前一天提交；补假只能选择今天及以前的日期。两者均可选择多天，系统会按上班日拆成逐日申请；管理员同意后每天扣除固定日薪 88.5 元，并记录到考勤和员工流水。后勤员工不参与顶班、换班。
                             {% else %}
-                            当天无法申请，至少提前一天提交。普通请假可选择多天，系统会按上班日拆成逐日申请；审批后会逐日安排休班员工或机动类型员工顶班。公休审批后不扣工资，排班会改为“公休”，并同步触发机动顶班。
+                            普通请假至少提前一天提交；补假只能选择今天及以前的日期。请假和补假均可选择多天，系统会按上班日拆成逐日申请；审批后会逐日安排休班员工或机动类型员工顶班，并同步考勤、排班和工资。公休审批后不扣工资。
                             {% endif %}
                         </div>
                     </div>
@@ -5356,7 +5352,7 @@
                                min="{{ tomorrow_date }}"
                                required>
                         <div class="form-text">
-                            最早可选择：{{ tomorrow_date }}
+                            请假/公休最早选择 {{ tomorrow_date }}；补假最晚选择 {{ today_date }}。
                         </div>
                     </div>
 
@@ -5370,7 +5366,7 @@
                                min="{{ tomorrow_date }}"
                                required>
                         <div class="form-text">
-                            普通请假会按开始至结束日期中的上班日拆成单日申请；公休会按整个时间段处理。
+                            请假和补假会按开始至结束日期中的上班日拆成单日申请；公休会按整个时间段处理。
                         </div>
                     </div>
 
@@ -5415,12 +5411,12 @@
         <div class="modal-content border-0 shadow">
             <div class="modal-header bg-warning-subtle">
                 <h5 class="modal-title text-dark">
-                    <i class="bi bi-exclamation-triangle me-2"></i>请假提醒
+                    <i class="bi bi-exclamation-triangle me-2"></i>请假/补假提醒
                 </h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
-                坚持请假将导致个人门店达标奖减半，是否仍要请假？
+                请假或补假达到本月第 4 次及以上将导致个人门店达标奖减半，是否仍要提交？
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" id="leaveExcessiveCancelBtn">撤回请假</button>
@@ -5685,6 +5681,8 @@
                             <span class="badge bg-secondary">其他</span>
                         {% elif item.event_type == 'leave' %}
                             <span class="badge bg-info text-dark">请假</span>
+                        {% elif item.event_type == 'retro_leave' %}
+                            <span class="badge bg-primary">补假</span>
                         {% else %}
                             <span class="badge bg-secondary">{{ attendance_event_type_label(item.event_type) }}</span>
                         {% endif %}
@@ -6327,17 +6325,18 @@ function updateEmployeeRow(emp) {
 }
 
 function leaveStatusBadge(status, statusLabel) {
+    const safeStatusLabel = escapeHtml(statusLabel || status || "未知");
     if (status === "pending_admin_review") return `<span class="badge bg-primary">待管理员审批</span>`;
     if (status === "pending") return `<span class="badge bg-warning text-dark">待顶班确认</span>`;
-    if (status === "replacement_accepted") return `<span class="badge bg-success">顶班人已同意，请假已生效</span>`;
-    if (status === "replacement_rejected_wait_employee") return `<span class="badge bg-warning text-dark">待请假人确认</span>`;
-    if (status === "force_leave_deducted") return `<span class="badge bg-dark">坚持请假，已扣薪</span>`;
-    if (status === "approved_with_flexible") return `<span class="badge bg-success">机动顶班，已生效</span>`;
+    if (status === "replacement_accepted") return `<span class="badge bg-success">${safeStatusLabel}</span>`;
+    if (status === "replacement_rejected_wait_employee") return `<span class="badge bg-warning text-dark">${safeStatusLabel}</span>`;
+    if (status === "force_leave_deducted") return `<span class="badge bg-dark">${safeStatusLabel}</span>`;
+    if (status === "approved_with_flexible") return `<span class="badge bg-success">${safeStatusLabel}</span>`;
     if (status === "approved") return `<span class="badge bg-success">已通过</span>`;
     if (status === "admin_cancelled") return `<span class="badge bg-secondary">管理员已撤回</span>`;
     if (status === "rejected") return `<span class="badge bg-danger">已拒绝</span>`;
     if (status === "cancelled") return `<span class="badge bg-secondary">已撤销</span>`;
-    return `<span class="badge bg-secondary">${escapeHtml(statusLabel || status || "未知")}</span>`;
+    return `<span class="badge bg-secondary">${safeStatusLabel}</span>`;
 }
 
 let pendingExcessiveLeaveForm = null;
@@ -6657,18 +6656,19 @@ function renderMyLeaveActionCell(leave) {
                     <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
                     <input type="date"
                            name="leave_date"
-                           min="{{ tomorrow_date }}"
+                           ${leave.leave_type === "retro_leave" ? `max="{{ today_date }}"` : `min="{{ tomorrow_date }}"`}
                            value="${escapeHtml(leave.leave_date)}"
                            class="form-control form-control-sm mb-1"
                            required>
                     <input type="date"
                            name="leave_end_date"
-                           min="{{ tomorrow_date }}"
+                           ${leave.leave_type === "retro_leave" ? `max="{{ today_date }}"` : `min="{{ tomorrow_date }}"`}
                            value="${escapeHtml(leave.leave_end_date || leave.leave_date)}"
                            class="form-control form-control-sm mb-1"
                            required>
                     <select name="leave_type" class="form-select form-select-sm mb-1" required>
                         <option value="leave"${leave.leave_type === "leave" ? " selected" : ""}>请假</option>
+                        <option value="retro_leave"${leave.leave_type === "retro_leave" ? " selected" : ""}>补假</option>
                         ${leave.leave_type === "public_rest" || canApplyPublicRest
                             ? `<option value="public_rest"${leave.leave_type === "public_rest" ? " selected" : ""}>公休</option>`
                             : ``}
@@ -6787,6 +6787,9 @@ function attendanceEventBadge(attendance) {
     }
     if (attendance.event_type === "leave") {
         return `<span class="badge bg-info text-dark">请假</span>`;
+    }
+    if (attendance.event_type === "retro_leave") {
+        return `<span class="badge bg-primary">补假</span>`;
     }
     return `<span class="badge bg-secondary">${escapeHtml(attendance.event_type_label || "其他")}</span>`;
 }
@@ -7313,78 +7316,38 @@ function renderTeamAssessmentSummary(assessment) {
 }
 
 function settlementStatusBadge(status, statusLabel) {
-    /**
-     * 工资结算状态徽章。
-     *
-     * 三态：
-     * 1. draft：草稿
-     * 2. confirmed：已确认
-     * 3. paid：已发放并锁定
-     *
-     * locked 为旧状态，兼容展示为“已发放并锁定”。
-     */
     if (status === "draft") return `<span class="badge bg-secondary">草稿</span>`;
-    if (status === "confirmed") return `<span class="badge bg-primary">已确认</span>`;
-    if (status === "paid") return `<span class="badge bg-success">已发放并锁定</span>`;
-    if (status === "locked") return `<span class="badge bg-success">已发放并锁定</span>`;
+    if (status === "pending_employee_confirmation") return `<span class="badge bg-warning text-dark">等待员工确认</span>`;
+    if (status === "confirmed") return `<span class="badge bg-success">员工已确认并锁定</span>`;
+    if (status === "paid" || status === "locked") return `<span class="badge bg-success">已发放并锁定</span>`;
     return `<span class="badge bg-secondary">${escapeHtml(statusLabel || status || "未知")}</span>`;
 }
 
 function renderSalarySettlementActionCell(item) {
-    /**
-     * 工资结算操作按钮。
-     *
-     * 当前三态：
-     * 1. 草稿：可确认，可重算；
-     * 2. 已确认：可发放并锁定，可退回草稿；
-     * 3. 已发放并锁定：不可操作。
-     */
     if (salarySettlementReadOnly) {
         return "";
     }
 
-    if (item.status === "paid" || item.status === "locked") {
-        return `<button class="btn btn-sm btn-outline-secondary w-100" disabled>已发放并锁定</button>`;
-    }
-
-    let html = `<div class="d-flex flex-column gap-1">`;
-
-    if (item.status === "draft" && item.employee_confirmed) {
-        html += `
+    if (item.status === "draft" || item.status === "pending_employee_confirmation") {
+        const label = item.status === "pending_employee_confirmation"
+            ? "重新发送等待确认"
+            : "等待员工确认";
+        return `
             <form action="/employees/salary-settlement/confirm/${item.id}"
                   method="post"
                   data-employee-ajax-form="1"
-                  onsubmit="return confirm('确定最终确认【${escapeHtml(item.employee_name)}】的工资吗？确认后如需重算，需要先退回草稿。');">
+                  onsubmit="return confirm('确定将【${escapeHtml(item.employee_name)}】本月最新工资明细发送给员工确认吗？');">
                 <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
-                <button type="submit" class="btn btn-sm btn-outline-primary w-100">确认工资</button>
+                <button type="submit" class="btn btn-sm btn-outline-primary w-100">${label}</button>
             </form>
         `;
-    } else if (item.status === "draft") {
-        html += `<button class="btn btn-sm btn-outline-secondary w-100" disabled>等待员工确认</button>`;
     }
 
     if (item.status === "confirmed") {
-        html += `
-            <form action="/employees/salary-settlement/paid/${item.id}"
-                  method="post"
-                  data-employee-ajax-form="1"
-                  onsubmit="return confirm('确定将【${escapeHtml(item.employee_name)}】的工资标记为已发放并锁定吗？发放后不能重算，也不能删除当月工资流水。');">
-                <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
-                <button type="submit" class="btn btn-sm btn-outline-success w-100">发放并锁定</button>
-            </form>
-
-            <form action="/employees/salary-settlement/back-to-draft/${item.id}"
-                  method="post"
-                  data-employee-ajax-form="1"
-                  onsubmit="return confirm('确定将【${escapeHtml(item.employee_name)}】的工资退回草稿吗？退回后可以重新生成/重算。');">
-                <input type="hidden" name="store" value="${escapeHtml(currentEmployeeStore())}">
-                <button type="submit" class="btn btn-sm btn-outline-warning w-100">退回草稿</button>
-            </form>
-        `;
+        return `<button class="btn btn-sm btn-outline-success w-100" disabled>员工已确认并锁定</button>`;
     }
 
-    html += `</div>`;
-    return html;
+    return `<button class="btn btn-sm btn-outline-secondary w-100" disabled>已发放并锁定</button>`;
 }
 
 function renderSalarySettlementEmployeeCell(item) {
@@ -7502,7 +7465,7 @@ function renderSalarySettlementRow(item) {
     const socialSecurity = Number(item.social_security_amount || 0);
     const payableSalary = Number(item.payable_salary || (Number(item.final_salary || 0) + employeeSocialSecurity));
     const actualSalary = Number(item.actual_salary ?? (payableSalary - employeeSocialSecurity - socialSecurity));
-    const employeeSocialSecurityHtml = (salarySettlementReadOnly || item.status !== "draft")
+    const employeeSocialSecurityHtml = (salarySettlementReadOnly || !["draft", "pending_employee_confirmation"].includes(item.status))
         ? `<span class="fw-bold text-success">¥${employeeSocialSecurity.toFixed(2)}</span>`
         : `
             <form action="/employees/salary-settlement/social-security/${item.id}"
@@ -7520,7 +7483,7 @@ function renderSalarySettlementRow(item) {
                 <button type="submit" class="btn btn-sm btn-outline-primary">保存</button>
             </form>
         `;
-    const socialSecurityHtml = (salarySettlementReadOnly || item.status !== "draft")
+    const socialSecurityHtml = (salarySettlementReadOnly || !["draft", "pending_employee_confirmation"].includes(item.status))
         ? `<span class="fw-bold text-danger">¥${socialSecurity.toFixed(2)}</span>`
         : `
             <form action="/employees/salary-settlement/social-security/${item.id}"
@@ -7569,8 +7532,10 @@ function renderSalarySettlementRow(item) {
                 ${settlementStatusBadge(item.status, item.status_label)}
                 ${item.calculated_at ? `<div class="small text-muted mt-1">${escapeHtml(item.calculated_at)}</div>` : ""}
                 ${item.employee_confirmed
-                    ? `<div class="small text-success mt-1">员工已确认${item.employee_confirmed_at ? "｜" + escapeHtml(item.employee_confirmed_at) : ""}</div>`
-                    : `<div class="small text-muted mt-1">待员工确认</div>`}
+                    ? `<div class="small text-success mt-1">员工已确认并锁定${item.employee_confirmed_at ? "｜" + escapeHtml(item.employee_confirmed_at) : ""}</div>`
+                    : item.status === "pending_employee_confirmation"
+                        ? `<div class="small text-warning mt-1">已发送，等待员工确认</div>`
+                        : `<div class="small text-muted mt-1">尚未发送给员工</div>`}
             </td>
 
             ${salarySettlementReadOnly ? "" : `<td>${renderSalarySettlementActionCell(item)}</td>`}
@@ -7774,7 +7739,7 @@ function updateSalarySettlementSummary(summary) {
     if (generatedNote) {
         generatedNote.textContent = `已有月度结算记录；员工已确认 ${summary.employee_confirmed_count ?? 0} 条`;
     }
-    cards[2].querySelector(".employee-stat-value").textContent = `${summary.paid_count ?? 0}/${summary.locked_count ?? 0}`;
+    cards[2].querySelector(".employee-stat-value").textContent = `${summary.employee_confirmed_count ?? 0}`;
     cards[3].querySelector(".employee-stat-value").textContent = `¥${Number(summary.total_final_salary || 0).toFixed(2)}`;
 }
 
@@ -7880,6 +7845,14 @@ function handleSalaryFlowEditTypeChange() {
 
 function handleEmployeeAjaxResult(result) {
     if (!result.ok) {
+        if (result.requires_excessive_leave_confirmation) {
+            pendingExcessiveLeaveForm = document.querySelector("form[action='/employees/leaves/apply']");
+            const modalEl = document.getElementById("leaveExcessiveConfirmModal");
+            if (pendingExcessiveLeaveForm && modalEl) {
+                bootstrap.Modal.getOrCreateInstance(modalEl).show();
+                return;
+            }
+        }
         employeeShowToast(result.message || "操作失败", "error");
         return;
     }
@@ -7938,6 +7911,7 @@ function handleEmployeeAjaxResult(result) {
             const countDelta = parseInt(payload.leave_count_delta_current_month || "0", 10) || 0;
             form.dataset.currentMonthLeaveCount = String(currentCount + countDelta);
             form.reset();
+            updateLeaveDateConstraints(form);
         }
     }
 
@@ -8114,6 +8088,37 @@ async function submitEmployeeAjaxForm(form) {
     }
 }
 
+function updateLeaveDateConstraints(form) {
+    if (!form) return;
+    const action = form.getAttribute("action") || "";
+    if (action.indexOf("/employees/leaves/apply") === -1
+        && action.indexOf("/employees/leaves/update/") === -1) {
+        return;
+    }
+
+    const typeInput = form.querySelector("[name='leave_type']");
+    const startInput = form.querySelector("[name='leave_date']");
+    const endInput = form.querySelector("[name='leave_end_date']");
+    if (!typeInput || !startInput || !endInput) return;
+
+    if (typeInput.value === "retro_leave") {
+        startInput.removeAttribute("min");
+        endInput.removeAttribute("min");
+        startInput.max = "{{ today_date }}";
+        endInput.max = "{{ today_date }}";
+    } else {
+        startInput.min = "{{ tomorrow_date }}";
+        endInput.min = "{{ tomorrow_date }}";
+        startInput.removeAttribute("max");
+        endInput.removeAttribute("max");
+    }
+}
+
+function initializeLeaveDateConstraints(root = document) {
+    root.querySelectorAll("form[action='/employees/leaves/apply'], form[action^='/employees/leaves/update/']")
+        .forEach(updateLeaveDateConstraints);
+}
+
 function shouldSubmitLeaveApplyForm(form) {
     if (!form || form.action.indexOf("/employees/leaves/apply") === -1) {
         return true;
@@ -8121,32 +8126,35 @@ function shouldSubmitLeaveApplyForm(form) {
 
     const leaveTypeInput = form.querySelector("[name='leave_type']");
     const leaveType = leaveTypeInput ? leaveTypeInput.value : "leave";
+    const requestLabel = leaveType === "retro_leave" ? "补假" : "请假";
     const startInput = form.querySelector("[name='leave_date']");
     const endInput = form.querySelector("[name='leave_end_date']");
     if (!startInput || !startInput.value || !endInput || !endInput.value) {
         if (form.reportValidity) {
             form.reportValidity();
         } else {
-            alert("请选择请假的开始日期和结束日期");
+            alert("请选择申请的开始日期和结束日期");
         }
         return false;
     }
-    const startDate = startInput && startInput.value ? new Date(`${startInput.value}T00:00:00`) : null;
-    const endDate = endInput && endInput.value ? new Date(`${endInput.value}T00:00:00`) : null;
-    const selectedDayCount = startDate && endDate && endDate >= startDate
+    const startDate = new Date(`${startInput.value}T00:00:00`);
+    const endDate = new Date(`${endInput.value}T00:00:00`);
+    const selectedDayCount = endDate >= startDate
         ? Math.floor((endDate - startDate) / 86400000) + 1
         : 1;
     const confirmInput = form.querySelector("input[name='confirm_excessive_leave']");
+    const confirmMessage = leaveType === "public_rest"
+        ? "确定提交公休申请吗？提交后需由管理员安排机动员工顶班。"
+        : (selectedDayCount > 1
+            ? `确定提交 ${selectedDayCount} 天范围的${requestLabel}申请吗？系统会按上班日拆成逐日申请。`
+            : `确定提交${requestLabel}申请吗？提交后需由管理员审批。`);
     if (confirmInput && confirmInput.value === "1") {
-        return confirm(leaveType === "public_rest"
-            ? "确定提交公休申请吗？提交后需由管理员安排机动员工顶班。"
-            : (selectedDayCount > 1
-                ? `确定提交 ${selectedDayCount} 天范围的请假申请吗？系统会按上班日拆成逐日申请。`
-                : "确定提交请假申请吗？提交后需由管理员审批。"));
+        return confirm(confirmMessage);
     }
 
     const currentCount = parseInt(form.dataset.currentMonthLeaveCount || "0", 10) || 0;
-    if (leaveType === "leave" && currentCount + selectedDayCount >= 4) {
+    if ((leaveType === "leave" || leaveType === "retro_leave")
+        && currentCount + selectedDayCount >= 4) {
         pendingExcessiveLeaveForm = form;
         const modalEl = document.getElementById("leaveExcessiveConfirmModal");
         if (modalEl) {
@@ -8156,11 +8164,7 @@ function shouldSubmitLeaveApplyForm(form) {
         return false;
     }
 
-    return confirm(leaveType === "public_rest"
-        ? "确定提交公休申请吗？提交后需由管理员安排机动员工顶班。"
-        : (selectedDayCount > 1
-            ? `确定提交 ${selectedDayCount} 天范围的请假申请吗？系统会按上班日拆成逐日申请。`
-            : "确定提交请假申请吗？提交后需由管理员审批。"));
+    return confirm(confirmMessage);
 }
 
 function prepareHourlySubsidyBatchForm(form, actionLabel) {
@@ -8199,6 +8203,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
     // 初始化工资调整弹窗的默认金额方向和标题提示
     handleSalaryFlowTypeChange();
+    initializeLeaveDateConstraints();
 
     const excessiveProceedBtn = document.getElementById("leaveExcessiveProceedBtn");
     const excessiveCancelBtn = document.getElementById("leaveExcessiveCancelBtn");
@@ -8211,7 +8216,7 @@ document.addEventListener("DOMContentLoaded", function () {
                 confirmInput.value = "1";
             }
             bootstrap.Modal.getOrCreateInstance(excessiveModalEl).hide();
-            if (!confirm("确定提交请假申请吗？提交后仍需管理员审批。")) {
+            if (!confirm("确定提交请假/补假申请吗？提交后仍需管理员审批。")) {
                 if (confirmInput) {
                     confirmInput.value = "0";
                 }
@@ -8253,6 +8258,12 @@ document.addEventListener("DOMContentLoaded", function () {
             });
         });
     }
+
+    document.addEventListener("change", function (event) {
+        const leaveTypeSelect = event.target.closest("select[name='leave_type']");
+        if (!leaveTypeSelect) return;
+        updateLeaveDateConstraints(leaveTypeSelect.closest("form"));
+    });
 
     document.addEventListener("submit", function (event) {
         const form = event.target.closest("form[data-employee-ajax-form='1']");
