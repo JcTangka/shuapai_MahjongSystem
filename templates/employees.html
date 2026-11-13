@@ -1597,7 +1597,7 @@
                     <i class="bi bi-calendar-check me-1 text-primary"></i>请假审批
                 </div>
                 <div class="small text-muted mt-1">
-                    待审批 {{ pending_leave_count or 0 }} 条；普通/试用员工请假可安排休班顶班或机动顶班，符合条件的员工也可申请公休，公休批准后不扣工资但仍会触发机动顶班；后勤员工请假同意后直接扣固定日薪 88.5 元。
+                    待审批 {{ pending_leave_count or 0 }} 条；普通员工公休批准后不扣工资并安排机动顶班；后勤员工公休仅计入公休统计，不安排顶班、不扣工资。后勤请假/补假仍按每天 88.5 元扣款。
                 </div>
             </div>
         </div>
@@ -1737,7 +1737,21 @@
                     <td>
                         {% if item.status == 'pending_admin_review' %}
                         <div class="d-flex flex-column gap-2">
-                            {% if logistics_leave_map.get(item.id) %}
+                            {% if logistics_leave_map.get(item.id) and item.leave_type == 'public_rest' %}
+                            <form action="/employees/leaves/rest-replacement/{{ item.id }}"
+                                  method="post"
+                                  data-employee-ajax-form="1"
+                                  onsubmit="return confirm('确定批准这条后勤员工公休吗？本次仅计入公休统计，不安排机动顶班、不扣工资。');">
+                                <input type="hidden" name="store" value="{{ current_store or '' }}">
+                                <input type="text"
+                                       name="approval_note"
+                                       class="form-control form-control-sm mb-1"
+                                       placeholder="审批备注，可不填">
+                                <button type="submit" class="btn btn-sm btn-success w-100">
+                                    <i class="bi bi-check-circle me-1"></i>批准公休（仅统计）
+                                </button>
+                            </form>
+                            {% elif logistics_leave_map.get(item.id) %}
                             <form action="/employees/leaves/rest-replacement/{{ item.id }}"
                                   method="post"
                                   data-employee-ajax-form="1"
@@ -3503,7 +3517,7 @@
      1. 管理员和普通员工都可见；
      2. 展示本月门店订单达成、员工个人单量、考勤异常；
      3. 只读看板，不涉及操作，所以不需要 AJAX 局部刷新；
-     4. 门店目标订单量 = 启用包间数 × 当月天数 × 2；
+     4. 门店对比仅统计常规单 + 溢出单，目标按上月日均折算且不低于包间下限；
      5. 员工单量固定按 GameRecord.who_did 统计。
 ========================= -->
 
@@ -3608,7 +3622,7 @@
             <i class="bi bi-shop-window text-primary me-1"></i>门店本月订单量对比
         </div>
         <div class="small text-muted mt-1">
-            红色标记为该门店本月目标订单量位置；领班、管理员可修改当月目标。
+            本模块仅统计常规单 + 溢出单。自动目标按上月私域组局日均折算到本月，且不低于“启用包间数 × 本月天数”；领班、管理员可手动修改当月目标。
         </div>
     </div>
 
@@ -3619,7 +3633,12 @@
                 <div class="col-md-3">
                     <div class="whiteboard-bar-label">{{ row.store_name }}</div>
                     <div class="whiteboard-bar-meta">
-                        启用包间 {{ row.active_room_count }} 间｜默认 {{ row.default_target_order_count }} 单
+                        启用包间 {{ row.active_room_count }} 间｜下限 {{ row.minimum_order_count }} 单｜自动目标 {{ row.default_target_order_count }} 单
+                        {% if row.is_custom_target %}｜已手动调整{% endif %}
+                    </div>
+                    <div class="whiteboard-bar-meta">
+                        上月私域 {{ row.previous_actual_order_count }} 单
+                        {% if not row.has_complete_previous_month %}｜上月未完整经营{% endif %}
                     </div>
                     {% if whiteboard_data.can_manage_store_targets and row.store_id and row.store_id > 0 %}
                     <form action="/employees/whiteboard/store-target/update"
@@ -3673,7 +3692,13 @@
                 </div>
 
                 <div class="col-md-2 text-md-end">
-                    {% if row.is_reached %}
+                    {% if not row.reward_floor_eligible %}
+                        <span class="badge rounded-pill whiteboard-status-unreached"
+                              title="{{ row.reward_ineligible_reason }}">
+                            不参与奖励
+                        </span>
+                        <div class="small text-muted mt-1">{{ row.reward_ineligible_reason }}</div>
+                    {% elif row.is_reached %}
                         <span class="badge rounded-pill whiteboard-status-reached">
                             已达标 {{ row.achievement_rate }}%
                         </span>
@@ -3883,7 +3908,12 @@
                         </div>
 
                         <div class="col-md-2 text-md-end">
-                            {% if store_row.is_reached %}
+                            {% if not store_row.store_reward_eligible %}
+                                <span class="badge rounded-pill whiteboard-status-unreached"
+                                      title="{{ store_row.store_reward_ineligible_reason }}">
+                                    门店不参与奖励
+                                </span>
+                            {% elif store_row.is_reached %}
                                 <span class="badge rounded-pill whiteboard-status-reached">
                                     已达标 {{ store_row.achievement_rate }}%
                                 </span>
@@ -5449,7 +5479,7 @@
                         </div>
                         <div class="small">
                             {% if current_user_is_logistics %}
-                            后勤员工请假至少提前一天提交；补假只能选择今天及以前的日期。两者均可选择多天，系统会按上班日拆成逐日申请；管理员同意后每天扣除固定日薪 88.5 元，并记录到考勤和员工流水。后勤员工不参与顶班、换班。
+                            后勤员工请假至少提前一天提交；补假只能选择今天及以前的日期。请假/补假按天扣除固定日薪 88.5 元；公休批准后仅计入公休与考勤统计，不安排机动顶班、不扣工资。后勤员工仍不参与顶班、换班。
                             {% else %}
                             普通请假至少提前一天提交；补假只能选择今天及以前的日期。请假和补假均可选择多天，系统会按上班日拆成逐日申请；审批后会逐日安排休班员工或机动类型员工顶班，并同步考勤、排班和工资。公休审批后不扣工资。
                             {% endif %}
@@ -5468,7 +5498,7 @@
                             {% endfor %}
                         </select>
                         <div class="form-text">
-                            公休仅限非后勤、非机动、非试用、非钟点工员工申请。
+                            公休允许普通、后勤、领班等符合条件的员工申请；机动、试用、钟点工不能申请。后勤公休仅作统计，不触发机动顶班。
                         </div>
                     </div>
 

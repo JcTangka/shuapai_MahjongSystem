@@ -147,7 +147,7 @@ LEAVE_TYPE_OPTIONS = [
 ]
 LEAVE_TYPE_LABEL_MAP = {value: label for value, label in LEAVE_TYPE_OPTIONS}
 LEAVE_DEDUCTIBLE_TYPES = {"leave", "retro_leave"}
-PUBLIC_REST_INELIGIBLE_EMPLOYEE_TYPES = {"logistics", "flexible", "probation", "hourly"}
+PUBLIC_REST_INELIGIBLE_EMPLOYEE_TYPES = {"flexible", "probation", "hourly"}
 
 
 # === 辅助函数 ===
@@ -318,7 +318,8 @@ def _collect_public_rest_shift_snapshot(
         *,
         employee_name: str,
         start_date: date,
-        end_date: date
+        end_date: date,
+        allow_rest_shifts: bool = False,
 ) -> Tuple[Optional[str], Dict[str, str]]:
     snapshot: Dict[str, str] = {}
     current = start_date
@@ -328,7 +329,7 @@ def _collect_public_rest_shift_snapshot(
             employee_name=employee_name,
             work_date=current
         )
-        if _is_rest_shift(shift_type):
+        if _is_rest_shift(shift_type) and not allow_rest_shifts:
             return f"{current} 排班为{_shift_type_label(shift_type)}，不能申请公休", {}
         snapshot[current.isoformat()] = shift_type
         current += timedelta(days=1)
@@ -1481,7 +1482,7 @@ def _cancel_leave_by_admin(
                     )
                 ).all())
 
-    if _is_public_rest_leave(leave_req):
+    if _is_public_rest_leave(leave_req) and not _is_logistics_employee(applicant):
         for work_date in _iter_leave_request_dates(leave_req):
             applicant_current_shift = _get_shift_type_for_employee_on_date(
                 session=session,
@@ -1527,7 +1528,7 @@ def _cancel_leave_by_admin(
                     operator=operator
                 )
 
-    if _is_public_rest_leave(leave_req):
+    if _is_public_rest_leave(leave_req) and not _is_logistics_employee(applicant):
         shift_snapshot = _deserialize_shift_snapshot(getattr(leave_req, "shift_snapshot_json", None))
         for work_date in _iter_leave_request_dates(leave_req):
             original_shift = shift_snapshot.get(work_date.isoformat(), leave_req.shift_type)
@@ -3631,8 +3632,7 @@ def _get_store_active_room_count(session: Session, store_obj: Store) -> int:
     1. 优先按新版 store_id 查询 Room；
     2. 如果查不到，再按旧字段 Room.store_name 查询；
     3. 只统计 is_active=True 的包间；
-    4. 返回值用于计算门店目标订单量：
-       启用包间数 × 当月天数 × 2。
+    4. 返回值用于计算门店月订单下限：启用包间数 × 当月天数。
     """
     room_names = set()
 
@@ -3681,14 +3681,168 @@ def _get_store_actual_order_count_for_month(
         month_start: date,
         month_end: date
 ) -> int:
+    """统计门店月度私域组局量：仅常规单 + 溢出单。"""
     return len(session.exec(
         select(GameRecord).where(
             GameRecord.status == "formed",
             GameRecord.store_name == store_name,
             GameRecord.record_date >= month_start,
-            GameRecord.record_date <= month_end
+            GameRecord.record_date <= month_end,
+            or_(
+                GameRecord.record_source.in_([
+                    FORMED_SOURCE_NORMAL,
+                    FORMED_SOURCE_OVERFLOW,
+                ]),
+                GameRecord.record_source.is_(None),
+                func.trim(GameRecord.record_source) == "",
+            ),
         )
     ).all())
+
+
+def _store_has_complete_previous_month(store_obj: Store, year: int, month: int) -> bool:
+    """门店在上月月初或更早创建，才算完整经营过上一个自然月。"""
+    previous_month_start, _ = _previous_calendar_month_range(year, month)
+    created_at = getattr(store_obj, "created_at", None)
+    if not created_at:
+        # 旧数据缺失创建时间时按老店处理，避免无依据地取消历史奖励资格。
+        return True
+    created_date = created_at.date() if isinstance(created_at, datetime) else created_at
+    return created_date <= previous_month_start
+
+
+def _get_store_previous_month_room_count(
+        session: Session,
+        store_obj: Store,
+        year: int,
+        month: int,
+        fallback_room_count: int,
+) -> int:
+    previous_month_start, previous_month_end = _previous_calendar_month_range(year, month)
+    previous_snapshot = session.exec(
+        select(StoreMonthlyTargetSnapshot).where(
+            StoreMonthlyTargetSnapshot.store_id == store_obj.id,
+            StoreMonthlyTargetSnapshot.year == previous_month_start.year,
+            StoreMonthlyTargetSnapshot.month == previous_month_start.month,
+        )
+    ).first()
+    if previous_snapshot:
+        return max(int(previous_snapshot.active_room_count or 0), 0)
+
+    previous_month_end_dt = datetime.combine(previous_month_end, time.max)
+    room_names = set()
+    created_condition = or_(Room.created_at.is_(None), Room.created_at <= previous_month_end_dt)
+    if getattr(store_obj, "id", None) and store_obj.id > 0:
+        for room in session.exec(
+                select(Room).where(
+                    Room.store_id == store_obj.id,
+                    Room.is_active == True,
+                    created_condition,
+                )
+        ).all():
+            if room.name:
+                room_names.add(room.name)
+    for room in session.exec(
+            select(Room).where(
+                Room.store_name == store_obj.name,
+                Room.is_active == True,
+                created_condition,
+            )
+    ).all():
+        if room.name:
+            room_names.add(room.name)
+
+    if room_names:
+        return len(room_names)
+    if fallback_room_count <= 0:
+        return 0
+    # 没有任何可判断创建时间的历史包间时，兼容旧数据使用当前启用数兜底。
+    has_room_rows = session.exec(
+        select(Room).where(
+            or_(Room.store_id == store_obj.id, Room.store_name == store_obj.name)
+        )
+    ).first()
+    return 0 if has_room_rows else max(int(fallback_room_count or 0), 0)
+
+
+def _build_store_monthly_target_basis(
+        session: Session,
+        store_obj: Store,
+        year: int,
+        month: int,
+        actual_order_count: Optional[int] = None,
+) -> dict:
+    month_start, month_end = _get_month_start_end(year, month)
+    days_in_month = calendar.monthrange(year, month)[1]
+    active_room_count = _get_store_active_room_count(session, store_obj)
+    minimum_order_count = active_room_count * days_in_month
+    actual_count = (
+        int(actual_order_count)
+        if actual_order_count is not None
+        else _get_store_actual_order_count_for_month(
+            session, store_obj.name, month_start, month_end
+        )
+    )
+
+    previous_month_start, previous_month_end = _previous_calendar_month_range(year, month)
+    previous_days_in_month = calendar.monthrange(
+        previous_month_start.year, previous_month_start.month
+    )[1]
+    previous_actual_order_count = _get_store_actual_order_count_for_month(
+        session,
+        store_obj.name,
+        previous_month_start,
+        previous_month_end,
+    )
+    previous_active_room_count = _get_store_previous_month_room_count(
+        session,
+        store_obj,
+        year,
+        month,
+        active_room_count,
+    )
+    previous_minimum_order_count = previous_active_room_count * previous_days_in_month
+    has_complete_previous_month = _store_has_complete_previous_month(store_obj, year, month)
+
+    inherited_target_order_count = 0
+    if (
+            has_complete_previous_month
+            and previous_actual_order_count >= previous_minimum_order_count
+            and previous_days_in_month > 0
+    ):
+        inherited_target_order_count = math.ceil(
+            previous_actual_order_count / previous_days_in_month * days_in_month
+        )
+    system_target_order_count = max(minimum_order_count, inherited_target_order_count)
+    reward_floor_eligible = (
+        has_complete_previous_month
+        and actual_count >= minimum_order_count
+    )
+
+    if not has_complete_previous_month:
+        reward_ineligible_reason = "上月未完整经营一个自然月"
+    elif actual_count < minimum_order_count:
+        reward_ineligible_reason = f"本月私域订单未达到下限 {minimum_order_count} 单"
+    else:
+        reward_ineligible_reason = ""
+
+    return {
+        "active_room_count": active_room_count,
+        "days_in_month": days_in_month,
+        "minimum_order_count": minimum_order_count,
+        "actual_order_count": actual_count,
+        "previous_month_start": previous_month_start,
+        "previous_month_end": previous_month_end,
+        "previous_days_in_month": previous_days_in_month,
+        "previous_active_room_count": previous_active_room_count,
+        "previous_minimum_order_count": previous_minimum_order_count,
+        "previous_actual_order_count": previous_actual_order_count,
+        "has_complete_previous_month": has_complete_previous_month,
+        "inherited_target_order_count": inherited_target_order_count,
+        "system_target_order_count": system_target_order_count,
+        "reward_floor_eligible": reward_floor_eligible,
+        "reward_ineligible_reason": reward_ineligible_reason,
+    }
 
 
 def _get_or_create_store_monthly_target_snapshot(
@@ -3701,18 +3855,18 @@ def _get_or_create_store_monthly_target_snapshot(
     """
     获取或创建门店月目标快照。
 
-    首次创建时使用系统建议目标；已经存在的快照保留人工修改后的目标，
-    只同步门店名、实际订单量、达标状态和更新时间。
+    自动目标按上月私域组局日均折算，并且不低于当月包间下限。
+    管理员手工调整过的快照保留目标值，其余快照随自动公式更新。
     """
-    month_start, month_end = _get_month_start_end(year, month)
-    days_in_month = calendar.monthrange(year, month)[1]
-    active_room_count = _get_store_active_room_count(session, store_obj)
-    default_target_order_count = active_room_count * days_in_month * 2
-    actual_count = (
-        actual_order_count
-        if actual_order_count is not None
-        else _get_store_actual_order_count_for_month(session, store_obj.name, month_start, month_end)
+    basis = _build_store_monthly_target_basis(
+        session=session,
+        store_obj=store_obj,
+        year=year,
+        month=month,
+        actual_order_count=actual_order_count,
     )
+    actual_count = basis["actual_order_count"]
+    system_target_order_count = basis["system_target_order_count"]
 
     snapshot = session.exec(
         select(StoreMonthlyTargetSnapshot).where(
@@ -3729,20 +3883,31 @@ def _get_or_create_store_monthly_target_snapshot(
             store_name_snapshot=store_obj.name,
             year=year,
             month=month,
-            active_room_count=active_room_count,
-            days_in_month=days_in_month,
-            target_order_count=default_target_order_count,
+            active_room_count=basis["active_room_count"],
+            days_in_month=basis["days_in_month"],
+            target_order_count=system_target_order_count,
+            is_manual_target=False,
             actual_order_count=actual_count,
-            is_reached=actual_count >= default_target_order_count if default_target_order_count > 0 else False,
+            is_reached=(
+                basis["reward_floor_eligible"]
+                and actual_count >= system_target_order_count
+                if system_target_order_count > 0 else False
+            ),
             created_at=now,
             updated_at=now
         )
     else:
         snapshot.store_name_snapshot = store_obj.name
-        snapshot.active_room_count = active_room_count
-        snapshot.days_in_month = days_in_month
+        snapshot.active_room_count = basis["active_room_count"]
+        snapshot.days_in_month = basis["days_in_month"]
+        if not getattr(snapshot, "is_manual_target", False):
+            snapshot.target_order_count = system_target_order_count
         snapshot.actual_order_count = actual_count
-        snapshot.is_reached = actual_count >= snapshot.target_order_count if snapshot.target_order_count > 0 else False
+        snapshot.is_reached = (
+            basis["reward_floor_eligible"]
+            and actual_count >= snapshot.target_order_count
+            if snapshot.target_order_count > 0 else False
+        )
         snapshot.updated_at = now
 
     session.add(snapshot)
@@ -3806,11 +3971,11 @@ def _build_employee_whiteboard_data(
        GameRecord.status == 'formed'
        record_date 在本月内
        按 store_name 统计
-       包含 normal / self_arrival / overflow，因为这里看的是“订单总量/桌数激励”。
+       仅包含 normal / overflow；自主到店不进入“门店本月订单量对比”。
 
     2. 门店目标订单量：
-       优先读取 StoreMonthlyTargetSnapshot；首次没有快照时按
-       启用包间数 × 当月天数 × 2 创建默认快照。
+       上月达到下限且完整经营时，按上月实际日均折算到本月；
+       否则使用启用包间数 × 当月天数的下限。管理员手工目标优先。
 
     3. 员工订单量：
        按 GameRecord.who_did 统计。
@@ -3847,7 +4012,8 @@ def _build_employee_whiteboard_data(
 
     for g in month_games:
         store_name = _normalize_text(g.store_name)
-        if store_name:
+        source = _normalize_text(g.record_source) or FORMED_SOURCE_NORMAL
+        if store_name and source in {FORMED_SOURCE_NORMAL, FORMED_SOURCE_OVERFLOW}:
             store_order_count_map[store_name] = store_order_count_map.get(store_name, 0) + 1
 
         # 员工单量固定按 GameRecord.who_did 统计
@@ -3874,9 +4040,14 @@ def _build_employee_whiteboard_data(
 
     store_rows = []
     for store_obj in active_store_objs:
-        active_room_count = _get_store_active_room_count(session, store_obj)
-        default_target_order_count = active_room_count * days_in_month * 2
         actual_order_count = store_order_count_map.get(store_obj.name, 0)
+        basis = _build_store_monthly_target_basis(
+            session=session,
+            store_obj=store_obj,
+            year=year,
+            month=month,
+            actual_order_count=actual_order_count,
+        )
 
         if getattr(store_obj, "id", None) and store_obj.id > 0:
             snapshot = _get_or_create_store_monthly_target_snapshot(
@@ -3889,7 +4060,7 @@ def _build_employee_whiteboard_data(
             target_order_count = snapshot.target_order_count
         else:
             snapshot = None
-            target_order_count = default_target_order_count
+            target_order_count = basis["system_target_order_count"]
 
         achievement_rate = 0.0
         if target_order_count > 0:
@@ -3898,16 +4069,29 @@ def _build_employee_whiteboard_data(
         store_rows.append({
             "store_id": store_obj.id,
             "store_name": store_obj.name,
-            "active_room_count": active_room_count,
+            "active_room_count": basis["active_room_count"],
             "days_in_month": days_in_month,
-            "default_target_order_count": default_target_order_count,
+            "minimum_order_count": basis["minimum_order_count"],
+            "default_target_order_count": basis["system_target_order_count"],
             "target_order_count": target_order_count,
             "actual_order_count": actual_order_count,
             "remaining_order_count": max(target_order_count - actual_order_count, 0),
-            "is_reached": actual_order_count >= target_order_count if target_order_count > 0 else False,
+            "is_reached": (
+                basis["reward_floor_eligible"]
+                and actual_order_count >= target_order_count
+                if target_order_count > 0 else False
+            ),
             "achievement_rate": achievement_rate,
             "has_target_snapshot": bool(snapshot),
-            "is_custom_target": target_order_count != default_target_order_count,
+            "is_custom_target": bool(snapshot and getattr(snapshot, "is_manual_target", False)),
+            "previous_month_start": basis["previous_month_start"],
+            "previous_month_end": basis["previous_month_end"],
+            "previous_actual_order_count": basis["previous_actual_order_count"],
+            "previous_minimum_order_count": basis["previous_minimum_order_count"],
+            "has_complete_previous_month": basis["has_complete_previous_month"],
+            "inherited_target_order_count": basis["inherited_target_order_count"],
+            "reward_floor_eligible": basis["reward_floor_eligible"],
+            "reward_ineligible_reason": basis["reward_ineligible_reason"],
         })
 
     # 门店按实际订单量倒序展示，方便看差距
@@ -3923,6 +4107,14 @@ def _build_employee_whiteboard_data(
 
     store_target_map = {
         row["store_name"]: row["target_order_count"]
+        for row in store_rows
+    }
+    store_reward_eligible_map = {
+        row["store_name"]: row["reward_floor_eligible"]
+        for row in store_rows
+    }
+    store_reward_ineligible_reason_map = {
+        row["store_name"]: row["reward_ineligible_reason"]
         for row in store_rows
     }
 
@@ -3987,6 +4179,7 @@ def _build_employee_whiteboard_data(
         if target_order_count > 0:
             achievement_rate = round(order_count / target_order_count * 100, 2)
 
+        store_reward_eligible = store_reward_eligible_map.get(store_name, False)
         all_employee_store_rows.append({
             "employee_name": employee_name,
             "store_name": store_name,
@@ -3994,9 +4187,14 @@ def _build_employee_whiteboard_data(
             "period_target_count": period_target_count,
             "actual_order_count": order_count,
             "remaining_order_count": round(max(target_order_count - order_count, 0), 2),
-            "is_reached": order_count >= target_order_count if target_order_count > 0 else False,
+            "is_reached": (
+                store_reward_eligible and order_count >= target_order_count
+                if target_order_count > 0 else False
+            ),
             "achievement_rate": achievement_rate,
             "is_current_duty_store": store_name in active_duty_store_names,
+            "store_reward_eligible": store_reward_eligible,
+            "store_reward_ineligible_reason": store_reward_ineligible_reason_map.get(store_name, ""),
         })
 
     employee_store_rows = [
@@ -4334,7 +4532,8 @@ def _build_employee_whiteboard_data(
     # ===== 4. 顶部概览 =====
     reached_store_count = len([row for row in store_rows if row["is_reached"]])
     employee_store_reached_count = len([row for row in employee_store_rows if row["is_reached"]])
-    total_actual_orders = sum(row["actual_order_count"] for row in store_rows)
+    # 顶部“本月总订单量”维持原白板总口径；仅门店对比模块收窄为常规单 + 溢出单。
+    total_actual_orders = len(month_games)
     total_target_orders = sum(row["target_order_count"] for row in store_rows)
 
     return {
@@ -4393,12 +4592,19 @@ def _build_personal_store_target_rows(
         return []
 
     month_start, month_end = _get_month_start_end(year, month)
-    days_in_month = calendar.monthrange(year, month)[1]
 
     store_target_map = {}
+    store_reward_eligible_map = {}
+    store_reward_ineligible_reason_map = {}
     for store_obj in get_store_list(session):
         if not getattr(store_obj, "is_active", True):
             continue
+        basis = _build_store_monthly_target_basis(
+            session=session,
+            store_obj=store_obj,
+            year=year,
+            month=month,
+        )
         if getattr(store_obj, "id", None) and store_obj.id > 0:
             snapshot = _get_or_create_store_monthly_target_snapshot(
                 session=session,
@@ -4408,7 +4614,9 @@ def _build_personal_store_target_rows(
             )
             store_target_map[store_obj.name] = snapshot.target_order_count
         else:
-            store_target_map[store_obj.name] = _get_store_active_room_count(session, store_obj) * days_in_month * 2
+            store_target_map[store_obj.name] = basis["system_target_order_count"]
+        store_reward_eligible_map[store_obj.name] = basis["reward_floor_eligible"]
+        store_reward_ineligible_reason_map[store_obj.name] = basis["reward_ineligible_reason"]
 
     games = session.exec(
         select(GameRecord).where(
@@ -4435,7 +4643,11 @@ def _build_personal_store_target_rows(
             continue
         target_order_count = round((store_target_map.get(store_name, 0) or 0) / 6, 2)
         period_target_count = round(target_order_count / 5, 2) if target_order_count > 0 else 0.0
-        is_reached = order_count >= target_order_count if target_order_count > 0 else False
+        store_reward_eligible = store_reward_eligible_map.get(store_name, False)
+        is_reached = (
+            store_reward_eligible and order_count >= target_order_count
+            if target_order_count > 0 else False
+        )
         row = {
             "employee_name": employee.display_name,
             "store_name": store_name,
@@ -4446,6 +4658,8 @@ def _build_personal_store_target_rows(
             "is_reached": is_reached,
             "achievement_rate": round(order_count / target_order_count * 100, 2) if target_order_count > 0 else 0.0,
             "is_current_duty_store": store_name in active_duty_store_names,
+            "store_reward_eligible": store_reward_eligible,
+            "store_reward_ineligible_reason": store_reward_ineligible_reason_map.get(store_name, ""),
         }
         rows.append(row)
         max_bar_value = max(max_bar_value, order_count, target_order_count)
@@ -4851,7 +5065,7 @@ def _calculate_team_assessment(
     2. 团队奖金池：1000 × 团队成员数；
     3. 目标业绩池：团队奖金池 × 60%；
     4. 非结果性考核池：团队奖金池 × 40%；
-    5. 门店目标：优先读取门店月目标快照，首次没有快照时按启用包间数 × 当月天数 × 2 创建；
+    5. 门店目标：按上月私域组局日均折算且不低于当月包间下限，人工目标优先；
     6. 负责门店达标一个，释放目标业绩池的 1 / 负责门店数；
     7. 非结果性考核分 = 100 - 扣分项合计；
     8. 若非结果性考核分为 100 分，额外加入团队零失误奖 1000 元；
@@ -4897,14 +5111,19 @@ def _calculate_team_assessment(
         if not store_obj:
             continue
 
-        actual_order_count = len(session.exec(
-            select(GameRecord).where(
-                GameRecord.status == "formed",
-                GameRecord.store_name == store_obj.name,
-                GameRecord.record_date >= month_start,
-                GameRecord.record_date <= month_end
-            )
-        ).all())
+        actual_order_count = _get_store_actual_order_count_for_month(
+            session,
+            store_obj.name,
+            month_start,
+            month_end,
+        )
+        basis = _build_store_monthly_target_basis(
+            session=session,
+            store_obj=store_obj,
+            year=year,
+            month=month,
+            actual_order_count=actual_order_count,
+        )
 
         if getattr(store_obj, "id", None) and store_obj.id > 0:
             target_snapshot = _get_or_create_store_monthly_target_snapshot(
@@ -4915,11 +5134,16 @@ def _calculate_team_assessment(
                 actual_order_count=actual_order_count
             )
             target_order_count = target_snapshot.target_order_count
+            store_is_reached = target_snapshot.is_reached
         else:
-            days_in_month = calendar.monthrange(year, month)[1]
-            target_order_count = _get_store_active_room_count(session, store_obj) * days_in_month * 2
+            target_order_count = basis["system_target_order_count"]
+            store_is_reached = (
+                basis["reward_floor_eligible"]
+                and actual_order_count >= target_order_count
+                if target_order_count > 0 else False
+            )
 
-        if target_order_count > 0 and actual_order_count >= target_order_count:
+        if store_is_reached:
             target_reached_store_count += 1
 
     if responsible_store_count > 0:
@@ -13490,8 +13714,17 @@ async def update_whiteboard_store_target(
         month=whiteboard_month
     )
     snapshot.target_order_count = target_order_count
+    snapshot.is_manual_target = True
+    basis = _build_store_monthly_target_basis(
+        session=session,
+        store_obj=store_obj,
+        year=whiteboard_year,
+        month=whiteboard_month,
+        actual_order_count=snapshot.actual_order_count,
+    )
     snapshot.is_reached = (
-        snapshot.actual_order_count >= target_order_count
+        basis["reward_floor_eligible"]
+        and snapshot.actual_order_count >= target_order_count
         if target_order_count > 0
         else False
     )
@@ -14580,7 +14813,8 @@ async def employee_leave_apply(
             session=session,
             employee_name=user.display_name,
             start_date=leave_d,
-            end_date=leave_end_d
+            end_date=leave_end_d,
+            allow_rest_shifts=_is_logistics_employee(user),
         )
         if error_message:
             if _is_ajax_request(request):
@@ -14927,7 +15161,8 @@ async def employee_leave_update_pending(
             session=session,
             employee_name=user.display_name,
             start_date=leave_d,
-            end_date=leave_end_d
+            end_date=leave_end_d,
+            allow_rest_shifts=_is_logistics_employee(user),
         )
         if error_message:
             if _is_ajax_request(request):
@@ -15082,12 +15317,6 @@ async def employee_leave_rest_replacement(
             status_code=303
         )
 
-    if _is_public_rest_leave(leave_req):
-        message = "公休申请批准后需通过机动顶班生效，不能走休班顶班流程"
-        if _is_ajax_request(request):
-            return _employee_ajax_error(message)
-        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
-
     applicant = session.get(User, leave_req.user_id)
     if not applicant:
         if _is_ajax_request(request):
@@ -15096,6 +15325,12 @@ async def employee_leave_rest_replacement(
             url=_build_employees_url(store, "leave_approval", error="请假员工账号不存在"),
             status_code=303
         )
+
+    if _is_public_rest_leave(leave_req) and not _is_logistics_employee(applicant):
+        message = "公休申请批准后需通过机动顶班生效，不能走休班顶班流程"
+        if _is_ajax_request(request):
+            return _employee_ajax_error(message)
+        return RedirectResponse(url=_build_employees_url(store, "leave_approval", error=message), status_code=303)
 
     daily_conflict = _find_other_employee_leave_request_on_dates(
         session=session,
@@ -15113,6 +15348,55 @@ async def employee_leave_rest_replacement(
     if _is_logistics_employee(applicant):
         now = datetime.now()
         approval_note = _normalize_text(approval_note)
+        if _is_public_rest_leave(leave_req):
+            leave_req.approved_by_user_id = user.id
+            leave_req.approved_by_name = user.display_name
+            leave_req.approved_at = now
+            leave_req.approval_note = approval_note or None
+            leave_req.updated_at = now
+            session.add(leave_req)
+
+            _finalize_public_rest_leave_for_applicant(
+                session=session,
+                leave_req=leave_req,
+                applicant=applicant,
+                operator=user,
+                status="approved",
+                approval_note=approval_note,
+                attendance_remark="后勤员工公休，仅计入公休与考勤统计，不安排机动顶班，不扣工资。",
+            )
+            _create_employee_notification(
+                session=session,
+                target_user=applicant,
+                related_user=user,
+                title="公休已批准",
+                content=(
+                    f"管理员已批准您 {_leave_request_period_label(leave_req)} 的公休，"
+                    "本次仅计入公休统计，不安排机动顶班，不扣工资。"
+                ),
+                notification_type="leave_approved",
+                source_type="leave_request",
+                source_id=leave_req.id,
+                created_at=now,
+            )
+            session.commit()
+            session.refresh(leave_req)
+
+            if _is_ajax_request(request):
+                return _employee_ajax_success(
+                    message="已批准后勤员工公休，仅计入公休统计",
+                    action="leave_approved",
+                    payload={"leave": _leave_request_payload(leave_req)},
+                )
+            return RedirectResponse(
+                url=_build_employees_url(
+                    store,
+                    "leave_approval",
+                    success="已批准后勤员工公休，仅计入公休统计",
+                ),
+                status_code=303,
+            )
+
         applicant_deduct = _calc_employee_leave_deduct(
             session=session,
             employee=applicant,

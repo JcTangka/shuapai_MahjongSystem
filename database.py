@@ -1582,7 +1582,7 @@ class StoreMonthlyTargetSnapshot(SQLModel, table=True):
     门店月目标快照表。
 
     说明：
-    1. 门店目标订单量 = 启用包间数 × 当月天数 × 2；
+    1. 门店自动目标按上月私域组局日均折算，并且不低于启用包间数 × 当月天数；
     2. 用快照保存历史月份目标，避免后续包间数量变化后影响历史统计；
     3. 激励白板和团队目标业绩考核都可以读取该表。
     """
@@ -1602,10 +1602,13 @@ class StoreMonthlyTargetSnapshot(SQLModel, table=True):
     active_room_count: int = Field(default=0)
     days_in_month: int = Field(default=0)
 
-    # 目标订单量 = active_room_count × days_in_month × 2
+    # 最终目标订单量；管理员手工调整后保留手工值。
     target_order_count: int = Field(default=0)
 
-    # 实际订单量，按 GameRecord.status='formed' 统计后写入快照
+    # True 表示管理员手工调整过该月目标，后续刷新不再被自动目标覆盖。
+    is_manual_target: bool = Field(default=False, index=True)
+
+    # 实际订单量，仅统计已组齐的常规单 + 溢出单。
     actual_order_count: int = Field(default=0)
 
     is_reached: bool = Field(default=False, index=True)
@@ -1753,6 +1756,7 @@ def create_db_and_tables():
     migrate_employee_leave_request_table()
     migrate_employee_attendance_record_table()
     migrate_monthly_salary_settlement_table()
+    migrate_store_monthly_target_snapshot_table()
     migrate_daily_store_work_item_table()
     migrate_common_issue_tables()
     initialize_mobile_handover_rules()
@@ -4100,6 +4104,38 @@ def migrate_monthly_salary_settlement_table():
                       AND settlement.status IN ('confirmed', 'paid', 'locked')
                 )
             """))
+
+
+def migrate_store_monthly_target_snapshot_table():
+    """为门店月目标快照补充管理员手工目标标记。"""
+    with engine.begin() as conn:
+        table_exists = conn.execute(text("""
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table' AND name='storemonthlytargetsnapshot'
+        """)).fetchone()
+        if not table_exists:
+            return
+
+        columns = conn.execute(text("PRAGMA table_info(storemonthlytargetsnapshot)")).fetchall()
+        col_names = {col[1] for col in columns}
+        if "is_manual_target" not in col_names:
+            conn.execute(text("""
+                ALTER TABLE storemonthlytargetsnapshot
+                ADD COLUMN is_manual_target BOOLEAN NOT NULL DEFAULT 0
+            """))
+            # 旧版系统默认值是“启用包间数 × 当月天数 × 2”。与该值不同的历史快照
+            # 视为管理员调整过，升级后继续保留，避免新自动公式覆盖人工目标。
+            conn.execute(text("""
+                UPDATE storemonthlytargetsnapshot
+                SET is_manual_target = 1
+                WHERE target_order_count != active_room_count * days_in_month * 2
+            """))
+
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_storemonthlytargetsnapshot_is_manual_target
+            ON storemonthlytargetsnapshot (is_manual_target)
+        """))
 
 
 def migrate_employee_module_tables():
