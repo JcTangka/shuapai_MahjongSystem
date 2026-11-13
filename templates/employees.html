@@ -1074,32 +1074,9 @@
                 <label class="form-label fw-bold">员工</label>
                 <select class="form-select" name="duty_employee">
                     <option value="all">全部员工</option>
-                    {% for emp in active_employees %}
-                        {% if emp.role != 'admin' %}
-                        <option value="{{ emp.id }}" {% if duty_filters.employee|string == emp.id|string %}selected{% endif %}>{{ emp.display_name }}</option>
-                        {% endif %}
+                    {% for emp in duty_employee_options %}
+                    <option value="{{ emp.id }}" {% if duty_filters.employee|string == emp.id|string %}selected{% endif %}>{{ emp.display_name }}</option>
                     {% endfor %}
-                </select>
-            </div>
-
-            <div class="col-md-2">
-                <label class="form-label fw-bold">类型</label>
-                <select class="form-select" name="duty_action_type">
-                    <option value="all" {% if duty_filters.action_type == 'all' %}selected{% endif %}>全部类型</option>
-                    <option value="store_duty" {% if duty_filters.action_type == 'store_duty' %}selected{% endif %}>开始带店</option>
-                    <option value="review_info" {% if duty_filters.action_type == 'review_info' %}selected{% endif %}>复查补信息</option>
-                    <option value="login_duty" {% if duty_filters.action_type == 'login_duty' %}selected{% endif %}>登录上班</option>
-                </select>
-            </div>
-
-            <div class="col-md-2">
-                <label class="form-label fw-bold">状态</label>
-                <select class="form-select" name="duty_status">
-                    <option value="all" {% if duty_filters.status == 'all' %}selected{% endif %}>全部状态</option>
-                    <option value="active" {% if duty_filters.status == 'active' %}selected{% endif %}>上班中</option>
-                    <option value="lunch" {% if duty_filters.status == 'lunch' %}selected{% endif %}>离岗中</option>
-                    <option value="ended" {% if duty_filters.status == 'ended' %}selected{% endif %}>已下班</option>
-                    <option value="review" {% if duty_filters.status == 'review' %}selected{% endif %}>复查补信息</option>
                 </select>
             </div>
 
@@ -1204,44 +1181,75 @@
                 统计口径：仅统计已下班的开始带店/登录上班记录；上班天数按每名员工的自然日去重，同一天多段上班时长累计；开始带店记录会扣除就餐离岗时间。
             </div>
         </div>
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+            <div class="fw-bold">每日上班明细</div>
+            <div class="small text-muted">
+                每名员工每天一行，仅生成到当前日期；当天情况按排班及已生效的请假、换班、顶班生成，上下班与离岗时间用于工资核对，复查补信息不纳入本表。
+            </div>
+        </div>
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0">
                 <thead class="table-light">
                     <tr>
-                        <th>员工</th>
-                        <th>类型</th>
-                        <th>状态</th>
-                        <th>负责门店</th>
-                        <th>上班/复查时间</th>
-                        <th>下班时间</th>
-                        <th>离岗情况</th>
-                        <th>在岗时长</th>
+                        <th class="text-nowrap">日期</th>
+                        <th class="text-nowrap">员工</th>
+                        <th class="text-nowrap">当天情况</th>
+                        <th class="text-nowrap">班次</th>
+                        <th style="min-width: 220px;">情况说明</th>
+                        <th class="text-nowrap">上班时间</th>
+                        <th class="text-nowrap">下班时间</th>
+                        <th style="min-width: 180px;">离岗情况</th>
+                        <th class="text-nowrap">在岗时长</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {% for row in duty_session_rows %}
+                    {% for row in duty_daily_rows %}
                     <tr>
-                        <td class="fw-bold">{{ row.record.employee_name }}</td>
-                        <td>{{ row.action_label }}</td>
-                        <td>
-                            {% if row.status_label == '上班中' %}
+                        <td class="text-nowrap">
+                            <span class="fw-bold">{{ row.work_date.strftime('%Y-%m-%d') }}</span>
+                            <span class="small text-muted ms-1">{{ row.weekday_label }}</span>
+                        </td>
+                        <td class="fw-bold text-nowrap">{{ row.employee.display_name }}</td>
+                        <td class="text-nowrap">
+                            {% if row.status_code == 'work' %}
                                 <span class="badge bg-success">{{ row.status_label }}</span>
-                            {% elif row.status_label == '离岗中' %}
-                                <span class="badge bg-warning text-dark">{{ row.status_label }}</span>
-                            {% elif row.status_label == '已下班' %}
+                            {% elif row.status_code == 'rest' %}
                                 <span class="badge bg-secondary">{{ row.status_label }}</span>
-                            {% else %}
+                            {% elif row.status_code in ['leave', 'retro_leave'] %}
+                                <span class="badge bg-danger">{{ row.status_label }}</span>
+                            {% elif row.status_code == 'public_rest' %}
+                                <span class="badge bg-primary">{{ row.status_label }}</span>
+                            {% elif row.status_code in ['swap_work', 'swap_rest'] %}
                                 <span class="badge bg-info text-dark">{{ row.status_label }}</span>
+                            {% elif row.status_code == 'replacement' %}
+                                <span class="badge bg-dark">{{ row.status_label }}</span>
+                            {% elif row.status_code == 'rest_work' %}
+                                <span class="badge bg-warning text-dark">{{ row.status_label }}</span>
+                            {% else %}
+                                <span class="badge bg-light text-dark border">{{ row.status_label }}</span>
                             {% endif %}
                         </td>
-                        <td>{{ row.store_names }}</td>
-                        <td>{{ row.action_time.strftime('%Y-%m-%d %H:%M') if row.action_time else '-' }}</td>
+                        <td class="text-nowrap">{{ row.shift_text }}</td>
                         <td>
-                            {% if row.record.action_type == 'review_info' %}
-                                无需下班
+                            {% for detail in row.detail_lines %}
+                            <div class="small{% if not loop.first %} text-muted mt-1{% endif %}">{{ detail }}</div>
                             {% else %}
-                                {{ row.end_time.strftime('%Y-%m-%d %H:%M') if row.end_time else '-' }}
-                            {% endif %}
+                            <span class="text-muted">-</span>
+                            {% endfor %}
+                        </td>
+                        <td class="text-nowrap">
+                            {% for segment in row.segments %}
+                            <div{% if not loop.first %} class="mt-1"{% endif %}>{{ segment.start_text }}</div>
+                            {% else %}
+                            <span class="text-muted">-</span>
+                            {% endfor %}
+                        </td>
+                        <td class="text-nowrap">
+                            {% for segment in row.segments %}
+                            <div{% if not loop.first %} class="mt-1"{% endif %}>{{ segment.end_text }}</div>
+                            {% else %}
+                            <span class="text-muted">-</span>
+                            {% endfor %}
                         </td>
                         <td class="text-start">
                             {% if row.lunch_summary and row.lunch_summary.rows %}
@@ -1258,11 +1266,11 @@
                                 <span class="text-muted">-</span>
                             {% endif %}
                         </td>
-                        <td>{{ row.duration_text }}</td>
+                        <td class="text-nowrap">{{ row.duration_text }}</td>
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="8" class="text-center text-muted py-5">暂无员工上班记录</td>
+                        <td colspan="9" class="text-center text-muted py-5">当前筛选范围内暂无每日上班明细</td>
                     </tr>
                     {% endfor %}
                 </tbody>

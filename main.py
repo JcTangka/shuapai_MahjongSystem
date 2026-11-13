@@ -9658,6 +9658,215 @@ def _duty_lunch_summary(
     }
 
 
+def _build_employee_daily_duty_rows(
+        session: Session,
+        *,
+        employees: List[User],
+        start_date: date,
+        end_date: date,
+        now: Optional[datetime] = None
+) -> List[dict]:
+    """按员工和已发生自然日生成工资核对用的上班明细。"""
+    if not employees or end_date < start_date:
+        return []
+
+    current_time = now or datetime.now()
+    employee_by_id = {item.id: item for item in employees if item.id is not None}
+    employee_by_name = {item.display_name: item for item in employees if item.display_name}
+    employee_ids = list(employee_by_id)
+    employee_names = list(employee_by_name)
+
+    shifts = session.exec(
+        select(ShiftSchedule).where(
+            ShiftSchedule.operator_name.in_(employee_names),
+            ShiftSchedule.work_date >= start_date,
+            ShiftSchedule.work_date <= end_date
+        )
+    ).all()
+    shift_map = {
+        (item.operator_name, item.work_date): normalize_shift_type(item.shift_type or "off")
+        for item in shifts
+    }
+
+    range_start = datetime.combine(start_date, time.min)
+    range_end = datetime.combine(end_date + timedelta(days=1), time.min)
+    sessions = session.exec(
+        select(EmployeeDutySession).where(
+            EmployeeDutySession.user_id.in_(employee_ids),
+            EmployeeDutySession.action_type.in_(list(DUTY_WORK_ACTION_TYPES)),
+            EmployeeDutySession.started_at >= range_start,
+            EmployeeDutySession.started_at < range_end
+        ).order_by(EmployeeDutySession.started_at, EmployeeDutySession.id)
+    ).all()
+    sessions_by_day: Dict[Tuple[int, date], List[EmployeeDutySession]] = {}
+    for item in sessions:
+        if item.started_at:
+            sessions_by_day.setdefault((item.user_id, item.started_at.date()), []).append(item)
+
+    effective_leave_statuses = {
+        "approved", "approved_with_flexible", "replacement_accepted", "force_leave_deducted"
+    }
+    leave_rows = session.exec(
+        select(EmployeeLeaveRequest).where(
+            EmployeeLeaveRequest.status.in_(list(effective_leave_statuses)),
+            _leave_request_overlaps_range_condition(start_date, end_date)
+        ).order_by(EmployeeLeaveRequest.leave_date, EmployeeLeaveRequest.id)
+    ).all()
+    leave_by_day: Dict[Tuple[int, date], EmployeeLeaveRequest] = {}
+    replacement_by_day: Dict[Tuple[int, date], dict] = {}
+    for leave in leave_rows:
+        snapshot = _deserialize_shift_snapshot(getattr(leave, "shift_snapshot_json", None))
+        for work_date in _iter_leave_request_dates(leave):
+            if not (start_date <= work_date <= end_date):
+                continue
+            leave_by_day[(leave.user_id, work_date)] = leave
+            replacement_id = None
+            replacement_name = None
+            replacement_shift = snapshot.get(work_date.isoformat(), leave.shift_type)
+            if leave.status == "approved_with_flexible":
+                entry = _flexible_replacement_entry_for_date(leave, work_date) or {}
+                replacement_id = entry.get("user_id")
+                replacement_name = entry.get("employee_name")
+                replacement_shift = entry.get("shift_type") or replacement_shift
+            elif leave.replacement_response == "accepted":
+                replacement_id = leave.replacement_user_id
+                replacement_name = leave.replacement_employee_name_snapshot
+            replacement = employee_by_id.get(replacement_id) or employee_by_name.get(replacement_name)
+            if replacement and replacement.id is not None:
+                replacement_by_day[(replacement.id, work_date)] = {
+                    "leave": leave,
+                    "shift_type": normalize_shift_type(replacement_shift or "off")
+                }
+
+    swap_rows = session.exec(
+        select(EmployeeShiftSwapRequest).where(
+            EmployeeShiftSwapRequest.status.in_(["active", "cancel_pending", "cancel_rejected"]),
+            EmployeeShiftSwapRequest.swap_date >= start_date,
+            EmployeeShiftSwapRequest.swap_date <= end_date,
+            or_(
+                EmployeeShiftSwapRequest.applicant_user_id.in_(employee_ids),
+                EmployeeShiftSwapRequest.target_user_id.in_(employee_ids)
+            )
+        ).order_by(EmployeeShiftSwapRequest.swap_date, EmployeeShiftSwapRequest.id)
+    ).all()
+    swap_by_day: Dict[Tuple[int, date], dict] = {}
+    for item in swap_rows:
+        if item.applicant_user_id in employee_by_id:
+            swap_by_day[(item.applicant_user_id, item.swap_date)] = {
+                "counterpart": item.target_name_snapshot,
+                "original": normalize_shift_type(item.applicant_original_shift_type),
+                "final": normalize_shift_type(item.target_original_shift_type),
+                "reason": _normalize_text(item.reason)
+            }
+        if item.target_user_id in employee_by_id:
+            swap_by_day[(item.target_user_id, item.swap_date)] = {
+                "counterpart": item.applicant_name_snapshot,
+                "original": normalize_shift_type(item.target_original_shift_type),
+                "final": normalize_shift_type(item.applicant_original_shift_type),
+                "reason": _normalize_text(item.reason)
+            }
+
+    weekday_labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    daily_rows = []
+    work_date = end_date
+    while work_date >= start_date:
+        for employee in employees:
+            if employee.id is None:
+                continue
+            key = (employee.id, work_date)
+            day_sessions = sessions_by_day.get(key, [])
+            shift_type = shift_map.get((employee.display_name, work_date))
+            leave = leave_by_day.get(key)
+            replacement = replacement_by_day.get(key)
+            swap = swap_by_day.get(key)
+            status_code = "unscheduled"
+            status_label = "未排班"
+            shift_text = _shift_type_label(shift_type) if shift_type else "-"
+            detail_lines: List[str] = []
+
+            if leave:
+                leave_type = leave.leave_type or "leave"
+                status_code = leave_type if leave_type in {"leave", "retro_leave", "public_rest"} else "leave"
+                status_label = _leave_type_label(leave_type)
+                snapshot = _deserialize_shift_snapshot(getattr(leave, "shift_snapshot_json", None))
+                original_shift = snapshot.get(work_date.isoformat(), leave.shift_type)
+                shift_text = f"原{_shift_type_label(original_shift)}"
+                detail_lines.append(f"原因：{leave.reason}")
+                replacement_name = None
+                if leave.status == "approved_with_flexible":
+                    replacement_name = (_flexible_replacement_entry_for_date(leave, work_date) or {}).get("employee_name")
+                elif leave.replacement_response == "accepted":
+                    replacement_name = leave.replacement_employee_name_snapshot
+                if replacement_name:
+                    detail_lines.append(f"顶班：{replacement_name}")
+            elif replacement:
+                source_leave = replacement["leave"]
+                status_code = "replacement"
+                status_label = "顶班"
+                shift_text = _shift_type_label(replacement["shift_type"])
+                detail_lines.append(f"替 {source_leave.employee_name_snapshot} 顶班")
+                if source_leave.reason:
+                    detail_lines.append(f"请假原因：{source_leave.reason}")
+            elif swap:
+                is_rest = _is_rest_shift(swap["final"])
+                status_code = "swap_rest" if is_rest else "swap_work"
+                status_label = "换班休息" if is_rest else "换班上班"
+                shift_text = f"{_shift_type_label(swap['original'])} → {_shift_type_label(swap['final'])}"
+                detail_lines.append(f"与 {swap['counterpart']} 换班")
+                if swap["reason"]:
+                    detail_lines.append(f"原因：{swap['reason']}")
+            elif shift_type and _is_rest_shift(shift_type):
+                status_code = "rest_work" if day_sessions else "rest"
+                status_label = "休息日上班" if day_sessions else "正常休息"
+            elif shift_type:
+                status_code = "work"
+                status_label = "正常上班"
+            elif day_sessions:
+                status_code = "work"
+                status_label = "正常上班"
+                detail_lines.append("系统无当天排班记录")
+
+            segments = []
+            total_minutes = 0
+            lunch_rows = []
+            lunch_minutes = 0
+            for duty in day_sessions:
+                calc_end = duty.ended_at or current_time
+                minutes = (
+                    _duty_work_minutes(duty, end_for_calc=calc_end)
+                    if duty.action_type == DUTY_ACTION_STORE
+                    else max(int((calc_end - duty.started_at).total_seconds() // 60), 0)
+                )
+                total_minutes += minutes
+                end_text = "-"
+                if duty.ended_at:
+                    end_text = duty.ended_at.strftime("%H:%M")
+                    if duty.ended_at.date() != work_date:
+                        end_text = duty.ended_at.strftime("%m-%d %H:%M")
+                segments.append({"start_text": duty.started_at.strftime("%H:%M"), "end_text": end_text})
+                if duty.action_type == DUTY_ACTION_STORE:
+                    lunch = _duty_lunch_summary(duty, now=current_time, end_for_calc=calc_end)
+                    lunch_rows.extend(lunch["rows"])
+                    lunch_minutes += int(lunch["total_minutes"] or 0)
+
+            daily_rows.append({
+                "work_date": work_date,
+                "weekday_label": weekday_labels[work_date.weekday()],
+                "employee": employee,
+                "status_code": status_code,
+                "status_label": status_label,
+                "shift_text": shift_text,
+                "detail_lines": detail_lines,
+                "segments": segments,
+                "lunch_summary": {
+                    "rows": lunch_rows,
+                    "total_text": _format_minutes_duration(lunch_minutes)
+                } if lunch_rows else None,
+                "duration_text": _format_minutes_duration(total_minutes) if day_sessions else "-"
+            })
+        work_date -= timedelta(days=1)
+    return daily_rows
+
 def _encode_duty_store_names(store_names: List[str]) -> str:
     clean = []
     seen = set()
@@ -12111,7 +12320,7 @@ async def employees_page(
         anomaly_end_date: str = "",
         anomaly_employee: str = "all",
         anomaly_store: str = "all",
-        duty_date_filter: str = "today",
+        duty_date_filter: str = "this_month",
         duty_start_date: str = "",
         duty_end_date: str = "",
         duty_employee: str = "all",
@@ -12283,6 +12492,8 @@ async def employees_page(
     duty_session_rows = []
     current_duty_rows = []
     duty_summary_rows = []
+    duty_daily_rows = []
+    duty_employee_options = []
     duty_filters = {
         "date_filter": duty_date_filter,
         "start_date": duty_start_date,
@@ -12653,9 +12864,9 @@ async def employees_page(
             if filter_end_date < filter_start_date:
                 filter_end_date = filter_start_date
         else:
-            duty_date_filter = "today"
+            duty_date_filter = "this_month"
             duty_filters["date_filter"] = duty_date_filter
-            filter_start_date = today
+            filter_start_date = today.replace(day=1)
             filter_end_date = today
 
         duty_records = session.exec(
@@ -12671,19 +12882,7 @@ async def employees_page(
                 continue
             if duty_employee != "all" and str(item.user_id) != str(duty_employee):
                 continue
-            if duty_action_type != "all" and item.action_type != duty_action_type:
-                continue
-            item_status = (
-                "lunch" if item.action_type == DUTY_ACTION_STORE and not item.ended_at and _is_duty_on_lunch(item)
-                else "active" if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN} and not item.ended_at
-                else "ended" if item.action_type in {DUTY_ACTION_STORE, DUTY_ACTION_LOGIN}
-                else "review"
-            )
-            if duty_status != "all" and not (
-                item_status == duty_status
-                or (duty_status == "active" and item_status == "lunch")
-            ):
-                continue
+
 
             end_time = item.ended_at
             duration_text = "-"
@@ -12771,6 +12970,50 @@ async def employees_page(
                     "completed_record_count": 0,
                 })
 
+        daily_end_date = min(filter_end_date, today)
+        visible_employee_names = set()
+        if filter_start_date <= daily_end_date:
+            month_cursor = filter_start_date.replace(day=1)
+            last_month_start = daily_end_date.replace(day=1)
+            while month_cursor <= last_month_start:
+                visible_employee_names.update(
+                    _get_visible_employee_names_for_month(
+                        session,
+                        month_cursor.year,
+                        month_cursor.month
+                    )
+                )
+                if month_cursor.month == 12:
+                    month_cursor = date(month_cursor.year + 1, 1, 1)
+                else:
+                    month_cursor = date(month_cursor.year, month_cursor.month + 1, 1)
+
+        duty_employee_options = [
+            employee
+            for employee in all_employees
+            if employee.role != "admin" and employee.display_name in visible_employee_names
+        ]
+        if duty_employee != "all":
+            selected_employee = (
+                session.get(User, int(duty_employee))
+                if str(duty_employee).isdigit()
+                else None
+            )
+            daily_employees = (
+                [selected_employee]
+                if selected_employee and selected_employee.role != "admin"
+                else []
+            )
+        else:
+            daily_employees = duty_employee_options
+
+        duty_daily_rows = _build_employee_daily_duty_rows(
+            session,
+            employees=daily_employees,
+            start_date=filter_start_date,
+            end_date=daily_end_date,
+            now=now
+        )
         duty_filters.update({
             "date_filter": duty_date_filter,
             "start_date": filter_start_date.strftime("%Y-%m-%d"),
@@ -12876,6 +13119,8 @@ async def employees_page(
         "current_duty_rows": current_duty_rows,
         "duty_filters": duty_filters,
         "duty_summary_rows": duty_summary_rows,
+        "duty_daily_rows": duty_daily_rows,
+        "duty_employee_options": duty_employee_options,
     })
 
 
