@@ -1470,7 +1470,7 @@ class MonthlySalarySettlement(SQLModel, table=True):
     employee_social_security_amount: float = Field(default=0.0)
     social_security_amount: float = Field(default=0.0)
 
-    # 本月个人订单量，按 GameRecord.who_did 统计
+    # 本月个人订单总量：阶梯有效私域 + 新店保护期私域 + 自主到店
     personal_order_count: int = Field(default=0)
 
     team_id: Optional[int] = Field(default=None, foreign_key="employeeteam.id", index=True)

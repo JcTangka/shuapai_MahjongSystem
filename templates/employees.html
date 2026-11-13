@@ -476,12 +476,55 @@
     }
 
     .whiteboard-bar-fill.employee-private-orders {
-        background: linear-gradient(135deg, #2563eb, #1d4ed8);
         border-radius: 999px 0 0 999px;
     }
 
-    .whiteboard-bar-fill.employee-self-arrival-orders {
+    .whiteboard-bar-fill.employee-private-orders.tier-below-base,
+    .whiteboard-bar-fill.employee-private-orders.tier-below_base {
+        background: linear-gradient(135deg, #94a3b8, #64748b);
+    }
+
+    .whiteboard-bar-fill.employee-private-orders.tier-base {
+        background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+    }
+
+    .whiteboard-bar-fill.employee-private-orders.tier-target {
         background: linear-gradient(135deg, #22c55e, #15803d);
+    }
+
+    .whiteboard-bar-fill.employee-private-orders.tier-sprint {
+        background: linear-gradient(135deg, #f59e0b, #d97706);
+    }
+
+    .whiteboard-bar-fill.employee-private-orders.tier-burst {
+        background: linear-gradient(135deg, #ef4444, #b91c1c);
+    }
+
+    .whiteboard-bar-fill.employee-private-orders.tier-big-result,
+    .whiteboard-bar-fill.employee-private-orders.tier-big_result {
+        background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+    }
+
+    .whiteboard-bar-fill.employee-new-store-orders {
+        background: repeating-linear-gradient(
+            135deg,
+            #cbd5e1 0,
+            #cbd5e1 7px,
+            #94a3b8 7px,
+            #94a3b8 14px
+        );
+    }
+
+    .whiteboard-bar-fill.employee-self-arrival-orders {
+        background: linear-gradient(135deg, #06b6d4, #0e7490);
+        border-radius: 0 999px 999px 0;
+    }
+
+    .whiteboard-bar-fill.employee-order-first-segment {
+        border-radius: 999px 0 0 999px;
+    }
+
+    .whiteboard-bar-fill.employee-order-last-segment {
         border-radius: 0 999px 999px 0;
     }
 
@@ -542,12 +585,37 @@
         display: inline-block;
     }
 
-    .whiteboard-order-legend-dot.private-orders {
+    .whiteboard-order-legend-dot.tier-below-base {
+        background: #64748b;
+    }
+
+    .whiteboard-order-legend-dot.tier-base {
         background: #2563eb;
     }
 
+    .whiteboard-order-legend-dot.tier-target {
+        background: #16a34a;
+    }
+
+    .whiteboard-order-legend-dot.tier-sprint {
+        background: #d97706;
+    }
+
+    .whiteboard-order-legend-dot.tier-burst {
+        background: #dc2626;
+    }
+
+    .whiteboard-order-legend-dot.tier-big-result,
+    .whiteboard-order-legend-dot.tier-big_result {
+        background: #7c3aed;
+    }
+
+    .whiteboard-order-legend-dot.new-store-orders {
+        background: repeating-linear-gradient(135deg, #cbd5e1 0, #cbd5e1 4px, #64748b 4px, #64748b 8px);
+    }
+
     .whiteboard-order-legend-dot.self-arrival-orders {
-        background: #22c55e;
+        background: #0891b2;
     }
 
     .whiteboard-bar-value {
@@ -595,19 +663,38 @@
         z-index: 3;
     }
 
+    .whiteboard-node-line.tier-base { background: rgba(37, 99, 235, 0.72); }
+    .whiteboard-node-line.tier-target { background: rgba(22, 163, 74, 0.72); }
+    .whiteboard-node-line.tier-sprint { background: rgba(217, 119, 6, 0.72); }
+    .whiteboard-node-line.tier-burst { background: rgba(220, 38, 38, 0.72); }
+    .whiteboard-node-line.tier-big-result,
+    .whiteboard-node-line.tier-big_result { background: rgba(124, 58, 237, 0.72); }
+
     .whiteboard-node-label {
         position: absolute;
-        top: -28px;
+        top: -21px;
         transform: translateX(-50%);
         white-space: nowrap;
-        font-size: 0.72rem;
+        font-size: 0.66rem;
         font-weight: 800;
-        color: #991b1b;
-        background: #fff1f2;
-        border: 1px solid #fecdd3;
-        border-radius: 999px;
-        padding: 2px 6px;
+        line-height: 1;
+        color: #475569;
+        background: rgba(255, 255, 255, 0.94);
+        border-radius: 4px;
+        padding: 1px 2px;
         z-index: 4;
+    }
+
+    .whiteboard-node-label.tier-base { color: #1d4ed8; }
+    .whiteboard-node-label.tier-target { color: #15803d; }
+    .whiteboard-node-label.tier-sprint { color: #b45309; }
+    .whiteboard-node-label.tier-burst { color: #b91c1c; }
+    .whiteboard-node-label.tier-big-result,
+    .whiteboard-node-label.tier-big_result { color: #6d28d9; }
+
+    .whiteboard-tier-result {
+        background: #7c3aed;
+        color: #fff;
     }
 
     .whiteboard-period-line {
@@ -3255,31 +3342,49 @@
 <div class="card whiteboard-chart-card mb-4">
     <div class="card-header bg-white py-3">
         <div class="fw-bold"><i class="bi bi-person-lines-fill text-primary me-1"></i>我的本月订单量</div>
-        <div class="small text-muted mt-1">红色竖线为个人提成关键节点：660、710、760、810、860……。</div>
+        <div class="small text-muted mt-1">
+            本月动态阶梯：基准 {{ my_assessment_data.commission_thresholds.base }}、达标 {{ my_assessment_data.commission_thresholds.target }}、冲刺 {{ my_assessment_data.commission_thresholds.sprint }}、爆单 {{ my_assessment_data.commission_thresholds.burst }}、大结果 {{ my_assessment_data.commission_thresholds.big_result }} 单；仅阶梯有效私域组局参与冲档。
+        </div>
     </div>
     <div class="card-body">
         <div class="whiteboard-bar-row">
             <div class="row g-3 align-items-center">
                 <div class="col-md-3">
                     <div class="whiteboard-bar-label">{{ my_assessment_data.target_user.display_name }}</div>
-                    <div class="whiteboard-bar-meta">本月 {{ my_assessment_data.order_count }} 单</div>
+                    <div class="whiteboard-bar-meta">
+                        本月 {{ my_assessment_data.order_count }} 单｜阶梯有效私域 {{ my_assessment_data.eligible_private_order_count }} 单｜新店私域 {{ my_assessment_data.new_store_private_order_count }} 单｜自主到店 {{ my_assessment_data.self_arrival_order_count }} 单
+                    </div>
                 </div>
                 <div class="col-md-7">
                     <div class="whiteboard-bar-track">
-                        <div class="whiteboard-bar-fill warning" style="width: {{ my_assessment_data.order_bar_percent }}%;"></div>
+                        {% if my_assessment_data.eligible_private_order_count > 0 %}
+                        <div class="whiteboard-bar-fill employee-order-segment employee-private-orders tier-{{ my_assessment_data.commission_tier_code }} {% if my_assessment_data.new_store_private_order_count == 0 and my_assessment_data.self_arrival_order_count == 0 %}employee-order-only-segment{% endif %}"
+                             data-order-tooltip="阶梯有效私域：{{ my_assessment_data.eligible_private_order_count }} 单｜{{ my_assessment_data.commission_tier_label }}"
+                             tabindex="0"
+                             style="width: {{ my_assessment_data.eligible_private_bar_percent }}%;"></div>
+                        {% endif %}
+                        {% if my_assessment_data.new_store_private_order_count > 0 %}
+                        <div class="whiteboard-bar-fill employee-order-segment employee-new-store-orders {% if my_assessment_data.eligible_private_order_count == 0 and my_assessment_data.self_arrival_order_count == 0 %}employee-order-only-segment{% elif my_assessment_data.eligible_private_order_count == 0 %}employee-order-first-segment{% elif my_assessment_data.self_arrival_order_count == 0 %}employee-order-last-segment{% endif %}"
+                             data-order-tooltip="新门店保护期私域：{{ my_assessment_data.new_store_private_order_count }} 单（固定 2 元/单，不参与冲档）"
+                             tabindex="0"
+                             style="left: {{ my_assessment_data.eligible_private_bar_percent }}%; width: {{ my_assessment_data.new_store_private_bar_percent }}%;"></div>
+                        {% endif %}
+                        {% if my_assessment_data.self_arrival_order_count > 0 %}
+                        <div class="whiteboard-bar-fill employee-order-segment employee-self-arrival-orders {% if my_assessment_data.private_order_count == 0 %}employee-order-only-segment{% else %}employee-order-last-segment{% endif %}"
+                             data-order-tooltip="自主到店：{{ my_assessment_data.self_arrival_order_count }} 单（固定 2 元/单）"
+                             tabindex="0"
+                             style="left: {{ my_assessment_data.private_bar_percent }}%; width: {{ my_assessment_data.self_arrival_bar_percent }}%;"></div>
+                        {% endif %}
                         {% for node in my_assessment_data.commission_nodes %}
-                        <div class="whiteboard-node-line" style="left: {{ node.percent }}%;"></div>
-                        <div class="whiteboard-node-label" style="left: {{ node.percent }}%;">{{ node.value }}</div>
+                        <div class="whiteboard-node-line tier-{{ node.code }}" style="left: {{ node.percent }}%;" title="{{ node.label }} {{ node.value }} 单"></div>
+                        <div class="whiteboard-node-label tier-{{ node.code }}" style="left: {{ node.percent }}%;" title="{{ node.label }}">{{ node.value }}</div>
                         {% endfor %}
                         <div class="whiteboard-bar-value">{{ my_assessment_data.order_count }} 单</div>
                     </div>
                 </div>
                 <div class="col-md-2 text-md-end">
-                    {% if my_assessment_data.order_count >= 660 %}
-                        <span class="badge bg-success">进入提成阶梯</span>
-                    {% else %}
-                        <span class="badge bg-light text-dark border">未到 660</span>
-                    {% endif %}
+                    <span class="badge {{ my_assessment_data.commission_tier_badge_class }}">{{ my_assessment_data.commission_tier_label }}</span>
+                    <div class="small text-muted mt-1">预计单量提成 ¥{{ '%.2f'|format(my_assessment_data.commission_total) }}</div>
                 </div>
             </div>
         </div>
@@ -3598,16 +3703,29 @@
                     <i class="bi bi-person-lines-fill text-primary me-1"></i>员工本月订单量对比
                 </div>
                 <div class="small text-muted mt-1">
-                    仅展示本月订单量大于 0 的员工；销冠按私域组局单量 ÷ 有效上班日数评选；上班日优先取排班和已生效机动顶班，无此类记录时取本人已有带店日期，并且只有当天私域组局不少于 {{ whiteboard_data.min_private_orders_per_workday }} 单才计入分母；休息、公休及已生效请假不计入。红色竖线为个人提成关键节点：660、710、760、810、860……。
+                    仅展示本月订单量大于 0 的员工。动态阶梯基准取 {{ whiteboard_data.commission_previous_month_start }} 至 {{ whiteboard_data.commission_previous_month_end }} 品牌私域组局 {{ whiteboard_data.commission_previous_private_order_count }} 单 ÷ 6 后四舍五入；后续每档为 max（上一档 + 10，上一档 × 105% 四舍五入）。只有阶梯有效私域组局参与冲档；新门店保护期私域和自主到店均固定 2 元/单。销冠仍按全部私域组局单量 ÷ 有效上班日数评选。
                 </div>
                 <div class="small text-muted mt-2 d-flex align-items-center gap-3 flex-wrap">
                     <span class="whiteboard-order-legend">
-                        <span class="whiteboard-order-legend-dot private-orders"></span>私域组局
+                        <span class="whiteboard-order-legend-dot tier-below-base"></span>未达基准
+                    </span>
+                    {% for node in whiteboard_data.commission_nodes %}
+                    <span class="whiteboard-order-legend">
+                        <span class="whiteboard-order-legend-dot tier-{{ node.code }}"></span>{{ node.label }} {{ node.value }}
+                    </span>
+                    {% endfor %}
+                    <span class="whiteboard-order-legend">
+                        <span class="whiteboard-order-legend-dot new-store-orders"></span>新店保护期私域
                     </span>
                     <span class="whiteboard-order-legend">
                         <span class="whiteboard-order-legend-dot self-arrival-orders"></span>自主到店
                     </span>
                 </div>
+                {% if whiteboard_data.commission_protected_store_names %}
+                <div class="small text-muted mt-2">
+                    本月新店保护期门店：{{ whiteboard_data.commission_protected_store_names|join('、') }}；上月另排除 {{ whiteboard_data.commission_previous_excluded_new_store_order_count }} 单。
+                </div>
+                {% endif %}
             </div>
             {% if whiteboard_data.sales_champion and whiteboard_data.sales_champion.average_order_count %}
             <div class="whiteboard-champion" title="仅按私域组局计算：私域组局单量 ÷ 有效上班日数；只有当天私域组局不少于 {{ whiteboard_data.min_private_orders_per_workday }} 单的上班日才计入分母。">
@@ -3641,34 +3759,41 @@
                         {% endif %}
                     </button>
                     <div class="whiteboard-bar-meta">
-                        本月 {{ row.order_count }} 单｜私域组局 {{ row.private_order_count }} 单｜自主到店 {{ row.self_arrival_order_count }} 单
+                        本月 {{ row.order_count }} 单｜私域组局 {{ row.private_order_count }} 单（阶梯有效 {{ row.commission_eligible_private_order_count }}{% if row.commission_new_store_private_order_count %}、新店 {{ row.commission_new_store_private_order_count }}{% endif %}）｜自主到店 {{ row.self_arrival_order_count }} 单
                     </div>
                 </div>
 
                 <div class="col-md-7">
                     <div class="whiteboard-bar-track">
-                        {% if row.private_order_count > 0 %}
-                        <div class="whiteboard-bar-fill employee-order-segment employee-private-orders {% if row.self_arrival_order_count == 0 %}employee-order-only-segment{% endif %}"
-                             data-order-tooltip="私域组局：{{ row.private_order_count }} 单"
-                             aria-label="私域组局：{{ row.private_order_count }} 单"
+                        {% if row.commission_eligible_private_order_count > 0 %}
+                        <div class="whiteboard-bar-fill employee-order-segment employee-private-orders tier-{{ row.commission_tier_code }} {% if row.commission_new_store_private_order_count == 0 and row.self_arrival_order_count == 0 %}employee-order-only-segment{% endif %}"
+                             data-order-tooltip="阶梯有效私域：{{ row.commission_eligible_private_order_count }} 单｜{{ row.commission_tier_label }}"
+                             aria-label="阶梯有效私域：{{ row.commission_eligible_private_order_count }} 单，{{ row.commission_tier_label }}"
                              tabindex="0"
-                             style="width: {{ row.private_bar_percent }}%;"></div>
+                             style="width: {{ row.commission_eligible_private_bar_percent }}%;"></div>
+                        {% endif %}
+                        {% if row.commission_new_store_private_order_count > 0 %}
+                        <div class="whiteboard-bar-fill employee-order-segment employee-new-store-orders {% if row.commission_eligible_private_order_count == 0 and row.self_arrival_order_count == 0 %}employee-order-only-segment{% elif row.commission_eligible_private_order_count == 0 %}employee-order-first-segment{% elif row.self_arrival_order_count == 0 %}employee-order-last-segment{% endif %}"
+                             data-order-tooltip="新门店保护期私域：{{ row.commission_new_store_private_order_count }} 单（固定 2 元/单，不参与冲档）"
+                             aria-label="新门店保护期私域：{{ row.commission_new_store_private_order_count }} 单"
+                             tabindex="0"
+                             style="left: {{ row.commission_eligible_private_bar_percent }}%; width: {{ row.commission_new_store_private_bar_percent }}%;"></div>
                         {% endif %}
                         {% if row.self_arrival_order_count > 0 %}
-                        <div class="whiteboard-bar-fill employee-order-segment employee-self-arrival-orders {% if row.private_order_count == 0 %}employee-order-only-segment{% endif %}"
-                             data-order-tooltip="自主到店：{{ row.self_arrival_order_count }} 单"
+                        <div class="whiteboard-bar-fill employee-order-segment employee-self-arrival-orders {% if row.private_order_count == 0 %}employee-order-only-segment{% else %}employee-order-last-segment{% endif %}"
+                             data-order-tooltip="自主到店：{{ row.self_arrival_order_count }} 单（固定 2 元/单）"
                              aria-label="自主到店：{{ row.self_arrival_order_count }} 单"
                              tabindex="0"
                              style="left: {{ row.private_bar_percent }}%; width: {{ row.self_arrival_bar_percent }}%;"></div>
                         {% endif %}
 
                         {% for node in whiteboard_data.commission_nodes %}
-                        <div class="whiteboard-node-line"
-                             style="left: {{ node.percent }}%;"></div>
-                        <div class="whiteboard-node-label"
-                             style="left: {{ node.percent }}%;">
-                            {{ node.value }}
-                        </div>
+                        <div class="whiteboard-node-line tier-{{ node.code }}"
+                             style="left: {{ node.percent }}%;"
+                             title="{{ node.label }} {{ node.value }} 单"></div>
+                        <div class="whiteboard-node-label tier-{{ node.code }}"
+                             style="left: {{ node.percent }}%;"
+                             title="{{ node.label }}">{{ node.value }}</div>
                         {% endfor %}
 
                         <div class="whiteboard-bar-value">
@@ -3701,11 +3826,8 @@
                             {% endif %}
                         </div>
                         <div class="text-md-end">
-                            {% if row.order_count >= 660 %}
-                                <span class="badge bg-success">进入提成阶梯</span>
-                            {% else %}
-                                <span class="badge bg-light text-dark border">未到 660</span>
-                            {% endif %}
+                            <span class="badge {{ row.commission_tier_badge_class }}">{{ row.commission_tier_label }}</span>
+                            <div class="small text-muted mt-1">单量提成 ¥{{ '%.2f'|format(row.commission_total) }}</div>
                         </div>
                     </div>
                 </div>

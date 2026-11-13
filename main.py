@@ -15,6 +15,7 @@ import re
 import secrets
 import string
 import threading
+from decimal import Decimal, ROUND_HALF_UP
 from sqlmodel import Session, select
 from sqlalchemy import func, or_, and_, delete, text  # 用于搜索逻辑；text 用于团队硬删除时兼容清理工资结算表
 from sqlalchemy.exc import IntegrityError
@@ -2102,6 +2103,14 @@ def _salary_flow_type_label(flow_type: str) -> str:
         "absent_deduct": "旷工扣款",
         "monthly_base_salary": "月基础工资",
         "personal_order_commission": "单量提成",
+        "personal_order_commission_base": "单量提成·基准档以内",
+        "personal_order_commission_target": "单量提成·基准至达标",
+        "personal_order_commission_sprint": "单量提成·达标至冲刺",
+        "personal_order_commission_burst": "单量提成·冲刺至爆单",
+        "personal_order_commission_big_result": "单量提成·爆单至大结果",
+        "personal_order_commission_big_result_plus": "单量提成·大结果及以上",
+        "personal_order_commission_new_store": "单量提成·新门店保护期",
+        "personal_order_commission_self_arrival": "单量提成·自主到店",
         "personal_store_target_bonus": "个人门店达标奖",
         "team_bonus_share": "团队奖金分摊",
         "team_target_bonus_share": "团队目标奖金分摊",
@@ -2457,36 +2466,284 @@ def _build_my_salary_data(
 # V3 员工管理：工资结算辅助函数
 # =========================
 
-def _calc_personal_order_commission(order_count: int) -> float:
+ORDER_COMMISSION_DIVISOR = 6
+ORDER_COMMISSION_GROWTH_RATE = Decimal("1.05")
+ORDER_COMMISSION_MIN_TIER_STEP = 10
+
+
+def _round_half_up_int(value) -> int:
+    """业务四舍五入：0.5 始终进 1，避免 Python 银行家舍入。"""
+    return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _previous_calendar_month_range(year: int, month: int) -> Tuple[date, date]:
+    current_month_start = date(year, month, 1)
+    previous_month_end = current_month_start - timedelta(days=1)
+    return previous_month_end.replace(day=1), previous_month_end
+
+
+def _next_order_commission_threshold(previous_threshold: int) -> int:
+    percentage_threshold = _round_half_up_int(
+        Decimal(previous_threshold) * ORDER_COMMISSION_GROWTH_RATE
+    )
+    return max(previous_threshold + ORDER_COMMISSION_MIN_TIER_STEP, percentage_threshold)
+
+
+def _dynamic_order_commission_thresholds(previous_private_order_count: int) -> dict:
+    base = _round_half_up_int(
+        Decimal(int(previous_private_order_count or 0)) / Decimal(ORDER_COMMISSION_DIVISOR)
+    )
+    target = _next_order_commission_threshold(base)
+    sprint = _next_order_commission_threshold(target)
+    burst = _next_order_commission_threshold(sprint)
+    big_result = _next_order_commission_threshold(burst)
+    values = {
+        "base": base,
+        "target": target,
+        "sprint": sprint,
+        "burst": burst,
+        "big_result": big_result,
+    }
+    node_specs = [
+        ("base", "基准档"),
+        ("target", "达标档"),
+        ("sprint", "冲刺档"),
+        ("burst", "爆单档"),
+        ("big_result", "大结果档"),
+    ]
+    values["nodes"] = [
+        {"code": code, "label": label, "value": values[code]}
+        for code, label in node_specs
+    ]
+    return values
+
+
+def _commission_protected_new_store_names(
+        session: Session,
+        year: int,
+        month: int
+) -> set[str]:
     """
-    计算个人订单提成。
+    返回核算月仍处于新店保护期的门店。
 
-    规则：
-    1. 660 单以内：2 元 / 单；
-    2. 660-710：超出部分 3 元 / 单；
-    3. 710-760：超出部分 4 元 / 单；
-    4. 之后每 50 单，单价 +1 元；
-    5. 示例：850 单 = 660*2 + 50*3 + 50*4 + 50*5 + 40*6 = 2160。
+    门店必须在核算月开始前已经完整经营过上一个自然月，才进入动态阶梯。
+    对更早历史月份，创建时间晚于核算月末的门店不倒推为“新店”，避免迁移时间误伤历史。
     """
-    order_count = int(order_count or 0)
+    previous_month_start, _ = _previous_calendar_month_range(year, month)
+    _, month_end = _get_month_start_end(year, month)
+    protected_names = set()
+    for store_obj in session.exec(select(Store)).all():
+        created_at = getattr(store_obj, "created_at", None)
+        store_name = _normalize_text(getattr(store_obj, "name", None))
+        if not created_at or not store_name:
+            continue
+        created_date = created_at.date() if isinstance(created_at, datetime) else created_at
+        if previous_month_start <= created_date <= month_end:
+            protected_names.add(store_name)
+    return protected_names
 
-    if order_count <= 0:
-        return 0.0
 
-    if order_count <= 660:
-        return round(order_count * 2.0, 2)
+def _order_commission_counts_for_games(
+        games: List[GameRecord],
+        protected_store_names: set[str]
+) -> dict:
+    counts = {
+        "eligible_private_order_count": 0,
+        "new_store_private_order_count": 0,
+        "self_arrival_order_count": 0,
+        "other_order_count": 0,
+        "total_order_count": 0,
+    }
+    for game in games:
+        counts["total_order_count"] += 1
+        source = _normalize_text(game.record_source)
+        if source in {FORMED_SOURCE_NORMAL, FORMED_SOURCE_OVERFLOW}:
+            if _normalize_text(game.store_name) in protected_store_names:
+                counts["new_store_private_order_count"] += 1
+            else:
+                counts["eligible_private_order_count"] += 1
+        elif source == FORMED_SOURCE_SELF_ARRIVAL:
+            counts["self_arrival_order_count"] += 1
+        else:
+            counts["other_order_count"] += 1
+    counts["private_order_count"] = (
+        counts["eligible_private_order_count"] + counts["new_store_private_order_count"]
+    )
+    return counts
 
-    total = 660 * 2.0
-    remaining = order_count - 660
-    unit_price = 3.0
 
-    while remaining > 0:
-        current_tier_count = min(remaining, 50)
-        total += current_tier_count * unit_price
-        remaining -= current_tier_count
-        unit_price += 1.0
+def _order_commission_tier_status(eligible_private_order_count: int, thresholds: dict) -> dict:
+    count = int(eligible_private_order_count or 0)
+    if count <= 0 or count < thresholds["base"]:
+        return {
+            "code": "below_base",
+            "label": "未达基准档",
+            "badge_class": "bg-light text-dark border",
+        }
+    if count < thresholds["target"]:
+        return {"code": "base", "label": "基准档", "badge_class": "bg-primary"}
+    if count < thresholds["sprint"]:
+        return {"code": "target", "label": "达标档", "badge_class": "bg-success"}
+    if count < thresholds["burst"]:
+        return {"code": "sprint", "label": "冲刺档", "badge_class": "bg-warning text-dark"}
+    if count < thresholds["big_result"]:
+        return {"code": "burst", "label": "爆单档", "badge_class": "bg-danger"}
+    return {"code": "big_result", "label": "大结果档", "badge_class": "whiteboard-tier-result"}
 
-    return round(total, 2)
+
+def _calculate_order_commission_breakdown(counts: dict, month_data: dict) -> dict:
+    thresholds = month_data["thresholds"]
+    eligible_count = int(counts.get("eligible_private_order_count") or 0)
+    base = thresholds["base"]
+    target = thresholds["target"]
+    sprint = thresholds["sprint"]
+    burst = thresholds["burst"]
+    big_result = thresholds["big_result"]
+
+    segment_specs = [
+        ("base", "基准档以内", "personal_order_commission_base", min(eligible_count, base), 2.0),
+        (
+            "target",
+            "基准档至达标档",
+            "personal_order_commission_target",
+            min(max(eligible_count - base, 0), target - base),
+            4.0,
+        ),
+        (
+            "sprint",
+            "达标档至冲刺档",
+            "personal_order_commission_sprint",
+            min(max(eligible_count - target, 0), sprint - target),
+            5.0,
+        ),
+        (
+            "burst",
+            "冲刺档至爆单档",
+            "personal_order_commission_burst",
+            min(max(eligible_count - sprint, 0), burst - sprint),
+            8.0,
+        ),
+        (
+            "big_result",
+            "爆单档至大结果档",
+            "personal_order_commission_big_result",
+            min(max(eligible_count - burst, 0), big_result - burst),
+            10.0,
+        ),
+        (
+            "big_result_plus",
+            "大结果档及以上",
+            "personal_order_commission_big_result_plus",
+            max(eligible_count - big_result, 0),
+            10.0,
+        ),
+    ]
+    segments = []
+    for code, label, flow_type, order_count, unit_price in segment_specs:
+        amount = round(order_count * unit_price, 2)
+        segments.append({
+            "code": code,
+            "label": label,
+            "flow_type": flow_type,
+            "order_count": order_count,
+            "unit_price": unit_price,
+            "amount": amount,
+        })
+
+    new_store_count = int(counts.get("new_store_private_order_count") or 0)
+    self_arrival_count = int(counts.get("self_arrival_order_count") or 0)
+    fixed_segments = [
+        {
+            "code": "new_store",
+            "label": "新门店保护期",
+            "flow_type": "personal_order_commission_new_store",
+            "order_count": new_store_count,
+            "unit_price": 2.0,
+            "amount": round(new_store_count * 2.0, 2),
+        },
+        {
+            "code": "self_arrival",
+            "label": "自主到店",
+            "flow_type": "personal_order_commission_self_arrival",
+            "order_count": self_arrival_count,
+            "unit_price": 2.0,
+            "amount": round(self_arrival_count * 2.0, 2),
+        },
+    ]
+    tier_status = _order_commission_tier_status(eligible_count, thresholds)
+    all_segments = segments + fixed_segments
+    result = {
+        **counts,
+        "segments": all_segments,
+        "tier_segments": segments,
+        "fixed_segments": fixed_segments,
+        "commission_total": round(sum(item["amount"] for item in all_segments), 2),
+        "tier_code": tier_status["code"],
+        "tier_label": tier_status["label"],
+        "tier_badge_class": tier_status["badge_class"],
+        "thresholds": thresholds,
+    }
+    return result
+
+
+def _build_monthly_order_commission_data(
+        session: Session,
+        year: int,
+        month: int
+) -> dict:
+    month_start, month_end = _get_month_start_end(year, month)
+    previous_month_start, previous_month_end = _previous_calendar_month_range(year, month)
+    protected_store_names = _commission_protected_new_store_names(session, year, month)
+    all_formed_games = session.exec(
+        select(GameRecord).where(GameRecord.status == "formed")
+    ).all()
+
+    previous_private_order_count = 0
+    previous_excluded_new_store_order_count = 0
+    current_games_by_employee: Dict[str, List[GameRecord]] = {}
+
+    for game in all_formed_games:
+        source = _normalize_text(game.record_source)
+        if source in {FORMED_SOURCE_NORMAL, FORMED_SOURCE_OVERFLOW}:
+            effective_date = _game_effective_order_dt(game).date()
+            if previous_month_start <= effective_date <= previous_month_end:
+                if _normalize_text(game.store_name) in protected_store_names:
+                    previous_excluded_new_store_order_count += 1
+                else:
+                    previous_private_order_count += 1
+
+        if game.record_date and month_start <= game.record_date <= month_end:
+            employee_name = _normalize_text(game.who_did)
+            if employee_name:
+                current_games_by_employee.setdefault(employee_name, []).append(game)
+
+    thresholds = _dynamic_order_commission_thresholds(previous_private_order_count)
+    return {
+        "year": year,
+        "month": month,
+        "month_start": month_start,
+        "month_end": month_end,
+        "previous_month_start": previous_month_start,
+        "previous_month_end": previous_month_end,
+        "previous_private_order_count": previous_private_order_count,
+        "previous_excluded_new_store_order_count": previous_excluded_new_store_order_count,
+        "protected_store_names": protected_store_names,
+        "protected_store_name_list": sorted(protected_store_names),
+        "thresholds": thresholds,
+        "current_games_by_employee": current_games_by_employee,
+    }
+
+
+def _employee_order_commission_from_month_data(
+        month_data: dict,
+        employee_name: str,
+        end_date: Optional[date] = None
+) -> dict:
+    games = month_data["current_games_by_employee"].get(_normalize_text(employee_name), [])
+    if end_date:
+        games = [game for game in games if game.record_date and game.record_date <= end_date]
+    counts = _order_commission_counts_for_games(games, month_data["protected_store_names"])
+    return _calculate_order_commission_breakdown(counts, month_data)
 
 
 def _is_resigned_employee(user: Optional[User]) -> bool:
@@ -2530,84 +2787,6 @@ def _employee_resignation_label(user: Optional[User]) -> str:
         return ""
     resignation_date = getattr(user, "resignation_date", None)
     return f"离职（{resignation_date}）" if resignation_date else "离职"
-
-
-def _get_employee_order_count_for_month(
-        session: Session,
-        employee_name: str,
-        year: int,
-        month: int
-) -> int:
-    """
-    统计某员工某月个人订单数。
-
-    业务口径：
-    1. 按 GameRecord.who_did 统计；
-    2. 只统计 status == 'formed'；
-    3. 使用 record_date 落在当月范围内；
-    4. 包含常规牌局、自主到店、溢出单，因为当前 who_did 是既定个人单量统计口径。
-    """
-    month_start, month_end = _get_month_start_end(year, month)
-
-    return len(session.exec(
-        select(GameRecord).where(
-            GameRecord.status == "formed",
-            GameRecord.who_did == employee_name,
-            GameRecord.record_date >= month_start,
-            GameRecord.record_date <= month_end
-        )
-    ).all())
-
-
-def _get_employee_order_count_for_period(
-        session: Session,
-        employee_name: str,
-        start_date: date,
-        end_date: date
-) -> int:
-    if end_date < start_date:
-        return 0
-    return len(session.exec(
-        select(GameRecord).where(
-            GameRecord.status == "formed",
-            GameRecord.who_did == employee_name,
-            GameRecord.record_date >= start_date,
-            GameRecord.record_date <= end_date
-        )
-    ).all())
-
-
-def _build_employee_order_count_map(
-        session: Session,
-        year: int,
-        month: int
-) -> dict:
-    """
-    构建本月员工订单数字典。
-
-    用途：
-    1. 计算个人提成；
-    2. 工资结算时复用该数字计算单量提成。
-    """
-    month_start, month_end = _get_month_start_end(year, month)
-
-    games = session.exec(
-        select(GameRecord).where(
-            GameRecord.status == "formed",
-            GameRecord.record_date >= month_start,
-            GameRecord.record_date <= month_end
-        )
-    ).all()
-
-    count_map = {}
-
-    for g in games:
-        name = _normalize_text(g.who_did)
-        if not name:
-            continue
-        count_map[name] = count_map.get(name, 0) + 1
-
-    return count_map
 
 
 def _calc_resigned_employee_shift_salary(
@@ -3001,7 +3180,7 @@ def _calculate_salary_for_one_employee(
         year: int,
         month: int,
         operator: User,
-        all_order_count_map: dict
+        commission_month_data: dict
 ) -> MonthlySalarySettlement:
     """
     计算单个员工某月工资。
@@ -3070,16 +3249,19 @@ def _calculate_salary_for_one_employee(
 
     if is_resignation_month and resignation_date:
         commission_end_date = min(resignation_date, month_end)
-        personal_order_count = _get_employee_order_count_for_period(
-            session=session,
-            employee_name=user_obj.display_name,
-            start_date=month_start,
-            end_date=commission_end_date
+        order_commission_data = _employee_order_commission_from_month_data(
+            commission_month_data,
+            user_obj.display_name,
+            end_date=commission_end_date,
         )
     else:
-        personal_order_count = all_order_count_map.get(user_obj.display_name, 0)
+        commission_end_date = month_end
+        order_commission_data = _employee_order_commission_from_month_data(
+            commission_month_data,
+            user_obj.display_name,
+        )
 
-    personal_commission = _calc_personal_order_commission(personal_order_count)
+    personal_order_count = order_commission_data["total_order_count"]
 
     if is_resignation_month:
         reached_personal_store_count = 0
@@ -3193,23 +3375,64 @@ def _calculate_salary_for_one_employee(
         operator=operator
     )
 
-    _create_salary_settlement_flow(
-        session=session,
-        user_obj=user_obj,
-        year=year,
-        month=month,
-        amount=personal_commission,
-        flow_category="personal_commission",
-        flow_type="personal_order_commission",
-        title="单量提成",
-        description=(
-            f"{year}年{month}月个人订单 {personal_order_count} 单，对应单量提成 {personal_commission:.2f} 元。"
-            if not is_resignation_month
-            else f"{year}年{month}月离职员工单量提成统计至 {resignation_date}：{personal_order_count} 单，对应 {personal_commission:.2f} 元。"
-        ),
-        settlement_id=settlement.id,
-        operator=operator
+    thresholds = order_commission_data["thresholds"]
+    threshold_text = (
+        f"基准档 {thresholds['base']} 单、达标档 {thresholds['target']} 单、"
+        f"冲刺档 {thresholds['sprint']} 单、爆单档 {thresholds['burst']} 单、"
+        f"大结果档 {thresholds['big_result']} 单"
     )
+    previous_period_text = (
+        f"{commission_month_data['previous_month_start']} 至 "
+        f"{commission_month_data['previous_month_end']} 品牌私域组局 "
+        f"{commission_month_data['previous_private_order_count']} 单 ÷ {ORDER_COMMISSION_DIVISOR}"
+    )
+    resignation_scope_text = (
+        f"离职员工仅统计至 {commission_end_date}。"
+        if is_resignation_month else ""
+    )
+    protected_store_text = "、".join(commission_month_data["protected_store_name_list"])
+
+    # 流水页面按 ID 倒序展示，因此反向写入，使页面最终按基准档到固定提成项排列。
+    for segment in reversed(order_commission_data["segments"]):
+        if segment["order_count"] <= 0:
+            continue
+        if segment["code"] == "new_store":
+            description = (
+                f"{year}年{month}月新门店保护期私域组局 {segment['order_count']} 单 × "
+                f"{segment['unit_price']:.0f} 元/单 = {segment['amount']:.2f} 元；"
+                "该部分不进入动态阶梯分子。"
+                + (f"保护期门店：{protected_store_text}。" if protected_store_text else "")
+                + resignation_scope_text
+            )
+        elif segment["code"] == "self_arrival":
+            description = (
+                f"{year}年{month}月自主到店 {segment['order_count']} 单 × "
+                f"{segment['unit_price']:.0f} 元/单 = {segment['amount']:.2f} 元；"
+                "自主到店固定 2 元/单，不参与动态阶梯。"
+                + resignation_scope_text
+            )
+        else:
+            description = (
+                f"{year}年{month}月阶梯有效私域组局共 "
+                f"{order_commission_data['eligible_private_order_count']} 单；"
+                f"{segment['label']}获得 {segment['order_count']} 单 × "
+                f"{segment['unit_price']:.0f} 元/单 = {segment['amount']:.2f} 元。"
+                f"当月阶梯：{threshold_text}；基准来源：{previous_period_text}，四舍五入。"
+                + resignation_scope_text
+            )
+        _create_salary_settlement_flow(
+            session=session,
+            user_obj=user_obj,
+            year=year,
+            month=month,
+            amount=segment["amount"],
+            flow_category="personal_commission",
+            flow_type=segment["flow_type"],
+            title=f"单量提成·{segment['label']}",
+            description=description,
+            settlement_id=settlement.id,
+            operator=operator
+        )
 
     _create_salary_settlement_flow(
         session=session,
@@ -3599,6 +3822,7 @@ def _build_employee_whiteboard_data(
     """
     month_start, month_end = _get_month_start_end(year, month)
     days_in_month = calendar.monthrange(year, month)[1]
+    commission_month_data = _build_monthly_order_commission_data(session, year, month)
 
     # ===== 1. 门店订单量 =====
     active_store_objs = [
@@ -3970,12 +4194,23 @@ def _build_employee_whiteboard_data(
             round(private_order_count / workday_count, 2)
             if workday_count > 0 else None
         )
+        order_commission_data = _employee_order_commission_from_month_data(
+            commission_month_data,
+            employee_name,
+        )
 
         employee_rows.append({
             "employee_name": employee_name,
             "order_count": order_count,
             "private_order_count": private_order_count,
             "self_arrival_order_count": employee_self_arrival_order_count_map.get(employee_name, 0),
+            "commission_eligible_private_order_count": order_commission_data["eligible_private_order_count"],
+            "commission_new_store_private_order_count": order_commission_data["new_store_private_order_count"],
+            "commission_self_arrival_order_count": order_commission_data["self_arrival_order_count"],
+            "commission_total": order_commission_data["commission_total"],
+            "commission_tier_code": order_commission_data["tier_code"],
+            "commission_tier_label": order_commission_data["tier_label"],
+            "commission_tier_badge_class": order_commission_data["tier_badge_class"],
             "workday_count": workday_count,
             "candidate_workday_count": employee_candidate_workday_count_map.get(employee_name, 0),
             "low_private_workday_count": employee_low_private_workday_count_map.get(employee_name, 0),
@@ -4031,16 +4266,23 @@ def _build_employee_whiteboard_data(
 
     max_employee_order_count = max([row["order_count"] for row in employee_rows] or [1])
 
-    # 个人提成关键节点：660 起，每 50 单一个节点，至少展示到 860；
-    # 如果实际最高单量超过 860，则自动继续补节点。
-    commission_nodes = [660, 710, 760, 810, 860]
-    while commission_nodes[-1] < max_employee_order_count:
-        commission_nodes.append(commission_nodes[-1] + 50)
-
-    employee_axis_max = max(max_employee_order_count, commission_nodes[-1], 1)
+    commission_nodes = commission_month_data["thresholds"]["nodes"]
+    employee_axis_max = max(
+        max_employee_order_count,
+        commission_month_data["thresholds"]["big_result"],
+        1,
+    )
 
     for row in employee_rows:
         row["bar_percent"] = round(row["order_count"] / employee_axis_max * 100, 2)
+        row["commission_eligible_private_bar_percent"] = round(
+            row["commission_eligible_private_order_count"] / employee_axis_max * 100,
+            2,
+        )
+        row["commission_new_store_private_bar_percent"] = round(
+            row["commission_new_store_private_order_count"] / employee_axis_max * 100,
+            2,
+        )
         row["private_bar_percent"] = round(
             row["private_order_count"] / employee_axis_max * 100,
             2,
@@ -4052,11 +4294,11 @@ def _build_employee_whiteboard_data(
 
     commission_node_rows = [
         {
-            "value": node,
-            "percent": round(node / employee_axis_max * 100, 2),
+            **node,
+            "percent": round(node["value"] / employee_axis_max * 100, 2),
         }
         for node in commission_nodes
-        if node <= employee_axis_max
+        if node["value"] <= employee_axis_max
     ]
 
     # ===== 3. 本月考勤异常/请假记录 =====
@@ -4123,6 +4365,12 @@ def _build_employee_whiteboard_data(
         "employee_rows": employee_rows,
         "employee_count": len(employee_rows),
         "commission_nodes": commission_node_rows,
+        "commission_thresholds": commission_month_data["thresholds"],
+        "commission_previous_month_start": commission_month_data["previous_month_start"],
+        "commission_previous_month_end": commission_month_data["previous_month_end"],
+        "commission_previous_private_order_count": commission_month_data["previous_private_order_count"],
+        "commission_previous_excluded_new_store_order_count": commission_month_data["previous_excluded_new_store_order_count"],
+        "commission_protected_store_names": commission_month_data["protected_store_name_list"],
         "employee_axis_max": employee_axis_max,
         "sales_champion": sales_champion,
         "min_private_orders_per_workday": WHITEBOARD_MIN_PRIVATE_ORDERS_PER_WORKDAY,
@@ -4344,11 +4592,18 @@ def _build_my_assessment_data(
     elif can_filter_employee and employee_options:
         target_user = employee_options[0]
 
-    order_count = _get_employee_order_count_for_month(session, target_user.display_name, year, month)
-    commission_nodes = [660, 710, 760, 810, 860]
-    while commission_nodes[-1] < order_count:
-        commission_nodes.append(commission_nodes[-1] + 50)
-    axis_max = max(order_count, commission_nodes[-1], 1)
+    commission_month_data = _build_monthly_order_commission_data(session, year, month)
+    order_commission_data = _employee_order_commission_from_month_data(
+        commission_month_data,
+        target_user.display_name,
+    )
+    order_count = order_commission_data["total_order_count"]
+    commission_nodes = commission_month_data["thresholds"]["nodes"]
+    axis_max = max(
+        order_count,
+        commission_month_data["thresholds"]["big_result"],
+        1,
+    )
 
     target_employee_type = _employee_salary_type_for_month(session, target_user, year, month)
     personal_store_rows = _build_personal_store_target_rows(
@@ -4408,10 +4663,40 @@ def _build_my_assessment_data(
         "mistake_status_filter": mistake_status_filter,
         "order_count": order_count,
         "order_bar_percent": round(order_count / axis_max * 100, 2) if axis_max else 0,
+        "private_order_count": order_commission_data["private_order_count"],
+        "eligible_private_order_count": order_commission_data["eligible_private_order_count"],
+        "new_store_private_order_count": order_commission_data["new_store_private_order_count"],
+        "self_arrival_order_count": order_commission_data["self_arrival_order_count"],
+        "eligible_private_bar_percent": round(
+            order_commission_data["eligible_private_order_count"] / axis_max * 100,
+            2,
+        ),
+        "new_store_private_bar_percent": round(
+            order_commission_data["new_store_private_order_count"] / axis_max * 100,
+            2,
+        ),
+        "private_bar_percent": round(
+            order_commission_data["private_order_count"] / axis_max * 100,
+            2,
+        ),
+        "self_arrival_bar_percent": round(
+            order_commission_data["self_arrival_order_count"] / axis_max * 100,
+            2,
+        ),
+        "commission_total": order_commission_data["commission_total"],
+        "commission_tier_code": order_commission_data["tier_code"],
+        "commission_tier_label": order_commission_data["tier_label"],
+        "commission_tier_badge_class": order_commission_data["tier_badge_class"],
+        "commission_thresholds": commission_month_data["thresholds"],
+        "commission_previous_month_start": commission_month_data["previous_month_start"],
+        "commission_previous_month_end": commission_month_data["previous_month_end"],
+        "commission_previous_private_order_count": commission_month_data["previous_private_order_count"],
+        "commission_previous_excluded_new_store_order_count": commission_month_data["previous_excluded_new_store_order_count"],
+        "commission_protected_store_names": commission_month_data["protected_store_name_list"],
         "commission_nodes": [
-            {"value": node, "percent": round(node / axis_max * 100, 2)}
+            {**node, "percent": round(node["value"] / axis_max * 100, 2)}
             for node in commission_nodes
-            if node <= axis_max
+            if node["value"] <= axis_max
         ],
         "active_mistake_deduct_total": active_mistake_deduct_total,
         "personal_store_reached_count": reached_store_count,
@@ -17379,7 +17664,7 @@ async def employee_salary_settlement_generate_all(
         ).order_by(User.role, User.id)
     ).all()
 
-    all_order_count_map = _build_employee_order_count_map(
+    commission_month_data = _build_monthly_order_commission_data(
         session=session,
         year=salary_year,
         month=salary_month
@@ -17414,7 +17699,7 @@ async def employee_salary_settlement_generate_all(
                 year=salary_year,
                 month=salary_month,
                 operator=user,
-                all_order_count_map=all_order_count_map
+                commission_month_data=commission_month_data
             )
             updated_rows.append(_salary_settlement_payload(session, settlement))
 
