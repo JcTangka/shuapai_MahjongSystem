@@ -3357,7 +3357,7 @@
     <div class="card-header bg-white py-3">
         <div class="fw-bold"><i class="bi bi-person-lines-fill text-primary me-1"></i>我的本月订单量</div>
         <div class="small text-muted mt-1">
-            本月动态阶梯：基准 {{ my_assessment_data.commission_thresholds.base }}、达标 {{ my_assessment_data.commission_thresholds.target }}、冲刺 {{ my_assessment_data.commission_thresholds.sprint }}、爆单 {{ my_assessment_data.commission_thresholds.burst }}、大结果 {{ my_assessment_data.commission_thresholds.big_result }} 单；仅阶梯有效私域组局参与冲档。
+            本月动态阶梯：基准 {{ my_assessment_data.commission_thresholds.base }}、达标 {{ my_assessment_data.commission_thresholds.target }}、冲刺 {{ my_assessment_data.commission_thresholds.sprint }}、爆单 {{ my_assessment_data.commission_thresholds.burst }}、大结果 {{ my_assessment_data.commission_thresholds.big_result }} 单；全部订单统一计算一次 2 元/单基础提成，仅阶梯有效私域超过基准档的部分按最高已达档位追加 4 / 6 / 8 / 10 元/单。
         </div>
     </div>
     <div class="card-body">
@@ -3379,13 +3379,13 @@
                         {% endif %}
                         {% if my_assessment_data.new_store_private_order_count > 0 %}
                         <div class="whiteboard-bar-fill employee-order-segment employee-new-store-orders {% if my_assessment_data.eligible_private_order_count == 0 and my_assessment_data.self_arrival_order_count == 0 %}employee-order-only-segment{% elif my_assessment_data.eligible_private_order_count == 0 %}employee-order-first-segment{% elif my_assessment_data.self_arrival_order_count == 0 %}employee-order-last-segment{% endif %}"
-                             data-order-tooltip="新门店保护期私域：{{ my_assessment_data.new_store_private_order_count }} 单（固定 2 元/单，不参与冲档）"
+                             data-order-tooltip="新门店保护期私域：{{ my_assessment_data.new_store_private_order_count }} 单（已包含在全部订单 2 元/单基础提成中，不参与阶梯追加）"
                              tabindex="0"
                              style="left: {{ my_assessment_data.eligible_private_bar_percent }}%; width: {{ my_assessment_data.new_store_private_bar_percent }}%;"></div>
                         {% endif %}
                         {% if my_assessment_data.self_arrival_order_count > 0 %}
                         <div class="whiteboard-bar-fill employee-order-segment employee-self-arrival-orders {% if my_assessment_data.private_order_count == 0 %}employee-order-only-segment{% else %}employee-order-last-segment{% endif %}"
-                             data-order-tooltip="自主到店：{{ my_assessment_data.self_arrival_order_count }} 单（固定 2 元/单）"
+                             data-order-tooltip="自主到店：{{ my_assessment_data.self_arrival_order_count }} 单（已包含在全部订单 2 元/单基础提成中，不参与阶梯追加）"
                              tabindex="0"
                              style="left: {{ my_assessment_data.private_bar_percent }}%; width: {{ my_assessment_data.self_arrival_bar_percent }}%;"></div>
                         {% endif %}
@@ -3728,7 +3728,7 @@
                     <i class="bi bi-person-lines-fill text-primary me-1"></i>员工本月订单量对比
                 </div>
                 <div class="small text-muted mt-1">
-                    仅展示本月订单量大于 0 的员工。动态阶梯基准取 {{ whiteboard_data.commission_previous_month_start }} 至 {{ whiteboard_data.commission_previous_month_end }} 品牌私域组局 {{ whiteboard_data.commission_previous_private_order_count }} 单 ÷ 6 后四舍五入；后续每档为 max（上一档 + 10，上一档 × 105% 四舍五入）。只有阶梯有效私域组局参与冲档；新门店保护期私域和自主到店均固定 2 元/单。销冠仍按全部私域组局单量 ÷ 有效上班日数评选。
+                    仅展示本月订单量大于 0 的员工。动态阶梯基准取 {{ whiteboard_data.commission_previous_month_start }} 至 {{ whiteboard_data.commission_previous_month_end }} 品牌有效私域组局 {{ whiteboard_data.commission_previous_private_order_count }} 单 ÷ 上月 {{ whiteboard_data.commission_previous_days_in_month }} 天 × 本月 {{ whiteboard_data.commission_days_in_month }} 天 ÷ 6，最后四舍五入；后续每档按上一档 × 105% 向上取整。全部订单统一计算一次 2 元/单基础提成；只有阶梯有效私域超过基准档的部分，才按最高已达档位追加 4 / 6 / 8 / 10 元/单，新门店保护期私域和自主到店不参与阶梯追加。销冠仍按全部私域组局单量 ÷ 有效上班日数评选。
                 </div>
                 <div class="small text-muted mt-2 d-flex align-items-center gap-3 flex-wrap">
                     <span class="whiteboard-order-legend">
@@ -3799,14 +3799,14 @@
                         {% endif %}
                         {% if row.commission_new_store_private_order_count > 0 %}
                         <div class="whiteboard-bar-fill employee-order-segment employee-new-store-orders {% if row.commission_eligible_private_order_count == 0 and row.self_arrival_order_count == 0 %}employee-order-only-segment{% elif row.commission_eligible_private_order_count == 0 %}employee-order-first-segment{% elif row.self_arrival_order_count == 0 %}employee-order-last-segment{% endif %}"
-                             data-order-tooltip="新门店保护期私域：{{ row.commission_new_store_private_order_count }} 单（固定 2 元/单，不参与冲档）"
+                             data-order-tooltip="新门店保护期私域：{{ row.commission_new_store_private_order_count }} 单（已包含在全部订单 2 元/单基础提成中，不参与阶梯追加）"
                              aria-label="新门店保护期私域：{{ row.commission_new_store_private_order_count }} 单"
                              tabindex="0"
                              style="left: {{ row.commission_eligible_private_bar_percent }}%; width: {{ row.commission_new_store_private_bar_percent }}%;"></div>
                         {% endif %}
                         {% if row.self_arrival_order_count > 0 %}
                         <div class="whiteboard-bar-fill employee-order-segment employee-self-arrival-orders {% if row.private_order_count == 0 %}employee-order-only-segment{% else %}employee-order-last-segment{% endif %}"
-                             data-order-tooltip="自主到店：{{ row.self_arrival_order_count }} 单（固定 2 元/单）"
+                             data-order-tooltip="自主到店：{{ row.self_arrival_order_count }} 单（已包含在全部订单 2 元/单基础提成中，不参与阶梯追加）"
                              aria-label="自主到店：{{ row.self_arrival_order_count }} 单"
                              tabindex="0"
                              style="left: {{ row.private_bar_percent }}%; width: {{ row.self_arrival_bar_percent }}%;"></div>
@@ -3862,7 +3862,7 @@
                  class="whiteboard-store-drawer d-none"
                  data-whiteboard-employee-drawer="{{ loop.index }}">
                 <div class="whiteboard-store-drawer-title d-flex align-items-center gap-2 flex-wrap">
-                    <span>{{ row.employee_name }} 本月门店目标订单量明细</span>
+                    <span>{{ row.employee_name }} 本月门店目标订单量明细（仅统计私域：常规单 + 溢出单）</span>
                     {% if row.active_duty_store_names %}
                     <span class="badge rounded-pill whiteboard-current-store-badge">
                         当前带店：{{ row.active_duty_store_names|join('、') }}
@@ -3926,7 +3926,7 @@
                     </div>
                 </div>
                 {% else %}
-                <div class="text-muted py-2">该员工本月暂无可展示的门店目标订单明细。</div>
+                <div class="text-muted py-2">该员工本月暂无可展示的门店私域目标订单明细。</div>
                 {% endfor %}
             </div>
         </div>

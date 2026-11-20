@@ -15,7 +15,7 @@ import re
 import secrets
 import string
 import threading
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from sqlmodel import Session, select
 from sqlalchemy import func, or_, and_, delete, text  # 用于搜索逻辑；text 用于团队硬删除时兼容清理工资结算表
 from sqlalchemy.exc import IntegrityError
@@ -2112,6 +2112,11 @@ def _salary_flow_type_label(flow_type: str) -> str:
         "personal_order_commission_big_result_plus": "单量提成·大结果及以上",
         "personal_order_commission_new_store": "单量提成·新门店保护期",
         "personal_order_commission_self_arrival": "单量提成·自主到店",
+        "personal_order_commission_all_orders_base": "单量提成·全部订单基础提成",
+        "personal_order_commission_tier_extra_target": "单量提成·达标档阶梯追加",
+        "personal_order_commission_tier_extra_sprint": "单量提成·冲刺档阶梯追加",
+        "personal_order_commission_tier_extra_burst": "单量提成·爆单档阶梯追加",
+        "personal_order_commission_tier_extra_big_result": "单量提成·大结果档阶梯追加",
         "personal_store_target_bonus": "个人门店达标奖",
         "team_bonus_share": "团队奖金分摊",
         "team_target_bonus_share": "团队目标奖金分摊",
@@ -2469,7 +2474,13 @@ def _build_my_salary_data(
 
 ORDER_COMMISSION_DIVISOR = 6
 ORDER_COMMISSION_GROWTH_RATE = Decimal("1.05")
-ORDER_COMMISSION_MIN_TIER_STEP = 10
+ORDER_COMMISSION_BASE_UNIT_PRICE = 2.0
+ORDER_COMMISSION_TIER_EXTRA_UNIT_PRICES = {
+    "target": 4.0,
+    "sprint": 6.0,
+    "burst": 8.0,
+    "big_result": 10.0,
+}
 
 
 def _round_half_up_int(value) -> int:
@@ -2484,15 +2495,29 @@ def _previous_calendar_month_range(year: int, month: int) -> Tuple[date, date]:
 
 
 def _next_order_commission_threshold(previous_threshold: int) -> int:
-    percentage_threshold = _round_half_up_int(
-        Decimal(previous_threshold) * ORDER_COMMISSION_GROWTH_RATE
+    return int(
+        (Decimal(previous_threshold) * ORDER_COMMISSION_GROWTH_RATE).to_integral_value(
+            rounding=ROUND_CEILING
+        )
     )
-    return max(previous_threshold + ORDER_COMMISSION_MIN_TIER_STEP, percentage_threshold)
 
 
-def _dynamic_order_commission_thresholds(previous_private_order_count: int) -> dict:
+def _dynamic_order_commission_thresholds(
+        previous_private_order_count: int,
+        previous_days_in_month: int,
+        current_days_in_month: int,
+) -> dict:
+    """
+    按“上月品牌有效私域 ÷ 上月天数 × 本月天数 ÷ 6”计算基准档。
+    中间过程保留 Decimal 精度，仅在最终基准档取 ROUND_HALF_UP 整数。
+    """
+    if previous_days_in_month <= 0 or current_days_in_month <= 0:
+        raise ValueError("自然月天数必须大于 0")
     base = _round_half_up_int(
-        Decimal(int(previous_private_order_count or 0)) / Decimal(ORDER_COMMISSION_DIVISOR)
+        Decimal(int(previous_private_order_count or 0))
+        / Decimal(previous_days_in_month)
+        * Decimal(current_days_in_month)
+        / Decimal(ORDER_COMMISSION_DIVISOR)
     )
     target = _next_order_commission_threshold(base)
     sprint = _next_order_commission_threshold(target)
@@ -2595,91 +2620,45 @@ def _order_commission_tier_status(eligible_private_order_count: int, thresholds:
 def _calculate_order_commission_breakdown(counts: dict, month_data: dict) -> dict:
     thresholds = month_data["thresholds"]
     eligible_count = int(counts.get("eligible_private_order_count") or 0)
+    total_count = int(counts.get("total_order_count") or 0)
     base = thresholds["base"]
-    target = thresholds["target"]
-    sprint = thresholds["sprint"]
-    burst = thresholds["burst"]
-    big_result = thresholds["big_result"]
-
-    segment_specs = [
-        ("base", "基准档以内", "personal_order_commission_base", min(eligible_count, base), 2.0),
-        (
-            "target",
-            "基准档至达标档",
-            "personal_order_commission_target",
-            min(max(eligible_count - base, 0), target - base),
-            4.0,
-        ),
-        (
-            "sprint",
-            "达标档至冲刺档",
-            "personal_order_commission_sprint",
-            min(max(eligible_count - target, 0), sprint - target),
-            5.0,
-        ),
-        (
-            "burst",
-            "冲刺档至爆单档",
-            "personal_order_commission_burst",
-            min(max(eligible_count - sprint, 0), burst - sprint),
-            8.0,
-        ),
-        (
-            "big_result",
-            "爆单档至大结果档",
-            "personal_order_commission_big_result",
-            min(max(eligible_count - burst, 0), big_result - burst),
-            10.0,
-        ),
-        (
-            "big_result_plus",
-            "大结果档及以上",
-            "personal_order_commission_big_result_plus",
-            max(eligible_count - big_result, 0),
-            10.0,
-        ),
-    ]
-    segments = []
-    for code, label, flow_type, order_count, unit_price in segment_specs:
-        amount = round(order_count * unit_price, 2)
-        segments.append({
-            "code": code,
-            "label": label,
-            "flow_type": flow_type,
-            "order_count": order_count,
-            "unit_price": unit_price,
-            "amount": amount,
-        })
-
-    new_store_count = int(counts.get("new_store_private_order_count") or 0)
-    self_arrival_count = int(counts.get("self_arrival_order_count") or 0)
-    fixed_segments = [
-        {
-            "code": "new_store",
-            "label": "新门店保护期",
-            "flow_type": "personal_order_commission_new_store",
-            "order_count": new_store_count,
-            "unit_price": 2.0,
-            "amount": round(new_store_count * 2.0, 2),
-        },
-        {
-            "code": "self_arrival",
-            "label": "自主到店",
-            "flow_type": "personal_order_commission_self_arrival",
-            "order_count": self_arrival_count,
-            "unit_price": 2.0,
-            "amount": round(self_arrival_count * 2.0, 2),
-        },
-    ]
     tier_status = _order_commission_tier_status(eligible_count, thresholds)
-    all_segments = segments + fixed_segments
+    tier_code = tier_status["code"]
+    tier_extra_unit_price = ORDER_COMMISSION_TIER_EXTRA_UNIT_PRICES.get(tier_code, 0.0)
+    tier_extra_order_count = (
+        max(eligible_count - base, 0)
+        if tier_extra_unit_price > 0 else 0
+    )
+
+    base_segment = {
+        "code": "all_orders_base",
+        "label": "全部订单基础提成",
+        "flow_type": "personal_order_commission_all_orders_base",
+        "order_count": total_count,
+        "unit_price": ORDER_COMMISSION_BASE_UNIT_PRICE,
+        "amount": round(total_count * ORDER_COMMISSION_BASE_UNIT_PRICE, 2),
+    }
+    tier_extra_segment = {
+        "code": "tier_extra",
+        "tier_code": tier_code,
+        "label": f"{tier_status['label']}阶梯追加",
+        "flow_type": f"personal_order_commission_tier_extra_{tier_code}",
+        "order_count": tier_extra_order_count,
+        "unit_price": tier_extra_unit_price,
+        "amount": round(tier_extra_order_count * tier_extra_unit_price, 2),
+    }
+    segments = [base_segment, tier_extra_segment]
     result = {
         **counts,
-        "segments": all_segments,
+        "segments": segments,
         "tier_segments": segments,
-        "fixed_segments": fixed_segments,
-        "commission_total": round(sum(item["amount"] for item in all_segments), 2),
-        "tier_code": tier_status["code"],
+        "fixed_segments": [],
+        "base_commission_amount": base_segment["amount"],
+        "tier_extra_order_count": tier_extra_order_count,
+        "tier_extra_unit_price": tier_extra_unit_price,
+        "tier_extra_amount": tier_extra_segment["amount"],
+        "commission_total": round(sum(item["amount"] for item in segments), 2),
+        "tier_code": tier_code,
         "tier_label": tier_status["label"],
         "tier_badge_class": tier_status["badge_class"],
         "thresholds": thresholds,
@@ -2694,6 +2673,8 @@ def _build_monthly_order_commission_data(
 ) -> dict:
     month_start, month_end = _get_month_start_end(year, month)
     previous_month_start, previous_month_end = _previous_calendar_month_range(year, month)
+    days_in_month = (month_end - month_start).days + 1
+    previous_days_in_month = (previous_month_end - previous_month_start).days + 1
     protected_store_names = _commission_protected_new_store_names(session, year, month)
     all_formed_games = session.exec(
         select(GameRecord).where(GameRecord.status == "formed")
@@ -2718,7 +2699,11 @@ def _build_monthly_order_commission_data(
             if employee_name:
                 current_games_by_employee.setdefault(employee_name, []).append(game)
 
-    thresholds = _dynamic_order_commission_thresholds(previous_private_order_count)
+    thresholds = _dynamic_order_commission_thresholds(
+        previous_private_order_count,
+        previous_days_in_month,
+        days_in_month,
+    )
     return {
         "year": year,
         "month": month,
@@ -2726,6 +2711,8 @@ def _build_monthly_order_commission_data(
         "month_end": month_end,
         "previous_month_start": previous_month_start,
         "previous_month_end": previous_month_end,
+        "days_in_month": days_in_month,
+        "previous_days_in_month": previous_days_in_month,
         "previous_private_order_count": previous_private_order_count,
         "previous_excluded_new_store_order_count": previous_excluded_new_store_order_count,
         "protected_store_names": protected_store_names,
@@ -3384,8 +3371,10 @@ def _calculate_salary_for_one_employee(
     )
     previous_period_text = (
         f"{commission_month_data['previous_month_start']} 至 "
-        f"{commission_month_data['previous_month_end']} 品牌私域组局 "
-        f"{commission_month_data['previous_private_order_count']} 单 ÷ {ORDER_COMMISSION_DIVISOR}"
+        f"{commission_month_data['previous_month_end']} 品牌有效私域组局 "
+        f"{commission_month_data['previous_private_order_count']} 单 ÷ "
+        f"{commission_month_data['previous_days_in_month']} 天 × "
+        f"{commission_month_data['days_in_month']} 天 ÷ {ORDER_COMMISSION_DIVISOR}"
     )
     resignation_scope_text = (
         f"离职员工仅统计至 {commission_end_date}。"
@@ -3393,32 +3382,30 @@ def _calculate_salary_for_one_employee(
     )
     protected_store_text = "、".join(commission_month_data["protected_store_name_list"])
 
-    # 流水页面按 ID 倒序展示，因此反向写入，使页面最终按基准档到固定提成项排列。
+    # 流水页面按 ID 倒序展示，因此反向写入，使基础提成显示在阶梯追加之前。
     for segment in reversed(order_commission_data["segments"]):
         if segment["order_count"] <= 0:
             continue
-        if segment["code"] == "new_store":
+        if segment["code"] == "all_orders_base":
             description = (
-                f"{year}年{month}月新门店保护期私域组局 {segment['order_count']} 单 × "
+                f"{year}年{month}月全部订单 {segment['order_count']} 单 × "
                 f"{segment['unit_price']:.0f} 元/单 = {segment['amount']:.2f} 元；"
-                "该部分不进入动态阶梯分子。"
+                f"其中阶梯有效私域 {order_commission_data['eligible_private_order_count']} 单、"
+                f"新门店保护期私域 {order_commission_data['new_store_private_order_count']} 单、"
+                f"自主到店 {order_commission_data['self_arrival_order_count']} 单。"
+                "三类订单均只在本基础提成中计算一次；新门店保护期私域和自主到店不参与阶梯追加。"
                 + (f"保护期门店：{protected_store_text}。" if protected_store_text else "")
-                + resignation_scope_text
-            )
-        elif segment["code"] == "self_arrival":
-            description = (
-                f"{year}年{month}月自主到店 {segment['order_count']} 单 × "
-                f"{segment['unit_price']:.0f} 元/单 = {segment['amount']:.2f} 元；"
-                "自主到店固定 2 元/单，不参与动态阶梯。"
                 + resignation_scope_text
             )
         else:
             description = (
-                f"{year}年{month}月阶梯有效私域组局共 "
-                f"{order_commission_data['eligible_private_order_count']} 单；"
-                f"{segment['label']}获得 {segment['order_count']} 单 × "
-                f"{segment['unit_price']:.0f} 元/单 = {segment['amount']:.2f} 元。"
-                f"当月阶梯：{threshold_text}；基准来源：{previous_period_text}，四舍五入。"
+                f"{year}年{month}月达到 {order_commission_data['tier_label']}；"
+                f"阶梯有效私域 {order_commission_data['eligible_private_order_count']} 单中，"
+                f"基准档 {thresholds['base']} 单以上的 {segment['order_count']} 单 × "
+                f"追加 {segment['unit_price']:.0f} 元/单 = {segment['amount']:.2f} 元。"
+                "本追加不含新门店保护期私域和自主到店。"
+                f"当月阶梯：{threshold_text}；基准来源：{previous_period_text}，最终四舍五入；"
+                "后续各档按上一档 × 1.05 向上取整。"
                 + resignation_scope_text
             )
         _create_salary_settlement_flow(
@@ -3980,6 +3967,8 @@ def _build_employee_whiteboard_data(
     3. 员工订单量：
        按 GameRecord.who_did 统计。
        0 单员工不展示。
+       员工对应门店目标的实际量与达标判断仅统计 normal / overflow；
+       自主到店不参与个人门店目标达标。
 
     4. 考勤异常：
        展示 EmployeeAttendanceRecord 本月记录。
@@ -4008,7 +3997,7 @@ def _build_employee_whiteboard_data(
     employee_private_order_count_map = {}
     employee_daily_private_order_count_map = {}
     employee_self_arrival_order_count_map = {}
-    employee_store_order_count_map = {}
+    employee_store_private_order_count_map = {}
 
     for g in month_games:
         store_name = _normalize_text(g.store_name)
@@ -4020,11 +4009,11 @@ def _build_employee_whiteboard_data(
         who_did = _normalize_text(g.who_did)
         if who_did:
             employee_order_count_map[who_did] = employee_order_count_map.get(who_did, 0) + 1
-            if _normalize_text(g.record_source) == FORMED_SOURCE_SELF_ARRIVAL:
+            if source == FORMED_SOURCE_SELF_ARRIVAL:
                 employee_self_arrival_order_count_map[who_did] = (
                     employee_self_arrival_order_count_map.get(who_did, 0) + 1
                 )
-            else:
+            elif source in {FORMED_SOURCE_NORMAL, FORMED_SOURCE_OVERFLOW}:
                 employee_private_order_count_map[who_did] = (
                     employee_private_order_count_map.get(who_did, 0) + 1
                 )
@@ -4032,11 +4021,11 @@ def _build_employee_whiteboard_data(
                 employee_daily_private_order_count_map[daily_private_key] = (
                     employee_daily_private_order_count_map.get(daily_private_key, 0) + 1
                 )
-            if store_name:
-                employee_store_key = (who_did, store_name)
-                employee_store_order_count_map[employee_store_key] = (
-                    employee_store_order_count_map.get(employee_store_key, 0) + 1
-                )
+                if store_name:
+                    employee_store_key = (who_did, store_name)
+                    employee_store_private_order_count_map[employee_store_key] = (
+                        employee_store_private_order_count_map.get(employee_store_key, 0) + 1
+                    )
 
     store_rows = []
     for store_obj in active_store_objs:
@@ -4153,7 +4142,7 @@ def _build_employee_whiteboard_data(
     }
     available_employee_store_names = sorted({
         employee_name
-        for (employee_name, store_name), order_count in employee_store_order_count_map.items()
+        for (employee_name, store_name), order_count in employee_store_private_order_count_map.items()
         if order_count > 0 and store_name in store_target_map
         and employee_name in eligible_employee_store_names
     })
@@ -4164,7 +4153,7 @@ def _build_employee_whiteboard_data(
         selected_employee_name = "all"
 
     all_employee_store_rows = []
-    for (employee_name, store_name), order_count in employee_store_order_count_map.items():
+    for (employee_name, store_name), order_count in employee_store_private_order_count_map.items():
         if order_count <= 0:
             continue
         if store_name not in store_target_map:
@@ -4567,6 +4556,8 @@ def _build_employee_whiteboard_data(
         "commission_thresholds": commission_month_data["thresholds"],
         "commission_previous_month_start": commission_month_data["previous_month_start"],
         "commission_previous_month_end": commission_month_data["previous_month_end"],
+        "commission_days_in_month": commission_month_data["days_in_month"],
+        "commission_previous_days_in_month": commission_month_data["previous_days_in_month"],
         "commission_previous_private_order_count": commission_month_data["previous_private_order_count"],
         "commission_previous_excluded_new_store_order_count": commission_month_data["previous_excluded_new_store_order_count"],
         "commission_protected_store_names": commission_month_data["protected_store_name_list"],
@@ -4587,7 +4578,7 @@ def _build_personal_store_target_rows(
         month: int,
         employee_type: Optional[str] = None
 ) -> List[dict]:
-    """Build per-store personal target rows for one bonus-eligible employee."""
+    """Build per-store personal targets from private orders (normal + overflow) only."""
     if not _employee_participates_personal_store_bonus(employee, employee_type):
         return []
 
@@ -4629,6 +4620,9 @@ def _build_personal_store_target_rows(
 
     store_order_count_map = {}
     for game in games:
+        source = _normalize_text(game.record_source) or FORMED_SOURCE_NORMAL
+        if source not in {FORMED_SOURCE_NORMAL, FORMED_SOURCE_OVERFLOW}:
+            continue
         store_name = _normalize_text(game.store_name)
         if store_name and store_name in store_target_map:
             store_order_count_map[store_name] = store_order_count_map.get(store_name, 0) + 1
