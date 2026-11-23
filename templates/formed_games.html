@@ -442,6 +442,70 @@
 
 
 <div id="formedGamesContentArea">
+<div class="card border-0 shadow-sm mb-4" id="storeBalancePanel"
+     data-version="{{ current_store_balance.balance_version or 0 }}">
+    <div class="card-body">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+            <div>
+                <div class="d-flex align-items-center">
+                    <i class="bi bi-wallet2 text-primary me-2 fs-5"></i>
+                    <h6 class="mb-0 fw-bold">当前门店账户余额</h6>
+                </div>
+                <div class="small text-muted mt-1">实时余额不受日期、来源和收款状态筛选影响；多人操作时约每 5 秒自动同步。</div>
+            </div>
+            <div class="small text-muted" id="storeBalanceUpdatedText">
+                {% if current_store_balance.updated_at %}
+                最近更新：{{ current_store_balance.updated_at }}{% if current_store_balance.updated_by %} · {{ current_store_balance.updated_by }}{% endif %}
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="row g-3">
+            <div class="col-md-6">
+                <div class="border rounded-3 p-3 h-100 {% if (current_store_balance.wechat_balance or 0) < 0 %}border-danger bg-danger bg-opacity-10{% else %}bg-light{% endif %}"
+                     id="wechatBalanceCard">
+                    <div class="d-flex align-items-start justify-content-between gap-2">
+                        <div>
+                            <div class="stat-card-title">微信账户余额</div>
+                            <div class="fs-3 fw-bold {% if (current_store_balance.wechat_balance or 0) < 0 %}text-danger{% else %}text-success{% endif %}"
+                                 id="wechatBalanceValue">¥{{ '%.2f'|format(current_store_balance.wechat_balance or 0) }}</div>
+                        </div>
+                        {% if can_adjust_store_balance %}
+                        <button type="button" class="btn btn-sm btn-outline-primary"
+                                onclick="openStoreBalanceAdjust('wechat')">
+                            <i class="bi bi-pencil-square me-1"></i>调整余额
+                        </button>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="border rounded-3 p-3 h-100 {% if (current_store_balance.alipay_balance or 0) < 0 %}border-danger bg-danger bg-opacity-10{% else %}bg-light{% endif %}"
+                     id="alipayBalanceCard">
+                    <div class="d-flex align-items-start justify-content-between gap-2">
+                        <div>
+                            <div class="stat-card-title">支付宝账户余额</div>
+                            <div class="fs-3 fw-bold {% if (current_store_balance.alipay_balance or 0) < 0 %}text-danger{% else %}text-primary{% endif %}"
+                                 id="alipayBalanceValue">¥{{ '%.2f'|format(current_store_balance.alipay_balance or 0) }}</div>
+                        </div>
+                        {% if can_adjust_store_balance %}
+                        <button type="button" class="btn btn-sm btn-outline-primary"
+                                onclick="openStoreBalanceAdjust('alipay')">
+                            <i class="bi bi-pencil-square me-1"></i>调整余额
+                        </button>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="alert alert-danger mt-3 mb-0 {% if not current_store_balance.has_negative_balance %}d-none{% endif %}"
+             id="negativeStoreBalanceWarning">
+            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+            当前门店存在负数账户余额。系统允许继续结算和支出，请及时核对或调整实际余额。
+        </div>
+    </div>
+</div>
 {% if source_filter == 'normal' %}
 <div class="card border-0 shadow-sm mb-4">
     <div class="card-body">
@@ -1597,6 +1661,7 @@
                                                name="room_fee"
                                                id="overflow_add_room_fee"
                                                value="0">
+                                        <div class="form-text">保存后默认从当前门店微信余额扣除；后续修改按差额调整。</div>
                                     </div>
 
                                     <div class="col-12">
@@ -1790,6 +1855,7 @@
                                     <div class="col-md-6">
                                         <label class="form-label fw-bold">预定金额 </label>
                                         <input type="number" step="0.1" min="0" class="form-control" name="room_fee" id="overflow_edit_room_fee" value="0" >
+                                        <div class="form-text">预定金额默认计入当前门店微信账户支出。</div>
                                     </div>
                                     <div class="col-12">
                                         <label class="form-label fw-bold">特殊备注</label>
@@ -2120,6 +2186,41 @@
 </div>
 
 <!-- 结算弹窗 -->
+{% if can_adjust_store_balance %}
+<div class="modal fade" id="storeBalanceAdjustModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-wallet2 me-2"></i>调整当前门店余额</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form id="storeBalanceAdjustForm" onsubmit="return submitStoreBalanceAdjust(event)">
+                <div class="modal-body">
+                    <input type="hidden" name="store_name" value="{{ current_store }}">
+                    <input type="hidden" name="account" id="storeBalanceAdjustAccount">
+                    <input type="hidden" name="expected_version" id="storeBalanceExpectedVersion"
+                           value="{{ current_store_balance.balance_version or 0 }}">
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold" id="storeBalanceAdjustLabel">当前余额</label>
+                        <input type="number" step="0.01" class="form-control form-control-lg"
+                               name="amount" id="storeBalanceAdjustAmount" required>
+                        <div class="form-text">这里设置的是调整后的绝对余额；允许填写负数。</div>
+                    </div>
+                    <div class="alert alert-warning mb-0">
+                        如果提交前有其他人完成结算或支出，系统会阻止覆盖，并要求按最新余额重新确认。
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">确认调整</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 <div class="modal fade" id="paymentModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -2177,6 +2278,110 @@
     let formedGamesInfiniteObserver = null;
     let formedGamesLoadingMore = false;
     const CURRENT_SOURCE_FILTER = {{ (source_filter or 'normal')|tojson|safe }};
+    const CURRENT_STORE_NAME = {{ (current_store or '')|tojson|safe }};
+
+    function setStoreBalanceCardState(account, amount) {
+        const valueEl = document.getElementById(`${account}BalanceValue`);
+        const cardEl = document.getElementById(`${account}BalanceCard`);
+        if (!valueEl || !cardEl) return;
+
+        valueEl.textContent = `¥${Number(amount || 0).toFixed(2)}`;
+        valueEl.classList.toggle('text-danger', amount < 0);
+        if (account === 'wechat') {
+            valueEl.classList.toggle('text-success', amount >= 0);
+        } else {
+            valueEl.classList.toggle('text-primary', amount >= 0);
+        }
+        cardEl.classList.toggle('border-danger', amount < 0);
+        cardEl.classList.toggle('bg-danger', amount < 0);
+        cardEl.classList.toggle('bg-opacity-10', amount < 0);
+        cardEl.classList.toggle('bg-light', amount >= 0);
+    }
+
+    function updateStoreBalanceDisplay(balance) {
+        if (!balance) return;
+        const wechat = Number(balance.wechat_balance || 0);
+        const alipay = Number(balance.alipay_balance || 0);
+        setStoreBalanceCardState('wechat', wechat);
+        setStoreBalanceCardState('alipay', alipay);
+
+        const panel = document.getElementById('storeBalancePanel');
+        if (panel) panel.dataset.version = String(balance.balance_version || 0);
+        const expectedVersion = document.getElementById('storeBalanceExpectedVersion');
+        if (expectedVersion) expectedVersion.value = String(balance.balance_version || 0);
+
+        const warning = document.getElementById('negativeStoreBalanceWarning');
+        if (warning) warning.classList.toggle('d-none', !(wechat < 0 || alipay < 0));
+
+        const updatedText = document.getElementById('storeBalanceUpdatedText');
+        if (updatedText) {
+            updatedText.textContent = balance.updated_at
+                ? `最近更新：${balance.updated_at}${balance.updated_by ? ` · ${balance.updated_by}` : ''}`
+                : '';
+        }
+    }
+
+    async function refreshCurrentStoreBalance() {
+        if (!CURRENT_STORE_NAME || document.hidden) return;
+        try {
+            const resp = await fetch(`/api/store-balance?store=${encodeURIComponent(CURRENT_STORE_NAME)}`, {
+                headers: {'X-Requested-With': 'XMLHttpRequest'},
+                cache: 'no-store',
+            });
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (data.ok) updateStoreBalanceDisplay(data.store_balance);
+        } catch (err) {
+            console.debug('余额静默刷新失败', err);
+        }
+    }
+
+    function balanceValueNumber(account) {
+        const text = document.getElementById(`${account}BalanceValue`)?.textContent || '0';
+        return Number(text.replace(/[^0-9.-]/g, '')) || 0;
+    }
+
+    function openStoreBalanceAdjust(account) {
+        const modalEl = document.getElementById('storeBalanceAdjustModal');
+        if (!modalEl) return;
+        document.getElementById('storeBalanceAdjustAccount').value = account;
+        document.getElementById('storeBalanceAdjustLabel').textContent =
+            account === 'wechat' ? '微信账户调整后余额' : '支付宝账户调整后余额';
+        document.getElementById('storeBalanceAdjustAmount').value =
+            balanceValueNumber(account).toFixed(2);
+        document.getElementById('storeBalanceExpectedVersion').value =
+            document.getElementById('storeBalancePanel')?.dataset.version || '0';
+        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    }
+
+    async function submitStoreBalanceAdjust(event) {
+        event.preventDefault();
+        const form = event.currentTarget;
+        try {
+            const resp = await fetch('/formed-games/store-balance/adjust', {
+                method: 'POST',
+                headers: {'X-Requested-With': 'XMLHttpRequest'},
+                body: new FormData(form),
+            });
+            const data = await resp.json();
+            if (data.store_balance) updateStoreBalanceDisplay(data.store_balance);
+            if (!resp.ok || !data.ok) {
+                if (resp.status === 409) {
+                    const account = document.getElementById('storeBalanceAdjustAccount').value;
+                    document.getElementById('storeBalanceAdjustAmount').value =
+                        balanceValueNumber(account).toFixed(2);
+                }
+                alert(data.message || '余额调整失败');
+                return false;
+            }
+
+            bootstrap.Modal.getInstance(document.getElementById('storeBalanceAdjustModal'))?.hide();
+            return false;
+        } catch (err) {
+            alert(err.message || '余额调整失败');
+            return false;
+        }
+    }
 
     function getRenderedGameRowCount() {
         return document.querySelectorAll('#formedGamesContentArea tbody tr[id^="game-row-"]').length;
@@ -3970,6 +4175,12 @@
         maybeAutoOrderEnd('overflow_add');
         initTooltips();
         setupFormedGamesInfiniteScroll();
+        refreshCurrentStoreBalance();
+        window.setInterval(refreshCurrentStoreBalance, 5000);
+        window.addEventListener('focus', refreshCurrentStoreBalance);
+        document.addEventListener('visibilitychange', function () {
+            if (!document.hidden) refreshCurrentStoreBalance();
+        });
 
         const wechatInput = document.getElementById('inputWechat');
         const alipayInput = document.getElementById('inputAlipay');

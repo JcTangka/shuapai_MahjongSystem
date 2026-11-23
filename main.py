@@ -5549,10 +5549,257 @@ PAYMENT_TYPE_ALIPAY = "alipay"
 PAYMENT_TYPE_NORMAL_WECHAT = "normal_wechat_shuapai9725"
 PAYMENT_TYPE_ENTERPRISE_WECHAT_RED_PACKET = "enterprise_wechat_red_packet_shuapai888"
 
+STORE_BALANCE_ACCOUNT_WECHAT = "wechat"
+STORE_BALANCE_ACCOUNT_ALIPAY = "alipay"
+STORE_BALANCE_ACCOUNTS = {
+    STORE_BALANCE_ACCOUNT_WECHAT,
+    STORE_BALANCE_ACCOUNT_ALIPAY,
+}
+
 ACTIVE_PAYMENT_TYPES = (
     PAYMENT_TYPE_ENTERPRISE_WECHAT,
     PAYMENT_TYPE_ALIPAY,
 )
+
+
+def _round_money(value) -> float:
+    return round(_safe_float(value), 2)
+
+
+def _begin_immediate_write(session: Session) -> None:
+    """
+    get_current_user 已经可能触发了一个只读事务；先结束它，再抢占 SQLite 写锁。
+    后续读旧值、算差额、写业务记录和写余额都处于同一个事务，避免并发覆盖。
+    """
+    if session.in_transaction():
+        session.rollback()
+    session.execute(text("BEGIN IMMEDIATE"))
+
+
+def _can_adjust_store_balance(user: Optional[User]) -> bool:
+    return bool(user and (user.role == "admin" or _is_logistics_employee(user)))
+
+
+def _store_balance_payload(store_obj: Optional[Store]) -> dict:
+    if not store_obj:
+        return {
+            "store_name": "",
+            "wechat_balance": 0.0,
+            "alipay_balance": 0.0,
+            "balance_version": 0,
+            "has_negative_balance": False,
+        }
+    wechat_balance = _round_money(getattr(store_obj, "wechat_balance", 0.0))
+    alipay_balance = _round_money(getattr(store_obj, "alipay_balance", 0.0))
+    updated_at = getattr(store_obj, "balance_updated_at", None)
+    return {
+        "store_name": store_obj.name,
+        "wechat_balance": wechat_balance,
+        "alipay_balance": alipay_balance,
+        "balance_version": int(getattr(store_obj, "balance_version", 0) or 0),
+        "has_negative_balance": wechat_balance < 0 or alipay_balance < 0,
+        "updated_at": updated_at.strftime("%Y-%m-%d %H:%M:%S") if updated_at else "",
+        "updated_by": getattr(store_obj, "balance_updated_by", None) or "",
+    }
+
+
+def _apply_store_balance_delta(
+        session: Session,
+        store_name: str,
+        *,
+        wechat_delta: float = 0.0,
+        alipay_delta: float = 0.0,
+        operator_name: str = "",
+) -> None:
+    store_name = _normalize_text(store_name)
+    wechat_delta = _round_money(wechat_delta)
+    alipay_delta = _round_money(alipay_delta)
+    if not store_name or (wechat_delta == 0 and alipay_delta == 0):
+        return
+
+    result = session.execute(
+        text("""
+            UPDATE store
+            SET wechat_balance = ROUND(COALESCE(wechat_balance, 0) + :wechat_delta, 2),
+                alipay_balance = ROUND(COALESCE(alipay_balance, 0) + :alipay_delta, 2),
+                balance_version = COALESCE(balance_version, 0) + 1,
+                balance_updated_at = :updated_at,
+                balance_updated_by = :updated_by
+            WHERE name = :store_name
+        """),
+        {
+            "wechat_delta": wechat_delta,
+            "alipay_delta": alipay_delta,
+            "updated_at": datetime.now(),
+            "updated_by": _normalize_text(operator_name) or "系统",
+            "store_name": store_name,
+        },
+    )
+    if result.rowcount != 1:
+        raise ValueError(f"门店不存在，无法更新余额：{store_name}")
+
+
+def _game_store_balance_targets(
+        session: Session,
+        game: GameRecord,
+        force_inactive: bool = False,
+) -> tuple:
+    if force_inactive or game.status != "formed":
+        return 0.0, 0.0, 0.0
+
+    source = _normalize_text(game.record_source) or FORMED_SOURCE_NORMAL
+    is_system_receipt = (
+        source == FORMED_SOURCE_OVERFLOW
+        or _normalize_text(game.payment_method) == "代客收款"
+    )
+    if is_system_receipt:
+        breakdown = _load_single_payment_breakdown(session, game)
+        wechat_amount = _round_money(
+            breakdown.get(PAYMENT_TYPE_ENTERPRISE_WECHAT, 0.0)
+        )
+        alipay_amount = _round_money(
+            breakdown.get(PAYMENT_TYPE_ALIPAY, 0.0)
+        )
+    else:
+        wechat_amount = 0.0
+        alipay_amount = 0.0
+    overflow_expense = (
+        _round_money(game.room_fee)
+        if source == FORMED_SOURCE_OVERFLOW
+        else 0.0
+    )
+    return wechat_amount, alipay_amount, overflow_expense
+
+
+def _sync_game_store_balance(
+        session: Session,
+        game: GameRecord,
+        *,
+        operator_name: str,
+        force_inactive: bool = False,
+) -> None:
+    target_wechat, target_alipay, target_expense = _game_store_balance_targets(
+        session,
+        game,
+        force_inactive=force_inactive,
+    )
+    initialized = bool(getattr(game, "balance_accounting_initialized", False))
+    previous_store = _normalize_text(
+        getattr(game, "balance_accounted_store_name", None)
+    ) or _normalize_text(game.store_name)
+    target_store = _normalize_text(game.store_name)
+
+    previous_wechat = _round_money(
+        getattr(game, "balance_accounted_wechat", 0.0) if initialized else 0.0
+    )
+    previous_alipay = _round_money(
+        getattr(game, "balance_accounted_alipay", 0.0) if initialized else 0.0
+    )
+    previous_expense = _round_money(
+        getattr(game, "balance_accounted_overflow_expense", 0.0) if initialized else 0.0
+    )
+
+    previous_wechat_net = _round_money(previous_wechat - previous_expense)
+    target_wechat_net = _round_money(target_wechat - target_expense)
+
+    if previous_store and previous_store != target_store:
+        _apply_store_balance_delta(
+            session,
+            previous_store,
+            wechat_delta=-previous_wechat_net,
+            alipay_delta=-previous_alipay,
+            operator_name=operator_name,
+        )
+        _apply_store_balance_delta(
+            session,
+            target_store,
+            wechat_delta=target_wechat_net,
+            alipay_delta=target_alipay,
+            operator_name=operator_name,
+        )
+    else:
+        _apply_store_balance_delta(
+            session,
+            target_store,
+            wechat_delta=_round_money(target_wechat_net - previous_wechat_net),
+            alipay_delta=_round_money(target_alipay - previous_alipay),
+            operator_name=operator_name,
+        )
+
+    game.balance_accounting_initialized = True
+    game.balance_accounted_store_name = target_store
+    game.balance_accounted_wechat = target_wechat
+    game.balance_accounted_alipay = target_alipay
+    game.balance_accounted_overflow_expense = target_expense
+    session.add(game)
+
+
+def _normalize_balance_account(value: Optional[str]) -> str:
+    value = _normalize_text(value).lower()
+    if value in {"wechat", "微信"}:
+        return STORE_BALANCE_ACCOUNT_WECHAT
+    if value in {"alipay", "支付宝"}:
+        return STORE_BALANCE_ACCOUNT_ALIPAY
+    return ""
+
+
+def _sync_maintenance_store_balance(
+        session: Session,
+        record: MaintenanceRecord,
+        *,
+        operator_name: str,
+        force_inactive: bool = False,
+) -> None:
+    target_store = _normalize_text(record.store_name)
+    target_account = _normalize_balance_account(record.payment_account)
+    target_amount = 0.0 if (force_inactive or record.is_deleted) else _round_money(record.amount)
+
+    initialized = bool(getattr(record, "balance_accounting_initialized", False))
+    previous_store = _normalize_text(
+        getattr(record, "balance_accounted_store_name", None)
+    ) or target_store
+    previous_account = _normalize_balance_account(
+        getattr(record, "balance_accounted_account", None)
+    )
+    previous_amount = _round_money(
+        getattr(record, "balance_accounted_amount", 0.0) if initialized else 0.0
+    )
+
+    # 旧记录原先没有微信/支付宝账户，首次编辑只建立新基准，不回算历史支出。
+    if initialized and not previous_account:
+        record.balance_accounted_store_name = target_store
+        record.balance_accounted_account = target_account or "legacy"
+        record.balance_accounted_amount = target_amount
+        session.add(record)
+        return
+
+    def apply_expense(store_name: str, account: str, expense_delta: float) -> None:
+        if account == STORE_BALANCE_ACCOUNT_WECHAT:
+            _apply_store_balance_delta(
+                session,
+                store_name,
+                wechat_delta=-expense_delta,
+                operator_name=operator_name,
+            )
+        elif account == STORE_BALANCE_ACCOUNT_ALIPAY:
+            _apply_store_balance_delta(
+                session,
+                store_name,
+                alipay_delta=-expense_delta,
+                operator_name=operator_name,
+            )
+
+    if previous_store != target_store or previous_account != target_account:
+        apply_expense(previous_store, previous_account, -previous_amount)
+        apply_expense(target_store, target_account, target_amount)
+    else:
+        apply_expense(target_store, target_account, _round_money(target_amount - previous_amount))
+
+    record.balance_accounting_initialized = True
+    record.balance_accounted_store_name = target_store
+    record.balance_accounted_account = target_account
+    record.balance_accounted_amount = target_amount
+    session.add(record)
 
 EXPANDED_PAYMENT_TYPES = (
     PAYMENT_TYPE_ENTERPRISE_WECHAT,
@@ -19829,6 +20076,8 @@ async def update_game_status(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
+    operator_name = user.display_name
+    _begin_immediate_write(session)
     game = session.get(GameRecord, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
@@ -19942,6 +20191,11 @@ async def update_game_status(
 
         session.add(game)
         session.flush()
+        _sync_game_store_balance(
+            session,
+            game,
+            operator_name=operator_name,
+        )
         sync_formed_game_note_to_handover(
             session=session,
             game=game,
@@ -19973,6 +20227,11 @@ async def update_game_status(
 
         session.add(game)
         session.flush()
+        _sync_game_store_balance(
+            session,
+            game,
+            operator_name=operator_name,
+        )
         sync_formed_game_note_to_handover(
             session=session,
             game=game,
@@ -20036,6 +20295,12 @@ async def update_game_status(
         for row in pull_rows:
             session.delete(row)
         delete_game_smoke_setting(session, game.id)
+        _sync_game_store_balance(
+            session,
+            game,
+            operator_name=operator_name,
+            force_inactive=True,
+        )
         session.delete(game)
         session.flush()
         sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot)
@@ -20281,6 +20546,8 @@ async def update_payment(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
+    operator_name = user.display_name
+    _begin_immediate_write(session)
     game = session.get(GameRecord, game_id)
     if not game:
         raise HTTPException(status_code=404)
@@ -20377,9 +20644,14 @@ async def update_payment(
     game.wechat_pay = wechat_pay
     game.Alipay = Alipay
     game.updated_at = datetime.now()
-    game.updated_by = user.display_name
+    game.updated_by = operator_name
     session.add(game)
     _clear_expanded_payment_items(session, game)
+    _sync_game_store_balance(
+        session,
+        game,
+        operator_name=operator_name,
+    )
 
     if not was_paid and new_is_payAll:
         print(f"检测到牌局 #{game.serial_number} 完成结算，开始同步顾客到店与转化数据...")
@@ -20410,12 +20682,14 @@ async def update_payment(
             session.add(pf)
 
     session.commit()
+    current_store_balance = _store_balance_payload(get_store_by_name(session, store_name))
 
     if _is_ajax_request(request):
         return JSONResponse({
             "ok": True,
             "game_id": game.id,
-            "message": "结算已保存"
+            "message": "结算已保存",
+            "store_balance": current_store_balance,
         })
 
     return RedirectResponse(
@@ -20431,6 +20705,87 @@ async def update_payment(
         ),
         status_code=303
     )
+
+
+@app.get("/api/store-balance")
+async def get_store_balance(
+        store: str,
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user),
+):
+    if not user:
+        return JSONResponse({"ok": False, "message": "请先登录"}, status_code=401)
+    store_obj = get_store_by_name(session, store)
+    if not store_obj:
+        return JSONResponse({"ok": False, "message": "门店不存在"}, status_code=404)
+    return JSONResponse({
+        "ok": True,
+        "store_balance": _store_balance_payload(store_obj),
+        "can_adjust": _can_adjust_store_balance(user),
+    })
+
+
+@app.post("/formed-games/store-balance/adjust")
+async def adjust_store_balance(
+        store_name: str = Form(...),
+        account: str = Form(...),
+        amount: float = Form(...),
+        expected_version: int = Form(...),
+        session: Session = Depends(get_session),
+        user: Optional[User] = Depends(get_current_user),
+):
+    if not user:
+        return JSONResponse({"ok": False, "message": "请先登录"}, status_code=401)
+    if not _can_adjust_store_balance(user):
+        return JSONResponse(
+            {"ok": False, "message": "只有管理员或后勤账号可以调整余额"},
+            status_code=403,
+        )
+
+    account = _normalize_balance_account(account)
+    if account not in STORE_BALANCE_ACCOUNTS:
+        return JSONResponse({"ok": False, "message": "账户类型无效"}, status_code=400)
+    if not math.isfinite(amount):
+        return JSONResponse({"ok": False, "message": "余额必须是有效数字"}, status_code=400)
+
+    operator_name = user.display_name
+    _begin_immediate_write(session)
+    store_obj = get_store_by_name(session, store_name)
+    if not store_obj:
+        session.rollback()
+        return JSONResponse({"ok": False, "message": "门店不存在"}, status_code=404)
+
+    current_version = int(getattr(store_obj, "balance_version", 0) or 0)
+    if current_version != expected_version:
+        payload = _store_balance_payload(store_obj)
+        session.rollback()
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": "余额已被其他操作更新，请按最新余额重新确认",
+                "store_balance": payload,
+            },
+            status_code=409,
+        )
+
+    if account == STORE_BALANCE_ACCOUNT_WECHAT:
+        store_obj.wechat_balance = _round_money(amount)
+    else:
+        store_obj.alipay_balance = _round_money(amount)
+    store_obj.balance_version = current_version + 1
+    store_obj.balance_updated_at = datetime.now()
+    store_obj.balance_updated_by = operator_name
+    session.add(store_obj)
+    session.commit()
+    session.refresh(store_obj)
+
+    payload = _store_balance_payload(store_obj)
+    warning = "；当前存在负余额，请及时核对" if payload["has_negative_balance"] else ""
+    return JSONResponse({
+        "ok": True,
+        "message": f"当前余额已调整为 ¥{_round_money(amount):.2f}{warning}",
+        "store_balance": payload,
+    })
 
 
 # === 已组齐牌局页面接口 ===
@@ -20470,6 +20825,7 @@ async def formed_games(
     store_list = [s.name for s in store_objs if s.is_active]
 
     store = resolve_store_from_request(request, session, store)
+    current_store_balance = _store_balance_payload(get_store_by_name(session, store))
 
     current_store_rooms = get_active_room_list_by_store(session, store)
     current_store_room_prices = get_active_room_price_map_by_store(session, store)
@@ -20652,6 +21008,8 @@ async def formed_games(
         "uncollected_amount": uncollected_amount,
         "wechat_collection_amount": wechat_collection_amount,
         "alipay_collection_amount": alipay_collection_amount,
+        "current_store_balance": current_store_balance,
+        "can_adjust_store_balance": _can_adjust_store_balance(user),
         "payment_breakdowns": page_payment_breakdowns,
         "normal_formed_order_count": normal_formed_order_count,
         "normal_earned_difference_total": normal_earned_difference_total,
@@ -21270,6 +21628,8 @@ async def update_self_arrival_game(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
+    operator_name = user.display_name
+    _begin_immediate_write(session)
     game = session.get(GameRecord, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="订单不存在")
@@ -21614,10 +21974,15 @@ async def update_self_arrival_game(
     game.record_source = FORMED_SOURCE_SELF_ARRIVAL
 
     game.updated_at = datetime.now()
-    game.updated_by = user.display_name
+    game.updated_by = operator_name
 
     session.add(game)
     session.flush()
+    _sync_game_store_balance(
+        session,
+        game,
+        operator_name=operator_name,
+    )
 
     sync_formed_game_note_to_handover(
         session=session,
@@ -21679,6 +22044,9 @@ async def delete_self_arrival_game(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
+    operator_name = user.display_name
+    user_role = user.role
+    _begin_immediate_write(session)
     game = session.get(GameRecord, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="订单不存在")
@@ -21698,8 +22066,8 @@ async def delete_self_arrival_game(
             status_code=303
         )
 
-    is_admin = (user.role == "admin")
-    is_owner = (game.who_did == user.display_name)
+    is_admin = (user_role == "admin")
+    is_owner = (game.who_did == operator_name)
 
     if not (is_admin or is_owner):
         return RedirectResponse(
@@ -21722,6 +22090,12 @@ async def delete_self_arrival_game(
     for row in pull_rows:
         session.delete(row)
     delete_game_smoke_setting(session, game.id)
+    _sync_game_store_balance(
+        session,
+        game,
+        operator_name=operator_name,
+        force_inactive=True,
+    )
     session.delete(game)
     _sync_self_arrival_customers_for_store(session, store)
     session.commit()
@@ -21779,6 +22153,8 @@ async def add_overflow_game(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
+    operator_name = user.display_name
+    _begin_immediate_write(session)
     store_obj = get_store_by_name(session, store_name)
     if not store_obj:
         return RedirectResponse(
@@ -21957,7 +22333,7 @@ async def add_overflow_game(
 
         status="formed",
         record_source=FORMED_SOURCE_OVERFLOW,
-        who_did=user.display_name,
+        who_did=operator_name,
 
         is_payAll=False,
         wechat_pay=0.0,
@@ -21965,11 +22341,16 @@ async def add_overflow_game(
 
         created_at=now,
         updated_at=now,
-        updated_by=user.display_name,
+        updated_by=operator_name,
     )
 
     session.add(new_game)
     session.flush()
+    _sync_game_store_balance(
+        session,
+        new_game,
+        operator_name=operator_name,
+    )
 
     # 溢出单参与人备注也联动待办
     sync_formed_game_note_to_handover(
@@ -22053,6 +22434,8 @@ async def update_overflow_game(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
+    operator_name = user.display_name
+    _begin_immediate_write(session)
     game = session.get(GameRecord, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="订单不存在")
@@ -22304,10 +22687,15 @@ async def update_overflow_game(
     game.record_source = FORMED_SOURCE_OVERFLOW
 
     game.updated_at = datetime.now()
-    game.updated_by = user.display_name
+    game.updated_by = operator_name
 
     session.add(game)
     session.flush()
+    _sync_game_store_balance(
+        session,
+        game,
+        operator_name=operator_name,
+    )
 
     sync_formed_game_note_to_handover(
         session=session,
@@ -22372,6 +22760,9 @@ async def delete_overflow_game(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
+    operator_name = user.display_name
+    user_role = user.role
+    _begin_immediate_write(session)
     game = session.get(GameRecord, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="订单不存在")
@@ -22394,8 +22785,8 @@ async def delete_overflow_game(
     old_play_type_snapshot = _game_snapshot_for_play_type_stats(game)
     old_recommendation_time_snapshot = _game_recommendation_time_snapshot(session, game)
 
-    is_admin = (user.role == "admin")
-    is_owner = (game.who_did == user.display_name)
+    is_admin = (user_role == "admin")
+    is_owner = (game.who_did == operator_name)
 
     if not (is_admin or is_owner):
         return RedirectResponse(
@@ -22418,6 +22809,12 @@ async def delete_overflow_game(
     for row in pull_rows:
         session.delete(row)
     delete_game_smoke_setting(session, game.id)
+    _sync_game_store_balance(
+        session,
+        game,
+        operator_name=operator_name,
+        force_inactive=True,
+    )
     session.delete(game)
     session.flush()
     sync_customer_play_type_stats_for_changed_games(session, old_play_type_snapshot)
@@ -22858,6 +23255,8 @@ async def update_formed_game(
             )
         return RedirectResponse(url="/login", status_code=303)
 
+    operator_name = user.display_name
+    _begin_immediate_write(session)
     game = session.get(GameRecord, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
@@ -23212,10 +23611,15 @@ async def update_formed_game(
     game.table_note = final_table_note
 
     game.updated_at = datetime.now()
-    game.updated_by = user.display_name
+    game.updated_by = operator_name
 
     session.add(game)
     session.flush()
+    _sync_game_store_balance(
+        session,
+        game,
+        operator_name=operator_name,
+    )
 
     _ensure_game_players_in_store_customer_pool(
         session=session,
@@ -28066,6 +28470,15 @@ async def add_maintenance_record(
     if not user:
         return RedirectResponse(url="/login?error=请先登录", status_code=303)
 
+    operator_name = user.display_name
+    payment_account = _normalize_balance_account(payment_account)
+    if payment_account not in STORE_BALANCE_ACCOUNTS:
+        return RedirectResponse(
+            url=f"/maintenance-records?store={store_name}&year={record_date.year}&month={record_date.month}&error=请选择微信或支付宝支出账户",
+            status_code=303,
+        )
+    _begin_immediate_write(session)
+
     # 校验金额
     if amount <= 0:
         return RedirectResponse(
@@ -28085,16 +28498,22 @@ async def add_maintenance_record(
         room_name="",
         record_date=record_date,
         customer_id=customer_id,
-        operator_name=user.display_name,
+        operator_name=operator_name,
         gift_name=gift_name.strip(),
         amount=amount,
-        payment_account=(payment_account or "").strip(),
+        payment_account=payment_account,
         reason=(reason or "").strip(),
         is_deleted=False,
         created_at=datetime.now(),
         updated_at=datetime.now()
     )
     session.add(new_record)
+    session.flush()
+    _sync_maintenance_store_balance(
+        session,
+        new_record,
+        operator_name=operator_name,
+    )
     session.commit()
 
     return RedirectResponse(
@@ -28129,6 +28548,7 @@ async def get_maintenance_record_detail(
         "customer_wechat": cust.wechat_id,
         "gift_name": rec.gift_name,
         "amount": rec.amount,
+        "payment_account": _normalize_balance_account(rec.payment_account),
         "reason": rec.reason,
         "operator_name": rec.operator_name
     }
@@ -28149,6 +28569,8 @@ async def update_maintenance_record(
     if not user:
         return RedirectResponse(url="/login?error=请先登录", status_code=303)
 
+    operator_name = user.display_name
+    _begin_immediate_write(session)
     rec = session.get(MaintenanceRecord, record_id)
     if not rec or rec.is_deleted:
         raise HTTPException(status_code=404, detail="维护记录不存在")
@@ -28165,11 +28587,22 @@ async def update_maintenance_record(
     rec.record_date = record_date
     rec.gift_name = gift_name.strip()
     rec.amount = amount
-    rec.payment_account = (payment_account or "").strip()
+    normalized_payment_account = _normalize_balance_account(payment_account)
+    if normalized_payment_account not in STORE_BALANCE_ACCOUNTS:
+        return RedirectResponse(
+            url=f"/maintenance-records?store={rec.store_name}&year={rec.record_date.year}&month={rec.record_date.month}&error=请选择微信或支付宝支出账户",
+            status_code=303,
+        )
+    rec.payment_account = normalized_payment_account
     rec.reason = (reason or "").strip()
     rec.updated_at = datetime.now()
 
     session.add(rec)
+    _sync_maintenance_store_balance(
+        session,
+        rec,
+        operator_name=operator_name,
+    )
     session.commit()
 
     return RedirectResponse(
@@ -28190,12 +28623,20 @@ async def delete_maintenance_record(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
+    operator_name = user.display_name
+    _begin_immediate_write(session)
     rec = session.get(MaintenanceRecord, record_id)
     if rec and not rec.is_deleted:
         rec.is_deleted = True
         rec.deleted_at = datetime.now()
         rec.updated_at = datetime.now()
         session.add(rec)
+        _sync_maintenance_store_balance(
+            session,
+            rec,
+            operator_name=operator_name,
+            force_inactive=True,
+        )
         session.commit()
 
     return RedirectResponse(

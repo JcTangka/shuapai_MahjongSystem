@@ -296,6 +296,15 @@
                 </div>
 
                 <div class="col-md-6">
+                  <label class="form-label text-muted small">支出账户</label>
+                  <select class="form-select" name="payment_account" required>
+                    <option value="wechat" selected>当前门店微信账户</option>
+                    <option value="alipay">当前门店支付宝账户</option>
+                  </select>
+                  <div class="form-text">余额不足时允许记为负数，并在已组齐区提示。</div>
+                </div>
+
+                <div class="col-md-6">
                   <label class="form-label text-muted small">赠送理由</label>
                   <input type="text" class="form-control" name="reason">
                 </div>
@@ -365,6 +374,14 @@
                 <div class="col-md-3">
                   <label class="form-label text-muted small">金额</label>
                   <input type="number" step="0.01" min="0.01" class="form-control text-success fw-bold" name="amount" id="detail_amount" required>
+                </div>
+
+                <div class="col-md-3">
+                  <label class="form-label text-muted small">支出账户</label>
+                  <select class="form-select" name="payment_account" id="detail_payment_account" required>
+                    <option value="wechat">当前门店微信账户</option>
+                    <option value="alipay">当前门店支付宝账户</option>
+                  </select>
                 </div>
 
                 <div class="col-md-6">
@@ -497,6 +514,7 @@
     document.getElementById("detail_operator_name").value = data.operator_name;
     document.getElementById("detail_gift_name").value = data.gift_name;
     document.getElementById("detail_amount").value = data.amount;
+    document.getElementById("detail_payment_account").value = data.payment_account || "wechat";
     document.getElementById("detail_reason").value = data.reason || "";
 
     document.getElementById("detailForm").action = `/maintenance-record/${recordId}/update`;

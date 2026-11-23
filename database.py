@@ -2,7 +2,7 @@ from sqlmodel import func,SQLModel, Field, create_engine, Session, select
 from datetime import datetime, date, time, timedelta
 from typing import Optional,Dict, List, Tuple, Any
 import calendar
-from sqlalchemy import UniqueConstraint, delete, text
+from sqlalchemy import UniqueConstraint, delete, event, text
 
 
 # === 数据库模型定义 ===
@@ -102,6 +102,14 @@ class GameRecord(SQLModel, table=True):
     wechat_pay: float = Field(default=0.0)  # 微信收款
     Alipay: float = Field(default=0.0)  # 支付宝收款
 
+    # 门店账户余额的内部计账基准（不是余额流水）。
+    # 保存“上次已经计入门店余额”的数值，用于编辑、重试和并发提交时只计算差额。
+    balance_accounting_initialized: bool = Field(default=False, index=True)
+    balance_accounted_store_name: Optional[str] = Field(default=None, index=True)
+    balance_accounted_wechat: float = Field(default=0.0)
+    balance_accounted_alipay: float = Field(default=0.0)
+    balance_accounted_overflow_expense: float = Field(default=0.0)
+
     # =========================
     # 八、审计字段
     # =========================
@@ -160,6 +168,13 @@ class Store(SQLModel, table=True):
 
     # 备注
     remark: Optional[str] = None
+
+    # 当前门店实时账户余额。余额版本用于防止手工“设为某金额”覆盖并发收支。
+    wechat_balance: float = Field(default=0.0)
+    alipay_balance: float = Field(default=0.0)
+    balance_version: int = Field(default=0)
+    balance_updated_at: Optional[datetime] = None
+    balance_updated_by: Optional[str] = None
 
     # 时间字段
     created_at: datetime = Field(default_factory=datetime.now)
@@ -769,6 +784,12 @@ class MaintenanceRecord(SQLModel, table=True):
     amount: float = Field(default=0.0)  # 金额（业务上要求 > 0，建议在接口层校验）
     payment_account: str  # 付款账号（如：公司备用金、店长垫付）
     reason: str  # 赠送理由（如：生日、安抚输家）
+
+    # 门店余额内部计账基准；历史记录初始化时只建立基准，不回算余额。
+    balance_accounting_initialized: bool = Field(default=False, index=True)
+    balance_accounted_store_name: Optional[str] = Field(default=None, index=True)
+    balance_accounted_account: Optional[str] = Field(default=None, index=True)
+    balance_accounted_amount: float = Field(default=0.0)
 
     # 状态控制
     is_deleted: bool = Field(default=False, index=True)  # 软删除标记
@@ -1723,6 +1744,7 @@ def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
 
     migrate_store_room_settings_table()
+    migrate_store_balance_fields()
     migrate_user_password_reset_fields()
     migrate_customer_soft_delete_fields()
     migrate_customer_store_link_table()
@@ -1735,6 +1757,7 @@ def create_db_and_tables():
     migrate_new_customer_pull_record_table()
     migrate_game_record_table()
     migrate_game_payment_item_table()
+    migrate_balance_accounting_fields()
     migrate_customer_play_type_stat_table()
     migrate_recommendation_prerequisite_tables()
     migrate_formed_game_handover_link_table()
@@ -2954,6 +2977,161 @@ def migrate_brand_blacklist_entry_table():
         """))
 
         print("已创建 brandblacklistentry 表（品牌黑名单表）")
+
+def migrate_store_balance_fields():
+    """给旧门店表补充实时微信/支付宝余额及并发版本字段。"""
+    with engine.begin() as conn:
+        table_exists = conn.execute(text("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='store'
+        """)).fetchone()
+        if not table_exists:
+            return
+
+        col_names = {col[1] for col in conn.execute(text("PRAGMA table_info(store)")).fetchall()}
+        alter_columns = [
+            ("wechat_balance", "REAL NOT NULL DEFAULT 0"),
+            ("alipay_balance", "REAL NOT NULL DEFAULT 0"),
+            ("balance_version", "INTEGER NOT NULL DEFAULT 0"),
+            ("balance_updated_at", "DATETIME"),
+            ("balance_updated_by", "TEXT"),
+        ]
+        for col_name, col_type in alter_columns:
+            if col_name not in col_names:
+                conn.execute(text(f"ALTER TABLE store ADD COLUMN {col_name} {col_type}"))
+
+        conn.execute(text("""
+            UPDATE store
+            SET wechat_balance = COALESCE(wechat_balance, 0),
+                alipay_balance = COALESCE(alipay_balance, 0),
+                balance_version = COALESCE(balance_version, 0)
+        """))
+
+
+def migrate_balance_accounting_fields():
+    """
+    为牌局、人情维护补充差额计账基准。
+    首次迁移只把历史记录的现状记为基准，不把历史收支回算到初始为 0 的门店余额。
+    """
+    with engine.begin() as conn:
+        game_exists = conn.execute(text("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='gamerecord'
+        """)).fetchone()
+        if game_exists:
+            game_cols = {col[1] for col in conn.execute(text("PRAGMA table_info(gamerecord)")).fetchall()}
+            game_alter_columns = [
+                ("balance_accounting_initialized", "BOOLEAN NOT NULL DEFAULT 0"),
+                ("balance_accounted_store_name", "TEXT"),
+                ("balance_accounted_wechat", "REAL NOT NULL DEFAULT 0"),
+                ("balance_accounted_alipay", "REAL NOT NULL DEFAULT 0"),
+                ("balance_accounted_overflow_expense", "REAL NOT NULL DEFAULT 0"),
+            ]
+            for col_name, col_type in game_alter_columns:
+                if col_name not in game_cols:
+                    conn.execute(text(f"ALTER TABLE gamerecord ADD COLUMN {col_name} {col_type}"))
+
+            conn.execute(text("""
+                UPDATE gamerecord
+                SET balance_accounted_store_name = store_name,
+                    balance_accounted_wechat = CASE
+                        WHEN status = 'formed'
+                         AND (record_source = 'overflow' OR payment_method = '代客收款')
+                        THEN CASE
+                            WHEN store_name = '金牛万达店'
+                             AND COALESCE((
+                                SELECT SUM(ABS(COALESCE(gpi.amount, 0)))
+                                FROM gamepaymentitem gpi
+                                WHERE gpi.game_id = gamerecord.id
+                             ), 0) > 0
+                            THEN ROUND(COALESCE((
+                                SELECT SUM(COALESCE(gpi.amount, 0))
+                                FROM gamepaymentitem gpi
+                                WHERE gpi.game_id = gamerecord.id
+                                  AND gpi.payment_type IN (
+                                      'enterprise_wechat',
+                                      'normal_wechat_shuapai9725',
+                                      'enterprise_wechat_red_packet_shuapai888'
+                                  )
+                            ), 0), 2)
+                            ELSE ROUND(COALESCE(wechat_pay, 0), 2)
+                        END
+                        ELSE 0
+                    END,
+                    balance_accounted_alipay = CASE
+                        WHEN status = 'formed'
+                         AND (record_source = 'overflow' OR payment_method = '代客收款')
+                        THEN CASE
+                            WHEN store_name = '金牛万达店'
+                             AND COALESCE((
+                                SELECT SUM(ABS(COALESCE(gpi.amount, 0)))
+                                FROM gamepaymentitem gpi
+                                WHERE gpi.game_id = gamerecord.id
+                             ), 0) > 0
+                            THEN ROUND(COALESCE((
+                                SELECT SUM(COALESCE(gpi.amount, 0))
+                                FROM gamepaymentitem gpi
+                                WHERE gpi.game_id = gamerecord.id
+                                  AND gpi.payment_type = 'alipay'
+                            ), 0), 2)
+                            ELSE ROUND(COALESCE(Alipay, 0), 2)
+                        END
+                        ELSE 0
+                    END,
+                    balance_accounted_overflow_expense = CASE
+                        WHEN status = 'formed' AND record_source = 'overflow'
+                        THEN ROUND(COALESCE(room_fee, 0), 2)
+                        ELSE 0
+                    END,
+                    balance_accounting_initialized = 1
+                WHERE COALESCE(balance_accounting_initialized, 0) = 0
+            """))
+            conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_gamerecord_balance_accounting_initialized
+                ON gamerecord(balance_accounting_initialized)
+            """))
+            conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_gamerecord_balance_accounted_store_name
+                ON gamerecord(balance_accounted_store_name)
+            """))
+
+        maintenance_exists = conn.execute(text("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='maintenancerecord'
+        """)).fetchone()
+        if maintenance_exists:
+            maintenance_cols = {
+                col[1] for col in conn.execute(text("PRAGMA table_info(maintenancerecord)")).fetchall()
+            }
+            maintenance_alter_columns = [
+                ("balance_accounting_initialized", "BOOLEAN NOT NULL DEFAULT 0"),
+                ("balance_accounted_store_name", "TEXT"),
+                ("balance_accounted_account", "TEXT"),
+                ("balance_accounted_amount", "REAL NOT NULL DEFAULT 0"),
+            ]
+            for col_name, col_type in maintenance_alter_columns:
+                if col_name not in maintenance_cols:
+                    conn.execute(text(f"ALTER TABLE maintenancerecord ADD COLUMN {col_name} {col_type}"))
+
+            conn.execute(text("""
+                UPDATE maintenancerecord
+                SET balance_accounted_store_name = store_name,
+                    balance_accounted_account = CASE
+                        WHEN LOWER(TRIM(COALESCE(payment_account, ''))) IN ('wechat', '微信')
+                        THEN 'wechat'
+                        WHEN LOWER(TRIM(COALESCE(payment_account, ''))) IN ('alipay', '支付宝')
+                        THEN 'alipay'
+                        ELSE 'legacy'
+                    END,
+                    balance_accounted_amount = ROUND(COALESCE(amount, 0), 2),
+                    balance_accounting_initialized = 1
+                WHERE COALESCE(balance_accounting_initialized, 0) = 0
+            """))
+            conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_maintenancerecord_balance_accounting_initialized
+                ON maintenancerecord(balance_accounting_initialized)
+            """))
+
 
 def migrate_store_room_settings_table():
     """
@@ -4624,4 +4802,23 @@ def get_month_shifts_map(
 sqlite_file_name = "mahjong.db"
 sqlite_url = f"sqlite:///{sqlite_file_name}"
 
-engine = create_engine(sqlite_url)
+engine = create_engine(
+    sqlite_url,
+    connect_args={
+        "timeout": 15.0,
+        "check_same_thread": False,
+    },
+)
+
+
+@event.listens_for(engine, "connect")
+def _configure_sqlite_connection(dbapi_connection, _connection_record):
+    """
+    6-9 人并发下允许读写并行；写请求遇到短暂锁占用时等待，而不是立即失败。
+    SQLite 仍保持单写者，余额写事务另用 BEGIN IMMEDIATE 串行化。
+    """
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA busy_timeout=15000")
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.close()
