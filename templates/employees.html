@@ -469,6 +469,36 @@
         border: 1px solid #e2e8f0;
     }
 
+    .commission-tier-track {
+        height: 40px;
+        margin-top: 30px;
+        background: #f8fafc;
+        border-color: #cbd5e1;
+        box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.08);
+    }
+
+    .commission-tier-track .whiteboard-bar-fill {
+        z-index: 2;
+    }
+
+    .commission-tier-zone {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        z-index: 0;
+        border-right: 1px solid rgba(255, 255, 255, 0.72);
+        pointer-events: none;
+    }
+
+    .commission-tier-zone.tier-below-base,
+    .commission-tier-zone.tier-below_base { background: rgba(100, 116, 139, 0.10); }
+    .commission-tier-zone.tier-base { background: rgba(37, 99, 235, 0.13); }
+    .commission-tier-zone.tier-target { background: rgba(22, 163, 74, 0.13); }
+    .commission-tier-zone.tier-sprint { background: rgba(217, 119, 6, 0.14); }
+    .commission-tier-zone.tier-burst { background: rgba(220, 38, 38, 0.13); }
+    .commission-tier-zone.tier-big-result,
+    .commission-tier-zone.tier-big_result { background: rgba(124, 58, 237, 0.14); }
+
     .whiteboard-bar-fill {
         position: absolute;
         left: 0;
@@ -703,6 +733,155 @@
     .whiteboard-node-label.tier-burst { color: #b91c1c; }
     .whiteboard-node-label.tier-big-result,
     .whiteboard-node-label.tier-big_result { color: #6d28d9; }
+
+    .commission-tier-track .whiteboard-node-line {
+        top: -10px;
+        bottom: -10px;
+        opacity: 0.72;
+    }
+
+    .commission-tier-track .whiteboard-node-line.is-future {
+        opacity: 0.38;
+    }
+
+    .commission-tier-track .whiteboard-node-line.is-next {
+        width: 3px;
+        opacity: 1;
+        box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.07);
+    }
+
+    .commission-tier-track .whiteboard-node-label {
+        top: -34px;
+        min-width: 38px;
+        padding: 3px 4px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1px;
+        border: 1px solid currentColor;
+        border-radius: 8px;
+        background: #fff;
+        box-shadow: 0 2px 6px rgba(15, 23, 42, 0.10);
+        line-height: 1;
+    }
+
+    .commission-tier-track .whiteboard-node-label.is-future {
+        opacity: 0.52;
+        box-shadow: none;
+    }
+
+    .commission-tier-track .whiteboard-node-label.is-next {
+        opacity: 1;
+        box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.08), 0 3px 8px rgba(15, 23, 42, 0.14);
+    }
+
+    .commission-node-name {
+        font-size: 0.52rem;
+        font-weight: 800;
+    }
+
+    .commission-node-value {
+        font-size: 0.68rem;
+        font-weight: 900;
+    }
+
+    .commission-current-marker {
+        position: absolute;
+        top: 50%;
+        width: 0;
+        height: 0;
+        z-index: 7;
+        pointer-events: none;
+    }
+
+    .commission-current-marker::before {
+        content: "";
+        position: absolute;
+        left: -1px;
+        top: -25px;
+        width: 3px;
+        height: 50px;
+        border-radius: 999px;
+        background: #0f172a;
+        box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85);
+    }
+
+    .commission-current-marker-label {
+        position: absolute;
+        left: 0;
+        top: 0;
+        transform: translate(-50%, -50%);
+        padding: 4px 8px;
+        border-radius: 999px;
+        color: #fff;
+        background: #0f172a;
+        font-size: 0.68rem;
+        font-weight: 900;
+        white-space: nowrap;
+        box-shadow: 0 3px 8px rgba(15, 23, 42, 0.24);
+    }
+
+    .commission-current-marker.marker-near-start .commission-current-marker-label {
+        transform: translate(5px, -50%);
+    }
+
+    .commission-current-marker.marker-near-end .commission-current-marker-label {
+        transform: translate(calc(-100% - 5px), -50%);
+    }
+
+    .commission-gap-chip {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-top: 5px;
+        padding: 3px 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 999px;
+        color: #334155;
+        background: #f8fafc;
+        font-size: 0.68rem;
+        font-weight: 800;
+        white-space: nowrap;
+    }
+
+    .commission-gap-chip.tier-base { color: #1d4ed8; background: #eff6ff; border-color: #bfdbfe; }
+    .commission-gap-chip.tier-target { color: #15803d; background: #f0fdf4; border-color: #bbf7d0; }
+    .commission-gap-chip.tier-sprint { color: #b45309; background: #fffbeb; border-color: #fde68a; }
+    .commission-gap-chip.tier-burst { color: #b91c1c; background: #fef2f2; border-color: #fecaca; }
+    .commission-gap-chip.tier-big-result,
+    .commission-gap-chip.tier-big_result,
+    .commission-gap-chip.tier-complete { color: #6d28d9; background: #f5f3ff; border-color: #ddd6fe; }
+
+    .commission-tier-summary {
+        display: flex;
+        align-items: stretch;
+        gap: 7px;
+        flex-wrap: wrap;
+    }
+
+    .commission-tier-chip {
+        display: inline-flex;
+        flex-direction: column;
+        min-width: 64px;
+        padding: 5px 8px;
+        border: 1px solid #e2e8f0;
+        border-left-width: 4px;
+        border-radius: 8px;
+        background: #fff;
+        line-height: 1.15;
+        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+    }
+
+    .commission-tier-chip-label { color: #64748b; font-size: 0.66rem; font-weight: 800; }
+    .commission-tier-chip-value { margin-top: 2px; color: #0f172a; font-size: 0.78rem; font-weight: 900; }
+    .commission-tier-chip.tier-below-base,
+    .commission-tier-chip.tier-below_base { border-left-color: #64748b; }
+    .commission-tier-chip.tier-base { border-left-color: #2563eb; }
+    .commission-tier-chip.tier-target { border-left-color: #16a34a; }
+    .commission-tier-chip.tier-sprint { border-left-color: #d97706; }
+    .commission-tier-chip.tier-burst { border-left-color: #dc2626; }
+    .commission-tier-chip.tier-big-result,
+    .commission-tier-chip.tier-big_result { border-left-color: #7c3aed; }
 
     .whiteboard-tier-result {
         background: #7c3aed;
@@ -3382,7 +3561,16 @@
                     </div>
                 </div>
                 <div class="col-md-6">
-                    <div class="whiteboard-bar-track">
+                    <div class="whiteboard-bar-track commission-tier-track">
+                        {% if my_assessment_data.commission_nodes %}
+                        <div class="commission-tier-zone tier-below-base" aria-hidden="true"
+                             style="left: 0; width: {{ my_assessment_data.commission_nodes[0].percent }}%;"></div>
+                        {% for node in my_assessment_data.commission_nodes %}
+                        {% set zone_end = my_assessment_data.commission_nodes[loop.index].percent if not loop.last else 100 %}
+                        <div class="commission-tier-zone tier-{{ node.code }}" aria-hidden="true"
+                             style="left: {{ node.percent }}%; width: {{ zone_end - node.percent }}%;"></div>
+                        {% endfor %}
+                        {% endif %}
                         {% if my_assessment_data.eligible_private_order_count > 0 %}
                         <div class="whiteboard-bar-fill employee-order-segment employee-private-orders tier-{{ my_assessment_data.commission_tier_code }} {% if my_assessment_data.new_store_private_order_count == 0 and my_assessment_data.self_arrival_order_count == 0 %}employee-order-only-segment{% endif %}"
                              data-order-tooltip="阶梯有效私域：{{ my_assessment_data.eligible_private_order_count }} 单｜{{ my_assessment_data.commission_tier_label }}"
@@ -3402,14 +3590,30 @@
                              style="left: {{ my_assessment_data.private_bar_percent }}%; width: {{ my_assessment_data.self_arrival_bar_percent }}%;"></div>
                         {% endif %}
                         {% for node in my_assessment_data.commission_nodes %}
-                        <div class="whiteboard-node-line tier-{{ node.code }}" style="left: {{ node.percent }}%;" title="{{ node.label }} {{ node.value }} 单"></div>
-                        <div class="whiteboard-node-label tier-{{ node.code }}" style="left: {{ node.percent }}%;" title="{{ node.label }}">{{ node.value }}</div>
+                        <div class="whiteboard-node-line tier-{{ node.code }} {% if node.value <= my_assessment_data.eligible_private_order_count %}is-reached{% elif node.code == my_assessment_data.commission_next_tier_code %}is-next{% else %}is-future{% endif %}"
+                             style="left: {{ node.percent }}%;"
+                             title="{{ node.label }} {{ node.value }} 单"></div>
+                        <div class="whiteboard-node-label tier-{{ node.code }} {% if node.value <= my_assessment_data.eligible_private_order_count %}is-reached{% elif node.code == my_assessment_data.commission_next_tier_code %}is-next{% else %}is-future{% endif %}"
+                             style="left: {{ node.percent }}%;"
+                             title="{{ node.label }} {{ node.value }} 单">
+                            <span class="commission-node-name">{{ node.label }}</span>
+                            <span class="commission-node-value">{{ node.value }}</span>
+                        </div>
                         {% endfor %}
-                        <div class="whiteboard-bar-value">{{ my_assessment_data.order_count }} 单</div>
+                        <div class="commission-current-marker {% if my_assessment_data.eligible_private_bar_percent < 12 %}marker-near-start{% elif my_assessment_data.eligible_private_bar_percent > 88 %}marker-near-end{% endif %}"
+                             style="left: {{ my_assessment_data.eligible_private_bar_percent }}%;"
+                             title="当前阶梯有效私域 {{ my_assessment_data.eligible_private_order_count }} 单">
+                            <span class="commission-current-marker-label">阶梯 {{ my_assessment_data.eligible_private_order_count }} 单</span>
+                        </div>
                     </div>
                 </div>
                 <div class="col-md-3 text-md-end">
                     <span class="badge {{ my_assessment_data.commission_tier_badge_class }}">{{ my_assessment_data.commission_tier_label }}</span>
+                    {% if my_assessment_data.commission_next_tier_code %}
+                    <div><span class="commission-gap-chip tier-{{ my_assessment_data.commission_next_tier_code }}">距{{ my_assessment_data.commission_next_tier_label }}还差 {{ my_assessment_data.commission_orders_to_next_tier }} 单</span></div>
+                    {% else %}
+                    <div><span class="commission-gap-chip tier-complete">已达大结果档</span></div>
+                    {% endif %}
                     <div class="small fw-bold mt-1">预计单量提成 ¥{{ '%.2f'|format(my_assessment_data.commission_total) }}</div>
                     <div class="whiteboard-commission-formula mt-1">
                         <div>基础：{{ my_assessment_data.commission_base_order_count }} 单 × {{ '%.0f'|format(my_assessment_data.commission_base_unit_price) }} 元 = ¥{{ '%.2f'|format(my_assessment_data.commission_base_amount) }}</div>
@@ -3751,15 +3955,19 @@
                 <div class="small text-muted mt-1">
                     仅展示本月订单量大于 0 的员工。动态阶梯基准取 {{ whiteboard_data.commission_previous_month_start }} 至 {{ whiteboard_data.commission_previous_month_end }} 品牌有效私域组局 {{ whiteboard_data.commission_previous_private_order_count }} 单 ÷ 上月 {{ whiteboard_data.commission_previous_days_in_month }} 天 × 本月 {{ whiteboard_data.commission_days_in_month }} 天 ÷ 6，最后四舍五入；后续每档按上一档 × 105% 向上取整。员工总提成由两部分组成：全部订单统一计算一次 2 元/单基础提成；阶梯有效私域超过基准档后，基准档至当前单量之间的全部订单按最高已达档位追加 2 / 4 / 6 / 8 / 10 元/单。新门店保护期私域和自主到店不参与梯度追加；销冠仍按全部私域组局单量 ÷ 有效上班日数评选。
                 </div>
-                <div class="small text-muted mt-2 d-flex align-items-center gap-3 flex-wrap">
-                    <span class="whiteboard-order-legend">
-                        <span class="whiteboard-order-legend-dot tier-below-base"></span>未达基准
+                <div class="commission-tier-summary mt-3">
+                    <span class="commission-tier-chip tier-below-base">
+                        <span class="commission-tier-chip-label">未达基准</span>
+                        <span class="commission-tier-chip-value">&lt; {{ whiteboard_data.commission_thresholds.base }} 单</span>
                     </span>
                     {% for node in whiteboard_data.commission_nodes %}
-                    <span class="whiteboard-order-legend">
-                        <span class="whiteboard-order-legend-dot tier-{{ node.code }}"></span>{{ node.label }} {{ node.value }}
+                    <span class="commission-tier-chip tier-{{ node.code }}">
+                        <span class="commission-tier-chip-label">{{ node.label }}</span>
+                        <span class="commission-tier-chip-value">{{ node.value }} 单</span>
                     </span>
                     {% endfor %}
+                </div>
+                <div class="small text-muted mt-2 d-flex align-items-center gap-3 flex-wrap">
                     <span class="whiteboard-order-legend">
                         <span class="whiteboard-order-legend-dot new-store-orders"></span>新店保护期私域
                     </span>
@@ -3810,7 +4018,16 @@
                 </div>
 
                 <div class="col-md-6">
-                    <div class="whiteboard-bar-track">
+                    <div class="whiteboard-bar-track commission-tier-track">
+                        {% if whiteboard_data.commission_nodes %}
+                        <div class="commission-tier-zone tier-below-base" aria-hidden="true"
+                             style="left: 0; width: {{ whiteboard_data.commission_nodes[0].percent }}%;"></div>
+                        {% for node in whiteboard_data.commission_nodes %}
+                        {% set zone_end = whiteboard_data.commission_nodes[loop.index].percent if not loop.last else 100 %}
+                        <div class="commission-tier-zone tier-{{ node.code }}" aria-hidden="true"
+                             style="left: {{ node.percent }}%; width: {{ zone_end - node.percent }}%;"></div>
+                        {% endfor %}
+                        {% endif %}
                         {% if row.commission_eligible_private_order_count > 0 %}
                         <div class="whiteboard-bar-fill employee-order-segment employee-private-orders tier-{{ row.commission_tier_code }} {% if row.commission_new_store_private_order_count == 0 and row.self_arrival_order_count == 0 %}employee-order-only-segment{% endif %}"
                              data-order-tooltip="阶梯有效私域：{{ row.commission_eligible_private_order_count }} 单｜{{ row.commission_tier_label }}"
@@ -3834,16 +4051,21 @@
                         {% endif %}
 
                         {% for node in whiteboard_data.commission_nodes %}
-                        <div class="whiteboard-node-line tier-{{ node.code }}"
+                        <div class="whiteboard-node-line tier-{{ node.code }} {% if node.value <= row.commission_eligible_private_order_count %}is-reached{% elif node.code == row.commission_next_tier_code %}is-next{% else %}is-future{% endif %}"
                              style="left: {{ node.percent }}%;"
                              title="{{ node.label }} {{ node.value }} 单"></div>
-                        <div class="whiteboard-node-label tier-{{ node.code }}"
+                        <div class="whiteboard-node-label tier-{{ node.code }} {% if node.value <= row.commission_eligible_private_order_count %}is-reached{% elif node.code == row.commission_next_tier_code %}is-next{% else %}is-future{% endif %}"
                              style="left: {{ node.percent }}%;"
-                             title="{{ node.label }}">{{ node.value }}</div>
+                             title="{{ node.label }} {{ node.value }} 单">
+                            <span class="commission-node-name">{{ node.label }}</span>
+                            <span class="commission-node-value">{{ node.value }}</span>
+                        </div>
                         {% endfor %}
 
-                        <div class="whiteboard-bar-value">
-                            {{ row.order_count }} 单
+                        <div class="commission-current-marker {% if row.commission_eligible_private_bar_percent < 12 %}marker-near-start{% elif row.commission_eligible_private_bar_percent > 88 %}marker-near-end{% endif %}"
+                             style="left: {{ row.commission_eligible_private_bar_percent }}%;"
+                             title="当前阶梯有效私域 {{ row.commission_eligible_private_order_count }} 单">
+                            <span class="commission-current-marker-label">阶梯 {{ row.commission_eligible_private_order_count }} 单</span>
                         </div>
                     </div>
                 </div>
@@ -3873,6 +4095,11 @@
                         </div>
                         <div class="ms-auto text-end">
                             <span class="badge {{ row.commission_tier_badge_class }}">{{ row.commission_tier_label }}</span>
+                            {% if row.commission_next_tier_code %}
+                            <div><span class="commission-gap-chip tier-{{ row.commission_next_tier_code }}">距{{ row.commission_next_tier_label }}还差 {{ row.commission_orders_to_next_tier }} 单</span></div>
+                            {% else %}
+                            <div><span class="commission-gap-chip tier-complete">已达大结果档</span></div>
+                            {% endif %}
                             <div class="small fw-bold mt-1">单量提成 ¥{{ '%.2f'|format(row.commission_total) }}</div>
                             <div class="whiteboard-commission-formula mt-1">
                                 <div>基础：{{ row.commission_base_order_count }} 单 × {{ '%.0f'|format(row.commission_base_unit_price) }} 元 = ¥{{ '%.2f'|format(row.commission_base_amount) }}</div>

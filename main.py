@@ -2619,12 +2619,38 @@ def _order_commission_tier_status(eligible_private_order_count: int, thresholds:
     return {"code": "big_result", "label": "大结果档", "badge_class": "whiteboard-tier-result"}
 
 
+def _order_commission_next_target(eligible_private_order_count: int, thresholds: dict) -> dict:
+    count = int(eligible_private_order_count or 0)
+    for code, label in (
+        ("base", "基准档"),
+        ("target", "达标档"),
+        ("sprint", "冲刺档"),
+        ("burst", "爆单档"),
+        ("big_result", "大结果档"),
+    ):
+        value = int(thresholds[code])
+        if count < value:
+            return {
+                "code": code,
+                "label": label,
+                "value": value,
+                "gap": value - count,
+            }
+    return {
+        "code": "",
+        "label": "已达大结果档",
+        "value": int(thresholds["big_result"]),
+        "gap": 0,
+    }
+
+
 def _calculate_order_commission_breakdown(counts: dict, month_data: dict) -> dict:
     thresholds = month_data["thresholds"]
     eligible_count = int(counts.get("eligible_private_order_count") or 0)
     total_count = int(counts.get("total_order_count") or 0)
     base = thresholds["base"]
     tier_status = _order_commission_tier_status(eligible_count, thresholds)
+    next_target = _order_commission_next_target(eligible_count, thresholds)
     tier_code = tier_status["code"]
     tier_extra_unit_price = ORDER_COMMISSION_TIER_EXTRA_UNIT_PRICES.get(tier_code, 0.0)
     tier_extra_order_count = (
@@ -2665,6 +2691,10 @@ def _calculate_order_commission_breakdown(counts: dict, month_data: dict) -> dic
         "tier_code": tier_code,
         "tier_label": tier_status["label"],
         "tier_badge_class": tier_status["badge_class"],
+        "next_tier_code": next_target["code"],
+        "next_tier_label": next_target["label"],
+        "next_tier_value": next_target["value"],
+        "orders_to_next_tier": next_target["gap"],
         "thresholds": thresholds,
     }
     return result
@@ -4408,6 +4438,9 @@ def _build_employee_whiteboard_data(
             "commission_tier_code": order_commission_data["tier_code"],
             "commission_tier_label": order_commission_data["tier_label"],
             "commission_tier_badge_class": order_commission_data["tier_badge_class"],
+            "commission_next_tier_code": order_commission_data["next_tier_code"],
+            "commission_next_tier_label": order_commission_data["next_tier_label"],
+            "commission_orders_to_next_tier": order_commission_data["orders_to_next_tier"],
             "workday_count": workday_count,
             "candidate_workday_count": employee_candidate_workday_count_map.get(employee_name, 0),
             "low_private_workday_count": employee_low_private_workday_count_map.get(employee_name, 0),
@@ -4911,6 +4944,9 @@ def _build_my_assessment_data(
         "commission_tier_code": order_commission_data["tier_code"],
         "commission_tier_label": order_commission_data["tier_label"],
         "commission_tier_badge_class": order_commission_data["tier_badge_class"],
+        "commission_next_tier_code": order_commission_data["next_tier_code"],
+        "commission_next_tier_label": order_commission_data["next_tier_label"],
+        "commission_orders_to_next_tier": order_commission_data["orders_to_next_tier"],
         "commission_thresholds": commission_month_data["thresholds"],
         "commission_previous_month_start": commission_month_data["previous_month_start"],
         "commission_previous_month_end": commission_month_data["previous_month_end"],
