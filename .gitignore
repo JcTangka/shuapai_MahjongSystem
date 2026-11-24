@@ -1,5 +1,7 @@
 # Local database and backups
 *.db
+*.db-shm
+*.db-wal
 *.db.backup_*
 *.sqlite
 *.sqlite3
